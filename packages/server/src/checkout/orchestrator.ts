@@ -20,6 +20,7 @@ import {
   SimulatedMerchantAgent,
   type AgentPrompt,
   type AgentSession,
+  type AgentToolCall,
   type CheckoutAgent,
   type CheckoutLineItem,
 } from './agent.js';
@@ -89,6 +90,35 @@ export function hashQuote(input: {
     [...input.productIds].sort().join(','),
   ].join('|');
   return createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * Reduces a tool call to what an auditor needs and a breach cannot use.
+ *
+ * Selectors, URLs and the tool name are kept — they are the record of what the
+ * agent did. Typed values become a type and a length, so "the agent entered a
+ * 14-character value into #phone" survives and the phone number does not.
+ */
+export function redactToolCall(call: AgentToolCall): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(call.args)) {
+    if (key === 'value' || key === 'text' || key === 'password') {
+      args[key] = typeof value === 'string' ? `<redacted:${value.length}>` : '<redacted>';
+    } else if (typeof value === 'string') {
+      args[key] = value.slice(0, 256);
+    } else {
+      args[key] = value;
+    }
+  }
+
+  return {
+    tool: call.tool,
+    args,
+    at: call.at,
+    // The result can echo page content back, which is merchant-controlled text.
+    result: call.result.slice(0, 256),
+  };
 }
 
 export class CheckoutConflict extends Error {
@@ -730,6 +760,13 @@ export class CheckoutOrchestrator {
    * Every job writes an immutable audit record: the tool calls made, the final
    * screenshot, the quote shown and the authorization timestamp. Retained 90
    * days for dispute resolution, then deleted.
+   *
+   * What it does *not* write is the content the agent typed. A checkout agent
+   * fills in a name, a street address and a phone number; recording those
+   * verbatim, next to a user id, for ninety days, builds a store of personal
+   * data whose only purpose is to be breached. The dispute question an audit
+   * log has to answer is "what did the agent do", and field names plus value
+   * shapes answer it without keeping the values themselves.
    */
   private async writeAudit(runtime: JobRuntime, order: Order, phase: string): Promise<void> {
     const dir = join(env.auditDir, runtime.session.jobId);
@@ -743,7 +780,7 @@ export class CheckoutOrchestrator {
       writtenAt: new Date().toISOString(),
       quote: order.quote,
       authorization: order.authorization,
-      toolCalls: runtime.session.toolCalls,
+      toolCalls: runtime.session.toolCalls.map(redactToolCall),
       screenshots: runtime.session.screenshots,
     };
     // Append-only: one file per phase, never rewritten, so the record of what

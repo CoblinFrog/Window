@@ -1,8 +1,19 @@
 import express, { type Express } from 'express';
 import { ObjectId } from 'mongodb';
 import { ApiError, DEFAULT_RANKING_CONFIG, type RankingConfig } from '@window/shared';
+import { env } from '../config/env.js';
 import type { AppContext } from './context.js';
-import { authenticate, internalOnly, notFound, problemDetails, requestLogging, tracing } from './middleware.js';
+import {
+  authenticate,
+  cors,
+  internalOnly,
+  notFound,
+  problemDetails,
+  rejectPollutedBodies,
+  requestLogging,
+  securityHeaders,
+  tracing,
+} from './middleware.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { commerceRoutes } from './routes/commerce.js';
 import { eventRoutes } from './routes/events.js';
@@ -21,21 +32,20 @@ export function createApp(ctx: AppContext): Express {
   const app = express();
 
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  // An explicit hop count, not `true`. See `env.trustProxyHops`: with `true`,
+  // `req.ip` is whatever the caller wrote in `X-Forwarded-For`, and `req.ip` is
+  // the rate-limit key on the routes that hand out credentials.
+  app.set('trust proxy', env.trustProxyHops);
+
+  app.use(tracing());
+  app.use(securityHeaders());
+  app.use(cors(env.corsOrigins));
+  app.options(/.*/, (_req, res) => res.status(204).end());
+
   // A feed page is budgeted at 60 KB gzipped; nothing legitimate posts a megabyte.
   app.use(express.json({ limit: '256kb' }));
-  app.use(tracing());
+  app.use(rejectPollutedBodies());
   app.use(requestLogging());
-
-  app.use((_req, res, next) => {
-    // The web client is served from a different origin in development.
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'authorization,content-type,x-internal-token');
-    res.setHeader('access-control-allow-methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-    res.setHeader('access-control-expose-headers', 'x-trace-id,retry-after,x-ratelimit-remaining');
-    next();
-  });
-  app.options(/.*/, (_req, res) => res.status(204).end());
 
   // ---- Unauthenticated -----------------------------------------------------
   app.get('/health', async (_req, res) => {
@@ -53,7 +63,7 @@ export function createApp(ctx: AppContext): Express {
 
   // ---- Authenticated -------------------------------------------------------
   const guarded = express.Router();
-  guarded.use(authenticate(ctx.db.collections));
+  guarded.use(authenticate(ctx.db.collections, ctx.cache));
   guarded.use('/feed', feedRoutes(ctx));
   guarded.use('/events', eventRoutes(ctx));
   guarded.use(catalogRoutes(ctx));

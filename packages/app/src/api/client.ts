@@ -71,8 +71,20 @@ export class ApiRequestError extends Error {
 
 let authToken: string | null = null;
 
+/**
+ * Called with a 401 so the session layer can re-derive a token from the device
+ * secret. Tokens now expire, so this is the ordinary path on a returning
+ * device, not an error path — a user who has not opened the app in a month must
+ * not be shown a sign-in screen they never signed into.
+ */
+let reauthorize: (() => Promise<string | null>) | null = null;
+
 export function setAuthToken(token: string | null): void {
   authToken = token;
+}
+
+export function setReauthorizer(fn: (() => Promise<string | null>) | null): void {
+  reauthorize = fn;
 }
 
 export function getAuthToken(): string | null {
@@ -87,7 +99,7 @@ interface RequestOptions {
   anonymous?: boolean;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions = {}, retrying = false): Promise<T> {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
   if (!options.anonymous && authToken) headers.authorization = `Bearer ${authToken}`;
@@ -100,6 +112,15 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   });
 
   if (!response.ok) {
+    // An expired or revoked session is re-derived once from the device secret
+    // and the call is replayed. Exactly once: a second 401 on the retry means
+    // the identity is genuinely gone, and looping on it would be a hot loop
+    // against our own auth endpoint.
+    if (response.status === 401 && !retrying && !options.anonymous && reauthorize) {
+      const token = await reauthorize();
+      if (token) return request<T>(path, options, true);
+    }
+
     let problem: ProblemDetails | null = null;
     try {
       problem = (await response.json()) as ProblemDetails;
@@ -118,13 +139,52 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await response.json()) as T;
 }
 
+export interface DeviceBootstrap {
+  token: string;
+  /** Present only when a new identity was minted. Store it; it is never re-sent. */
+  deviceSecret?: string;
+  deviceUserId: string;
+  userId: string;
+  isAnonymous: boolean;
+  onboarded: boolean;
+}
+
 export const api = {
   // ---- Identity ----------------------------------------------------------
-  bootstrapDevice(deviceUserId: string) {
-    return request<{ token: string; userId: string; isAnonymous: boolean; onboarded: boolean }>(
-      '/v1/auth/device',
-      { method: 'POST', body: { deviceUserId }, anonymous: true },
-    );
+  /**
+   * Resumes an identity from the stored device secret, or mints a new one.
+   *
+   * Omitting the secret is the "new device" case. The server never adopts an
+   * identity from a value the client chose, so a secret it does not recognise
+   * yields a fresh empty profile rather than somebody else's account.
+   */
+  bootstrapDevice(deviceSecret: string | null) {
+    return request<DeviceBootstrap>('/v1/auth/device', {
+      method: 'POST',
+      body: deviceSecret ? { deviceSecret } : {},
+      anonymous: true,
+    });
+  },
+
+  /** Step one of an email claim: a code is sent to the address. */
+  startEmailClaim(email: string) {
+    return request<{ expiresAt: string }>('/v1/me/claim/email', {
+      method: 'POST',
+      body: { email },
+    });
+  },
+
+  /** Step two: the code proves ownership and the profile is claimed. */
+  claimWithEmailCode(email: string, code: string) {
+    return request<{ token: string }>('/v1/me/claim', {
+      method: 'POST',
+      body: { provider: 'email', email, token: code },
+    });
+  },
+
+  /** Invalidates every token issued for this identity, on every device. */
+  revokeSessions() {
+    return request<void>('/v1/me/sessions/revoke', { method: 'POST' });
   },
 
   // ---- Feed --------------------------------------------------------------
@@ -252,11 +312,18 @@ export const api = {
    * SSE stream URL for a checkout job. Polling at 2 s is the documented
    * fallback and the only path on native, which has no `EventSource`.
    *
-   * The token rides as a query parameter because `EventSource` cannot set an
-   * Authorization header. The server accepts it on this one path only.
+   * `EventSource` cannot set an Authorization header, so the URL carries its
+   * own credential — and a URL is the worst place in the system to put one: it
+   * reaches access logs, proxy logs and browser history. What it carries is
+   * therefore a ticket, not the session token: one job, one minute, one use,
+   * fetched over an authenticated POST immediately before the stream opens.
    */
-  jobStreamUrl(id: string): string {
+  async jobStreamUrl(id: string): Promise<string> {
     const base = `${API_BASE_URL}/v1/checkout/jobs/${id}/stream`;
-    return authToken ? `${base}?access_token=${encodeURIComponent(authToken)}` : base;
+    const { ticket } = await request<{ ticket: string; expiresAt: string }>(
+      `/v1/checkout/jobs/${id}/stream-ticket`,
+      { method: 'POST' },
+    );
+    return `${base}?ticket=${encodeURIComponent(ticket)}`;
   },
 };

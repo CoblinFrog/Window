@@ -15,6 +15,7 @@ import { mediaPipeline, type MediaPipeline } from '../media/pipeline.js';
 import { RankingService } from '../ranking/service.js';
 import { createVectorSearch } from '../vector/index.js';
 import type { VectorSearch } from '../vector/types.js';
+import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
 
 export interface AppContext {
   db: DatabaseHandle;
@@ -29,6 +30,10 @@ export interface AppContext {
   checkout: CheckoutOrchestrator;
   events: EventCollector;
   coupons: CouponStore;
+  /** Out-of-band delivery for email ownership challenges. */
+  mailer: Mailer;
+  /** ID-token verification for Apple and Google claims. */
+  oidc: OidcVerifier;
   config: RankingConfig;
   close(): Promise<void>;
 }
@@ -65,6 +70,8 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
   const coupons = new CouponStore(db.collections.coupons);
   const checkout = new CheckoutOrchestrator({ collections: db.collections, cache, coupons });
   const events = new EventCollector({ collections: db.collections, cache, config });
+  const mailer = createMailer();
+  const oidc = createOidcVerifier();
 
   logger.info('application context ready', {
     vectorBackend: vectors.kind,
@@ -85,6 +92,8 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     checkout,
     events,
     coupons,
+    mailer,
+    oidc,
     config,
     async close() {
       await cache.close();

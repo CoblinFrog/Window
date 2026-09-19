@@ -14,8 +14,17 @@ import {
 } from '@window/shared';
 import { env } from '../../config/env.js';
 import type { AppContext } from '../context.js';
-import { bootstrapDevice, rateLimit } from '../middleware.js';
-import { mintToken, requireAuthenticated } from '../auth.js';
+import { rateLimit } from '../middleware.js';
+import {
+  createDeviceUser,
+  isAnonymousUser,
+  mintToken,
+  requireAuthenticated,
+  resumeDeviceUser,
+  revokeSessions,
+} from '../auth.js';
+import { issueEmailChallenge, normalizeEmail, verifyEmailChallenge } from '../claims.js';
+import { objectIdSchema, opaqueSecretSchema } from '../validation.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
 
 export function profileRoutes(ctx: AppContext): Router {
@@ -208,8 +217,8 @@ export function profileRoutes(ctx: AppContext): Router {
 
   const suppressionSchema = z.object({
     kind: z.enum(['product', 'brand', 'seller']),
-    value: z.string().min(1),
-    productId: z.string().optional(),
+    value: z.string().min(1).max(128),
+    productId: objectIdSchema.optional(),
   });
 
   /**
@@ -227,16 +236,19 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!parsed.success) throw ApiError.validation('Invalid suppression request.');
       const { kind, value, productId } = parsed.data;
 
+      // Validated before construction, not after: `new ObjectId(garbage)` throws
+      // a BSONError the problem handler can only render as a 500, reporting a
+      // bad request as a server fault and logging a stack for every probe.
+      if (kind !== 'brand' && !objectIdSchema.safeParse(value).success) {
+        throw ApiError.validation(`${kind} suppressions require a valid id.`);
+      }
+
       const update =
         kind === 'brand'
           ? { $addToSet: { 'suppressions.brands': value } }
           : kind === 'seller'
             ? { $addToSet: { 'suppressions.sellers': new ObjectId(value) } }
             : { $addToSet: { 'suppressions.products': new ObjectId(value) } };
-
-      if ((kind === 'seller' || kind === 'product') && !ObjectId.isValid(value)) {
-        throw ApiError.validation(`${kind} suppressions require a valid id.`);
-      }
 
       await collections.users.updateOne({ _id: user._id }, update as never);
 
@@ -261,10 +273,41 @@ export function profileRoutes(ctx: AppContext): Router {
     }
   });
 
+  const challengeSchema = z.object({ email: z.string().email().max(254) });
+
+  /**
+   * Step one of an email claim: send a code to the address and prove nothing yet.
+   *
+   * The response is identical whether or not the address is already attached to
+   * another account. Telling the caller "that email is taken" turns this into an
+   * oracle for which of a list of addresses has a Window account, which is a
+   * privacy leak paid for with no security benefit.
+   */
+  router.post('/me/claim/email', rateLimit(ctx.cache, 'claim'), async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+
+      const parsed = challengeSchema.safeParse(req.body);
+      if (!parsed.success) throw ApiError.validation('A valid email address is required.');
+
+      const { expiresAt } = await issueEmailChallenge(
+        ctx.cache,
+        ctx.mailer,
+        user._id.toHexString(),
+        parsed.data.email,
+      );
+      res.status(202).json({ expiresAt: expiresAt.toISOString() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   const claimSchema = z.object({
     provider: z.enum(['email', 'apple', 'google']),
-    email: z.string().email().optional(),
-    token: z.string().min(1),
+    email: z.string().email().max(254).optional(),
+    /** The emailed code for `email`, or the provider ID token for the rest. */
+    token: z.string().min(1).max(4096),
   });
 
   /**
@@ -282,40 +325,105 @@ export function profileRoutes(ctx: AppContext): Router {
 
       const parsed = claimSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid claim request.');
-      const { provider, email } = parsed.data;
+      const { provider, email, token } = parsed.data;
 
-      if (provider === 'email' && !email) {
-        throw ApiError.validation('An email address is required for an email claim.');
-      }
+      // Every branch below ends in a *verified* address or an exception. This
+      // is the only route that raises a principal's privilege — it is what lets
+      // an identity spend money — so there is no path through it that takes the
+      // caller's word for who they are.
+      let verifiedEmail: string;
 
-      // The provider token is not verified here. A real deployment validates it
-      // against Apple/Google/the email-link service before this point; leaving
-      // that as an obvious hole rather than a fake check is deliberate.
-      if (process.env.AUTH_PROVIDER_VERIFICATION !== 'disabled' && provider !== 'email') {
-        throw ApiError.validation(
-          `OAuth claims need provider token verification, which is not configured. ` +
-            `Set AUTH_PROVIDER_VERIFICATION=disabled to accept unverified tokens in development.`,
+      if (provider === 'email') {
+        if (!email) throw ApiError.validation('An email address is required for an email claim.');
+
+        const result = await verifyEmailChallenge(
+          ctx.cache,
+          user._id.toHexString(),
+          email,
+          token,
         );
+        if (!result.ok) {
+          throw result.reason === 'too_many_attempts'
+            ? ApiError.validation('Too many incorrect codes. Request a new one.')
+            : ApiError.validation('That code is not valid. Request a new one if it has expired.');
+        }
+        verifiedEmail = result.email;
+      } else {
+        // Refuses until a JWKS verifier is configured. See `claims.ts`: a
+        // verification step that pretends to work is worse than an absent one.
+        const identity = await ctx.oidc.verify(provider, token);
+        if (!identity.emailVerified || !identity.email) {
+          throw ApiError.validation('That provider account has no verified email address.');
+        }
+        verifiedEmail = normalizeEmail(identity.email);
       }
 
       const now = new Date();
-      await collections.users.updateOne(
-        { _id: user._id },
-        {
-          $set: {
-            auth: {
-              email: email ?? null,
-              providers: [provider],
-              claimedAt: now,
+
+      // One account per address. Without this, claiming an address that already
+      // belongs to someone else silently produces two accounts answering to one
+      // identity — and a merge request nobody can safely honour. The unique
+      // index on `auth.email` is the actual enforcement; this is the message.
+      const taken = await collections.users.findOne({
+        'auth.email': verifiedEmail,
+        _id: { $ne: user._id },
+      });
+      if (taken) {
+        throw ApiError.validation(
+          'That address is already attached to another Window account. Sign in on that account instead.',
+        );
+      }
+
+      try {
+        await collections.users.updateOne(
+          { _id: user._id },
+          {
+            $set: {
+              auth: {
+                email: verifiedEmail,
+                providers: [provider],
+                claimedAt: now,
+                emailVerifiedAt: now,
+              },
+              updatedAt: now,
             },
-            updatedAt: now,
           },
-        },
-      );
+        );
+      } catch (error) {
+        if ((error as { code?: number }).code === 11000) {
+          throw ApiError.validation('That address is already attached to another Window account.');
+        }
+        throw error;
+      }
+
+      // The session is regenerated at the privilege change. A token minted
+      // before the claim described an anonymous principal; leaving it valid
+      // means the old, lower-trust credential still opens the higher-trust
+      // account for the rest of its lifetime.
+      const epoch = await revokeSessions(collections, user._id);
 
       res.json({
-        token: mintToken({ ...principal, isAnonymous: false }),
+        token: mintToken({ ...principal, isAnonymous: false, epoch }),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Sign out everywhere.
+   *
+   * Bumping the session epoch invalidates every token already issued for this
+   * identity. Without it, "sign out" only clears local storage and a token
+   * copied off the device stays valid for its full lifetime — a button that
+   * describes an intention rather than an effect.
+   */
+  router.post('/me/sessions/revoke', async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+      await revokeSessions(collections, user._id);
+      res.status(204).end();
     } catch (error) {
       next(error);
     }
@@ -354,7 +462,7 @@ export function profileRoutes(ctx: AppContext): Router {
   });
 
   const reportSchema = z.object({
-    productId: z.string(),
+    productId: objectIdSchema,
     reason: z.enum([
       'counterfeit',
       'not_as_described',
@@ -422,23 +530,51 @@ export function profileRoutes(ctx: AppContext): Router {
   return router;
 }
 
-/** Device bootstrap. Mints the anonymous principal the whole app runs on. */
+/**
+ * Device bootstrap. Mints the anonymous principal the whole app runs on.
+ *
+ * The rule that makes this safe: a presented secret may only ever *resume* an
+ * identity, never claim one. Previously the client chose its own
+ * `deviceUserId`, the server adopted whatever it was handed, and the client
+ * minted it with `Math.random()` — so a device identifier that nobody treated
+ * as a credential was in fact the only credential, and a guessable one. Now the
+ * server mints 256 bits from the CSPRNG, stores only the hash, and a secret it
+ * does not recognise gets a brand-new empty profile rather than someone else's.
+ */
 export function authRoutes(ctx: AppContext): Router {
   const router = Router();
-  const schema = z.object({ deviceUserId: z.string().min(8).max(128) });
+  const schema = z.object({ deviceSecret: opaqueSecretSchema.optional() });
 
-  router.post('/device', rateLimit(ctx.cache, 'events'), async (req, res, next) => {
+  router.post('/device', rateLimit(ctx.cache, 'bootstrap'), async (req, res, next) => {
     try {
-      const parsed = schema.safeParse(req.body);
+      const parsed = schema.safeParse(req.body ?? {});
       if (!parsed.success) {
-        throw ApiError.validation('deviceUserId must be between 8 and 128 characters.');
+        throw ApiError.validation('deviceSecret must be a base64url secret issued by this API.');
       }
-      const { user, principal } = await bootstrapDevice(
-        ctx.db.collections,
-        parsed.data.deviceUserId,
-      );
+
+      const existing = parsed.data.deviceSecret
+        ? await resumeDeviceUser(ctx.db.collections, parsed.data.deviceSecret)
+        : null;
+
+      // A miss is not an error. An unrecognised secret means a new device, a
+      // deleted account, or somebody guessing — and all three get the same
+      // answer, which is why guessing reveals nothing.
+      const minted = existing ? null : await createDeviceUser(ctx.db.collections);
+      const user = existing ?? minted!.user;
+
+      const principal = {
+        userId: user._id,
+        deviceUserId: user.deviceUserId,
+        isAnonymous: isAnonymousUser(user),
+        epoch: user.sessionEpoch ?? 1,
+      };
+
       res.json({
         token: mintToken(principal),
+        // Returned exactly once, at mint time. The client stores it in secure
+        // storage and presents it to resume; the server keeps only its hash.
+        ...(minted ? { deviceSecret: minted.deviceSecret } : {}),
+        deviceUserId: user.deviceUserId,
         userId: user._id.toHexString(),
         isAnonymous: principal.isAnonymous,
         onboarded: user.onboarding !== null,

@@ -302,9 +302,29 @@ export interface BloomFilterState {
 
 export interface UserDoc<Id = string> {
   _id: Id;
-  /** Anonymous identity, minted client-side. */
+  /**
+   * Public, non-secret handle for the device. Server-minted, safe to log and
+   * to return. It is an identifier, not a credential.
+   */
   deviceUserId: string;
-  auth: { email: string | null; providers: string[]; claimedAt: Date } | null;
+  /**
+   * SHA-256 of the device secret the client holds. The secret itself is
+   * returned exactly once, at mint time, and never stored — so a dump of this
+   * collection yields no way to authenticate as anyone in it.
+   */
+  deviceSecretHash: string;
+  /**
+   * Session generation. Every token carries the epoch it was minted under;
+   * incrementing this revokes all of them at once.
+   */
+  sessionEpoch: number;
+  auth: {
+    email: string | null;
+    providers: string[];
+    claimedAt: Date;
+    /** Null until an ownership challenge is actually passed. */
+    emailVerifiedAt: Date | null;
+  } | null;
   onboarding: {
     topics: string[];
     priceBand: PriceBand | null;

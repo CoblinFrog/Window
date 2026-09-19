@@ -105,6 +105,14 @@ export async function ensureIndexes(db: Db): Promise<void> {
 
     // users — identity.
     users.createIndex({ deviceUserId: 1 }, { name: 'device_identity', unique: true }),
+    // The device secret is the anonymous credential; this index is both the
+    // lookup that resumes a session and the uniqueness guarantee that one
+    // secret can never resolve to two identities. Sparse, because documents
+    // predating the credential have no hash and must never be resumable.
+    users.createIndex(
+      { deviceSecretHash: 1 },
+      { name: 'device_secret', unique: true, sparse: true },
+    ),
     users.createIndex(
       { 'auth.email': 1 },
       { name: 'email_identity', sparse: true, unique: true },

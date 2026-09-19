@@ -1,4 +1,5 @@
 import { EMBEDDING_VERSION } from '@window/shared';
+import { requireSecret } from './secrets.js';
 
 function str(name: string, fallback: string): string {
   const v = process.env[name];
@@ -11,6 +12,15 @@ function int(name: string, fallback: number): number {
   const n = Number.parseInt(v, 10);
   if (Number.isNaN(n)) throw new Error(`${name} must be an integer, got ${JSON.stringify(v)}`);
   return n;
+}
+
+function list(name: string, fallback: readonly string[]): readonly string[] {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  return v
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function bool(name: string, fallback: boolean): boolean {
@@ -47,8 +57,36 @@ export const env = {
   /** Checkout audit screenshots and transcripts. */
   auditDir: str('AUDIT_DIR', new URL('../../../../.data/audit', import.meta.url).pathname),
 
-  /** Internal-only endpoints (ranking debug) require this header value. */
-  internalToken: str('INTERNAL_TOKEN', 'dev-internal-token'),
+  /**
+   * Internal-only endpoints (ranking debug) require this header value. It is a
+   * real secret rather than a fixed default, because the endpoint behind it
+   * dumps per-user ranking state for any user id and rewrites the scoring
+   * weights for everybody. Production refuses to boot without one.
+   */
+  internalToken: requireSecret('INTERNAL_TOKEN'),
+
+  /**
+   * Origins permitted to call the API from a browser. A development web client
+   * runs on a different origin, so the two Expo defaults are allowed outside
+   * production; a deployment names its own.
+   */
+  corsOrigins: list(
+    'CORS_ORIGINS',
+    str('NODE_ENV', 'development') === 'production'
+      ? []
+      : ['http://localhost:8081', 'http://127.0.0.1:8081'],
+  ),
+
+  /**
+   * Number of reverse-proxy hops to trust when reading `X-Forwarded-For`.
+   *
+   * Express's `true` means "trust the whole chain", and the chain is written by
+   * the client. That makes `req.ip` attacker-chosen, and `req.ip` is the rate
+   * limit key on exactly the unauthenticated routes that mint credentials. A
+   * hop count trusts only the proxies actually in front of this process: 0 in
+   * development, 1 behind a single load balancer.
+   */
+  trustProxyHops: int('TRUST_PROXY_HOPS', 0),
 
   /** Simulated merchant latency for the checkout agent, in milliseconds. */
   agentStepDelayMs: int('AGENT_STEP_DELAY_MS', 120),
