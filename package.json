@@ -1,0 +1,27 @@
+{
+  "name": "window",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Window — TikTok for shopping, a discovery-first commerce feed",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/app"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build -w @window/shared && npm run build -w @window/server",
+    "typecheck": "npm run typecheck -w @window/shared && npm run typecheck -w @window/server && npm run typecheck -w @window/app",
+    "test": "npm run test -w @window/server",
+    "seed": "npm run seed -w @window/server",
+    "dev:server": "npm run dev -w @window/server",
+    "dev:web": "npm run web -w @window/app",
+    "dev": "npm run seed && concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

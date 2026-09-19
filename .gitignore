@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Local runtime state: the database, the mongod binaries, fetched media,
+# checkout audit records and logs. All of it is generated — the catalog comes
+# back from `npm run seed` and `npm run ingest` — and together it runs to
+# several gigabytes, which is not something a repository should carry.
+.data/
+
+# Expo / Metro
+.expo/
+.expo-shared/
+web-build/
+
+# Secrets. MONGO_URL carries a password when it points at Atlas.
+.env
+.env.*
+!.env.example
+
+# OS and editor
+.DS_Store
+*.log
