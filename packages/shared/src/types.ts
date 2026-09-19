@@ -554,6 +554,24 @@ export interface OrderDoc<Id = string> {
   updatedAt: Date;
 }
 
+/**
+ * A user's linked account at one merchant.
+ *
+ * Guest checkout is always preferred, so this exists only for merchants that
+ * require an account. The session is encrypted at rest with a per-user key and
+ * is never placed in a model context — the agent receives an opaque handle.
+ */
+export interface MerchantLinkRecord<Id = string> {
+  _id: Id;
+  userId: Id;
+  merchantDomain: string;
+  status: 'pending' | 'linked' | 'expired' | 'revoked';
+  encryptedSession: { ciphertext: string; iv: string; keyVersion: number } | null;
+  createdAt: Date;
+  linkedAt: Date | null;
+  expiresAt: Date;
+}
+
 // ---------------------------------------------------------------------------
 // coupons and sources
 // ---------------------------------------------------------------------------

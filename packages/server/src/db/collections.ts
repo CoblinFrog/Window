@@ -5,6 +5,7 @@ import type {
   ClusterDoc,
   CouponDoc,
   InteractionDoc,
+  MerchantLinkRecord,
   OrderDoc,
   ProductDoc,
   ReviewDoc,
@@ -48,20 +49,8 @@ export interface ReportDoc {
   resolvedAt: Date | null;
 }
 
-export interface MerchantLinkDoc {
-  _id: ObjectId;
-  userId: ObjectId;
-  merchantDomain: string;
-  status: 'pending' | 'linked' | 'expired' | 'revoked';
-  /**
-   * Session cookies encrypted at rest with a per-user key. This value is never
-   * placed in a model context; the agent receives an opaque handle instead.
-   */
-  encryptedSession: { ciphertext: string; iv: string; keyVersion: number } | null;
-  createdAt: Date;
-  linkedAt: Date | null;
-  expiresAt: Date;
-}
+/** The stored form of the shared shape, with `ObjectId` ids. */
+export type MerchantLinkDoc = MerchantLinkRecord<ObjectId>;
 
 export interface CollectionSet {
   products: Collection<Product>;
