@@ -12,7 +12,7 @@ import {
 } from '@window/shared';
 import { env } from '../../config/env.js';
 import type { AppContext } from '../context.js';
-import type { Order } from '../../db/collections.js';
+import type { Order } from '../../checkout/repository.js';
 import { CheckoutConflict } from '../../checkout/orchestrator.js';
 import { mintStreamTicket, rateLimit } from '../middleware.js';
 import { requireAuthenticated } from '../auth.js';
@@ -36,7 +36,6 @@ function conflictToApiError(error: CheckoutConflict): ApiError {
 
 export function commerceRoutes(ctx: AppContext): Router {
   const router = Router();
-  const { collections } = ctx.db;
 
   // -------------------------------------------------------------------------
   // Cart
@@ -118,12 +117,12 @@ export function commerceRoutes(ctx: AppContext): Router {
   // -------------------------------------------------------------------------
 
   async function summarize(order: Order): Promise<CheckoutJobSummary> {
-    const source = await collections.sources.findOne({ _id: order.merchantDomain });
+    const source = await ctx.repository.getSource(order.merchantDomain);
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
-      jobId: order.agentRun?.jobId ?? order._id.toHexString(),
-      orderId: order._id.toHexString(),
+      jobId: order.agentRun?.jobId ?? order._id,
+      orderId: order._id,
       merchantDomain: order.merchantDomain,
       merchantName: source?.displayName ?? order.merchantDomain,
       status: order.status,
@@ -149,13 +148,13 @@ export function commerceRoutes(ctx: AppContext): Router {
           ? { amount: order.quote.discount, currency: order.quote.currency }
           : null,
       items: order.items.map((item) => ({
-        productId: item.productId.toHexString(),
+        productId: item.productId,
         title: item.title,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
       })),
       protocol: order.payment?.protocol ?? null,
-      needsInput: ctx.checkout.pendingPrompt(order._id.toHexString()),
+      needsInput: ctx.checkout.pendingPrompt(order._id),
       failure: order.failure,
       merchantOrderNumber: order.merchantOrderNumber,
       riskInterstitial: interstitial,
@@ -212,10 +211,10 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      const order = await collections.orders.findOne({
-        _id: idParam(req.params.id, 'job id'),
-        userId: user._id,
-      });
+      const order = await ctx.repository.getOrder(
+        idParam(req.params.id, 'job id').toHexString(),
+        user._id.toHexString(),
+      );
       if (!order) throw ApiError.notFound('That checkout job');
       res.json(await summarize(order));
     } catch (error) {
@@ -237,17 +236,17 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       const principal = req.principal;
       if (!user || !principal) throw ApiError.unauthorized();
-      const jobId = idParam(req.params.id, 'job id');
+      const jobId = idParam(req.params.id, 'job id').toHexString();
 
       // Scoped to a job this caller actually owns, so a ticket cannot be minted
       // for somebody else's stream even by someone holding a valid session.
-      const order = await collections.orders.findOne({ _id: jobId, userId: user._id });
+      const order = await ctx.repository.getOrder(jobId, user._id.toHexString());
       if (!order) throw ApiError.notFound('That checkout job');
 
       const { ticket, expiresAt } = await mintStreamTicket(
         ctx.cache,
         principal,
-        `/v1/checkout/jobs/${jobId.toHexString()}/stream`,
+        `/v1/checkout/jobs/${jobId}/stream`,
       );
       res.json({ ticket, expiresAt: expiresAt.toISOString() });
     } catch (error) {
@@ -264,8 +263,8 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      const orderId = idParam(req.params.id, 'job id');
-      const order = await collections.orders.findOne({ _id: orderId, userId: user._id });
+      const orderId = idParam(req.params.id, 'job id').toHexString();
+      const order = await ctx.repository.getOrder(orderId, user._id.toHexString());
       if (!order) throw ApiError.notFound('That checkout job');
 
       res.writeHead(200, {
@@ -276,7 +275,7 @@ export function commerceRoutes(ctx: AppContext): Router {
       });
       res.write(`event: state\ndata: ${JSON.stringify(await summarize(order))}\n\n`);
 
-      const unsubscribe = ctx.checkout.subscribe(orderId.toHexString(), (payload) => {
+      const unsubscribe = ctx.checkout.subscribe(orderId, (payload) => {
         res.write(`event: ${payload.event}\ndata: ${JSON.stringify(payload)}\n\n`);
       });
 
@@ -315,7 +314,7 @@ export function commerceRoutes(ctx: AppContext): Router {
 
       const parsed = authorizeSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('authorize requires the quoteHash.');
-      const order = await ctx.checkout.authorize(idParam(req.params.id, 'job id'), user, {
+      const order = await ctx.checkout.authorize(idParam(req.params.id, 'job id').toHexString(), user, {
         quoteHash: parsed.data.quoteHash,
         // The user's authorization tap on the quote screen is the passkey
         // challenge. A missing assertion is refused by the payment rail.
@@ -352,18 +351,15 @@ export function commerceRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
       const parsed = inputSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid input response.');
-      const jobId = idParam(req.params.id, 'job id');
+      const jobId = idParam(req.params.id, 'job id').toHexString();
 
-      const order = await collections.orders.findOne(
-        { _id: jobId, userId: user._id },
-        { projection: { _id: 1 } },
-      );
+      const order = await ctx.repository.getOrder(jobId, user._id.toHexString());
       // Indistinguishable from a job that does not exist, so this is not an
       // oracle for which order ids are real.
       if (!order) throw ApiError.notFound('That checkout job');
 
       const accepted = ctx.checkout.provideInput(
-        jobId.toHexString(),
+        jobId,
         parsed.data.promptId,
         parsed.data.value,
       );
@@ -385,7 +381,7 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      const order = await ctx.checkout.cancel(idParam(req.params.id, 'job id'), user);
+      const order = await ctx.checkout.cancel(idParam(req.params.id, 'job id').toHexString(), user);
       res.json(await summarize(order));
     } catch (error) {
       next(error instanceof CheckoutConflict ? conflictToApiError(error) : error);
@@ -397,21 +393,16 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
 
-      const orders = await collections.orders
-        .find({ userId: user._id })
-        .sort({ createdAt: -1 })
-        .limit(50)
-        .toArray();
+      const orders = await ctx.repository.listOrders(user._id.toHexString(), 50);
 
-      const productIds = orders.flatMap((o) => o.items.map((i) => i.productId));
-      const products = await collections.products
-        .find({ _id: { $in: productIds } }, { projection: { 'media.hero': 1 } })
-        .toArray();
-      const heroById = new Map(products.map((p) => [p._id.toHexString(), p.media.hero]));
+      const products = await ctx.repository.getProducts(
+        orders.flatMap((o) => o.items.map((i) => i.productId)),
+      );
+      const heroById = new Map(products.map((p) => [p._id, p.media.hero]));
 
       const response: OrdersResponse = {
         orders: orders.map((order) => ({
-          orderId: order._id.toHexString(),
+          orderId: order._id,
           merchantDomain: order.merchantDomain,
           merchantName: order.merchantDomain,
           status: order.status,
@@ -420,10 +411,10 @@ export function commerceRoutes(ctx: AppContext): Router {
             : null,
           merchantOrderNumber: order.merchantOrderNumber,
           items: order.items.map((item) => ({
-            productId: item.productId.toHexString(),
+            productId: item.productId,
             title: item.title,
             quantity: item.quantity,
-            hero: heroById.get(item.productId.toHexString()) ?? null,
+            hero: heroById.get(item.productId) ?? null,
           })),
           createdAt: order.createdAt.toISOString(),
         })),
@@ -459,26 +450,22 @@ export function commerceRoutes(ctx: AppContext): Router {
         if (!parsedDomain.success) throw ApiError.validation('Invalid merchant domain.');
 
         const domain = parsedDomain.data.toLowerCase();
-        const source = await collections.sources.findOne({ _id: domain });
+        const source = await ctx.repository.getSource(domain);
         if (!source) throw ApiError.notFound(`Merchant ${domain}`);
 
         const now = new Date();
         const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
         const linkId = randomUUID();
 
-        await collections.merchantLinks.updateOne(
-          { userId: user._id, merchantDomain: domain },
-          {
-            $set: {
-              status: 'pending' as const,
-              encryptedSession: null,
-              createdAt: now,
-              linkedAt: null,
-              expiresAt,
-            },
-          },
-          { upsert: true },
-        );
+        await ctx.repository.upsertMerchantLink({
+          userId: user._id.toHexString(),
+          merchantDomain: domain,
+          status: 'pending',
+          encryptedSession: null,
+          createdAt: now,
+          linkedAt: null,
+          expiresAt,
+        });
 
         res.json({
           merchantDomain: domain,

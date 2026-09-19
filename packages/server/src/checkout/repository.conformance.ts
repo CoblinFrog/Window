@@ -318,14 +318,28 @@ export function newOrder(overrides: Partial<NewOrder> = {}): NewOrder {
   };
 }
 
-/** A product with only the fields checkout actually reads. */
+/**
+ * A product carrying every field the checkout path reads.
+ *
+ * "Only the fields it needs" is the right idea and an easy thing to get wrong —
+ * a fixture missing one of them fails deep inside the orchestrator with a
+ * property-of-undefined, which reads like a code bug rather than a test-setup
+ * one. The list below is derived from the actual reads in `orchestrator.ts` and
+ * `cart/service.ts`.
+ */
 export function fixtureProduct(overrides: Partial<Product> = {}): Product {
   return {
     _id: 'p1',
     title: 'Thing',
+    clusterId: null,
+    sellerId: 'seller_1',
     price: { amount: 1000, currency: 'USD' },
     stock: { inStock: true, quantity: 5, singleUnit: false },
-    risk: { tier: 'low', score: 0.1 },
+    risk: { tier: 'low', score: 0.1, flags: [], reports: { count: 0 } },
+    quality: { score: 0.8, cautions: [] },
+    category: { l1: 'tech', l2: 'tech.peripherals', l3: 'tech.peripherals.keyboards' },
+    media: { hero: null, images: [], video: null },
+    condition: 'new',
     status: 'active',
     sourceType: 'new',
     source: { domain: 'shop.test', url: 'https://shop.test/p/1' },

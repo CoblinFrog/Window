@@ -1,7 +1,6 @@
-import type { Collection } from 'mongodb';
 import { CHECKOUT_CONFIG } from '@window/shared';
-import type { Coupon } from '../db/collections.js';
 import { logger } from '../lib/logger.js';
+import type { CheckoutRepository, Coupon } from './repository.js';
 
 const log = logger.child('coupons');
 
@@ -46,7 +45,7 @@ export type CouponFailureReason =
   | 'unknown';
 
 export class CouponStore {
-  constructor(private readonly coupons: Collection<Coupon>) {}
+  constructor(private readonly repository: CheckoutRepository) {}
 
   /**
    * Ranked candidates for a merchant. Constraints that can be evaluated before
@@ -59,11 +58,17 @@ export class CouponStore {
     now = new Date(),
     limit = CHECKOUT_CONFIG.maxCouponAttempts,
   ): Promise<CouponCandidate[]> {
-    const docs = await this.coupons
-      .find({ merchantDomain, status: 'active' })
-      .sort({ 'performance.successRate': -1, 'performance.meanDiscountPct': -1 })
-      .limit(limit * 4)
-      .toArray();
+    // Ranking in memory rather than in the query: the candidate set for one
+    // merchant is small, and it keeps the ordering identical across stores
+    // rather than depending on each one's sort semantics.
+    const docs = (await this.repository.listCoupons(merchantDomain))
+      .filter((doc) => doc.status === 'active')
+      .sort(
+        (a, b) =>
+          b.performance.successRate - a.performance.successRate ||
+          b.performance.meanDiscountPct - a.performance.meanDiscountPct,
+      )
+      .slice(0, limit * 4);
 
     const eligible = docs.filter((doc) => {
       const c = doc.constraints;
@@ -80,7 +85,7 @@ export class CouponStore {
     });
 
     return eligible.slice(0, limit).map((doc) => ({
-      id: doc._id.toHexString(),
+      id: doc._id,
       code: doc.code,
       merchantDomain: doc.merchantDomain,
       expectedDiscountPct: doc.performance.meanDiscountPct,
@@ -101,42 +106,10 @@ export class CouponStore {
     outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
     now = new Date(),
   ): Promise<void> {
-    const doc = await this.coupons.findOne({ merchantDomain, code });
-    if (!doc) return;
-
-    const attempts = doc.performance.attempts + 1;
-    const successes = doc.performance.successes + (outcome.applied ? 1 : 0);
-    const consecutiveFailures = outcome.applied ? 0 : doc.performance.consecutiveFailures + 1;
-
-    const discountPct =
-      outcome.applied && outcome.subtotal > 0
-        ? (outcome.observedDiscount / outcome.subtotal) * 100
-        : 0;
-    const meanDiscountPct = outcome.applied
-      ? (doc.performance.meanDiscountPct * doc.performance.successes + discountPct) /
-        Math.max(1, successes)
-      : doc.performance.meanDiscountPct;
-
-    const retired = consecutiveFailures >= CHECKOUT_CONFIG.couponRetirementFailures;
-
-    await this.coupons.updateOne(
-      { _id: doc._id },
-      {
-        $set: {
-          'performance.attempts': attempts,
-          'performance.successes': successes,
-          'performance.successRate': successes / attempts,
-          'performance.meanDiscountPct': Math.round(meanDiscountPct * 10) / 10,
-          'performance.consecutiveFailures': consecutiveFailures,
-          ...(outcome.applied ? { 'performance.lastSuccessAt': now } : {}),
-          ...(retired ? { status: 'retired' as const } : {}),
-        },
-      },
-    );
-
-    if (retired) {
-      log.info('coupon retired after consecutive failures', { merchantDomain, code });
-    }
+    // The counter arithmetic lives in the store, because retirement is a
+    // read-modify-write on one row and every implementation has to make that
+    // atomic in its own way.
+    await this.repository.recordCouponOutcome(merchantDomain, code, outcome, now);
   }
 }
 

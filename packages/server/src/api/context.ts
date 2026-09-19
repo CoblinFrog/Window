@@ -3,6 +3,8 @@ import { createCache, type KeyValueCache } from '../cache/index.js';
 import { CartService } from '../cart/service.js';
 import { CheckoutOrchestrator } from '../checkout/orchestrator.js';
 import { CouponStore } from '../checkout/coupons.js';
+import { MongoCheckoutRepository } from '../checkout/repository.mongo.js';
+import type { CheckoutRepository } from '../checkout/repository.js';
 import { connectDatabase, type DatabaseHandle } from '../db/client.js';
 import { ensureIndexes } from '../db/indexes.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
@@ -27,6 +29,8 @@ export interface AppContext {
   ranking: RankingService;
   feed: FeedService;
   cart: CartService;
+  /** The checkout data boundary; swapping it swaps the backing store. */
+  repository: CheckoutRepository;
   checkout: CheckoutOrchestrator;
   events: EventCollector;
   coupons: CouponStore;
@@ -66,9 +70,10 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
 
   const ranking = new RankingService({ collections: db.collections, vectors, config });
   const feed = new FeedService({ collections: db.collections, ranking, vectors, cache });
-  const cart = new CartService({ collections: db.collections });
-  const coupons = new CouponStore(db.collections.coupons);
-  const checkout = new CheckoutOrchestrator({ collections: db.collections, cache, coupons });
+  const repository = new MongoCheckoutRepository(db.collections);
+  const cart = new CartService({ repository });
+  const coupons = new CouponStore(repository);
+  const checkout = new CheckoutOrchestrator({ repository, cache, coupons });
   const events = new EventCollector({ collections: db.collections, cache, config });
   const mailer = createMailer();
   const oidc = createOidcVerifier();
@@ -89,6 +94,7 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     ranking,
     feed,
     cart,
+    repository,
     checkout,
     events,
     coupons,
