@@ -16,7 +16,6 @@ import Animated, {
   Easing,
   Extrapolation,
   interpolate,
-  interpolateColor,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
@@ -71,6 +70,10 @@ export const ASK_PILL_TOP = 10;
 const ASK_PILL_WIDTH = 176;
 /** How much of the growth is over before the contents begin to appear. */
 const CONTENT_FADE_IN = 0.45;
+/** How far the open bubble stays clear of the screen edges. */
+const BUBBLE_MARGIN = 12;
+/** The open bubble's corner. Still a bubble, just a bigger one. */
+const BUBBLE_RADIUS = 24;
 /** Damping ratio near 0.6: about 9% of overshoot, settled inside 350 ms. */
 const OPEN_SPRING = { damping: 13.8, stiffness: 220, mass: 0.6 } as const;
 /** The panel never takes more than this much of the screen. */
@@ -117,7 +120,14 @@ export function AskPanel({
 }: AskPanelProps): React.ReactElement {
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const maxHeight = Math.round(viewportHeight * MAX_HEIGHT_FRACTION);
+  /** The open bubble's width, and the width its contents are laid out at. */
+  const openWidth = viewportWidth - BUBBLE_MARGIN * 2;
+  // Measured from where the bubble actually starts, not from the top of the
+  // screen: it hangs below the safe area, so a cap taken from the full height
+  // would let a long conversation run off the bottom.
+  const maxHeight = Math.round(
+    viewportHeight * MAX_HEIGHT_FRACTION - insets.top - ASK_PILL_TOP,
+  );
   // The panel is the one surface pinned to the top edge, so it is the one that
   // has to clear the notch. The prompt is unusable underneath it, and the pull
   // zone has to start below it or the system gesture takes the drag first.
@@ -304,25 +314,30 @@ export function AskPanel({
   const bubbleStyle = useAnimatedStyle(() => {
     const t = progress.value;
     return {
-      top: interpolate(t, [0, 1], [topInset + ASK_PILL_TOP, 0]),
-      left: interpolate(t, [0, 1], [(viewportWidth - ASK_PILL_WIDTH) / 2, 0]),
-      width: interpolate(t, [0, 1], [ASK_PILL_WIDTH, viewportWidth]),
+      // The top does not move. The bubble grows out of where the pill already
+      // is rather than travelling to the top of the screen, which is what
+      // makes it read as the same object getting bigger.
+      top: topInset + ASK_PILL_TOP,
+      left: interpolate(t, [0, 1], [(viewportWidth - ASK_PILL_WIDTH) / 2, BUBBLE_MARGIN]),
+      width: interpolate(t, [0, 1], [ASK_PILL_WIDTH, openWidth]),
       height: interpolate(t, [0, 1], [ASK_PILL_HEIGHT, Math.min(height.value, maxHeight)]),
       // Clamped, unlike the four above. They are meant to overshoot — that is
       // the bounce — but a radius carried past 1 goes negative, which is not a
       // shape.
-      borderRadius: interpolate(t, [0, 1], [ASK_PILL_HEIGHT / 2, 0], Extrapolation.CLAMP),
-      // The box wears the pill's colours at rest and the panel's once open. It
-      // was the panel's throughout, which left a ring of near-black showing
-      // around a white pill that did not fill it — a dark rounded slab over
-      // the feed, most obvious with a tile scrolling behind it.
-      backgroundColor: interpolateColor(t, [0, 0.4], [COLORS.card, COLORS.sheet]),
-      borderColor: interpolateColor(t, [0, 0.4], [COLORS.hairlineLight, 'rgba(0,0,0,0)']),
-      // No opacity ramp. At rest this box *is* the pill, so fading it in from
-      // nothing leaves the control invisible until someone presses where they
-      // cannot see it.
+      // Still a bubble when open, just a bigger one — never a full-bleed panel
+      // with square corners, which stops being the thing that was pressed and
+      // becomes a screen that replaced it.
+      borderRadius: interpolate(
+        t,
+        [0, 1],
+        [ASK_PILL_HEIGHT / 2, BUBBLE_RADIUS],
+        Extrapolation.CLAMP,
+      ),
+      // No colour change and no opacity ramp. The bubble is white at every
+      // size: at rest it is the pill, and open it is the same white surface
+      // with more in it.
     };
-  }, [topInset, viewportWidth, maxHeight]);
+  }, [topInset, viewportWidth, openWidth, maxHeight]);
 
   /** The contents, which arrive once the box has most of its size. */
   const contentStyle = useAnimatedStyle(() => ({
@@ -381,7 +396,7 @@ export function AskPanel({
           // and the box's height comes from this measurement, so the two would
           // agree on 34 px forever. At a fixed width it also means the text is
           // never reflowed by the growth, only revealed by it.
-          style={[styles.content, { width: viewportWidth }, contentStyle]}
+          style={[styles.content, { width: openWidth }, contentStyle]}
           pointerEvents={open ? 'auto' : 'none'}
           accessibilityElementsHidden={!open}
           importantForAccessibility={open ? 'auto' : 'no-hide-descendants'}
@@ -402,7 +417,7 @@ export function AskPanel({
                   ? 'Ask for anything — “quiet mechanical keyboard under $80”'
                   : 'Cheaper? In white? Ask a follow-up'
               }
-              placeholderTextColor={COLORS.textSecondary}
+              placeholderTextColor={COLORS.textSecondaryLight}
               returnKeyType="search"
               editable={!asking}
               accessibilityLabel="Ask the shopping assistant"
@@ -417,12 +432,12 @@ export function AskPanel({
               accessibilityLabel={asking ? 'Cancel' : 'Ask'}
             >
               {asking ? (
-                <ActivityIndicator color={COLORS.textSecondary} />
+                <ActivityIndicator color={COLORS.textSecondaryLight} />
               ) : (
                 <Icon
                   name="check"
                   size={ICON.glyph}
-                  color={draft.trim() === '' ? COLORS.textSecondary : COLORS.textPrimary}
+                  color={draft.trim() === '' ? COLORS.textSecondaryLight : COLORS.textPrimaryLight}
                 />
               )}
             </PressScale>
@@ -437,7 +452,7 @@ export function AskPanel({
               accessibilityRole="button"
               accessibilityLabel="Close ask"
             >
-              <Icon name="close" size={ICON.glyph} color={COLORS.textSecondary} />
+              <Icon name="close" size={ICON.glyph} color={COLORS.textSecondaryLight} />
             </PressScale>
           </View>
 
@@ -620,9 +635,12 @@ const styles = StyleSheet.create({
    */
   bubble: {
     position: 'absolute',
-    // Colour comes from the animation: this box is the pill at rest and the
-    // panel when open, and it has to look like whichever it currently is.
+    // White at every size. The colour is static now rather than animated: the
+    // bubble is the same surface whether it holds a placeholder or a
+    // conversation, and only its shape changes.
+    backgroundColor: COLORS.card,
     borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.hairlineLight,
     overflow: 'hidden',
   },
   pillPress: { ...StyleSheet.absoluteFillObject },
@@ -643,7 +661,7 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    color: COLORS.textPrimary,
+    color: COLORS.textPrimaryLight,
     fontSize: TYPE.sizes.body,
     lineHeight: TYPE.lineHeights.body,
     paddingVertical: 10,
@@ -662,7 +680,7 @@ const styles = StyleSheet.create({
   answerContent: { paddingBottom: 8 },
   /** What the shopper said, set apart from what the assistant answered. */
   said: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     fontWeight: TYPE.weights.semibold,
@@ -670,21 +688,21 @@ const styles = StyleSheet.create({
     paddingTop: 16,
   },
   message: {
-    color: COLORS.textPrimary,
+    color: COLORS.textPrimaryLight,
     fontSize: TYPE.sizes.body,
     lineHeight: TYPE.lineHeights.body,
     paddingHorizontal: SPACING.screenMargin,
     paddingTop: 12,
   },
   constraints: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     paddingHorizontal: SPACING.screenMargin,
     paddingTop: 4,
   },
   thinking: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     paddingHorizontal: SPACING.screenMargin,
@@ -706,28 +724,30 @@ const styles = StyleSheet.create({
   shot: {
     width: PICK_WIDTH,
     height: PICK_WIDTH,
-    backgroundColor: COLORS.backdrop,
+    // The placeholder behind a loading photograph. On a white bubble the dark
+    // backdrop read as a hole punched in the surface.
+    backgroundColor: COLORS.hairlineLight,
   },
   pickTitle: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     marginTop: 2,
   },
   pickPrice: {
-    color: COLORS.textPrimary,
+    color: COLORS.textPrimaryLight,
     fontSize: TYPE.sizes.price,
     lineHeight: TYPE.lineHeights.price,
     fontWeight: TYPE.weights.semibold,
     marginTop: 8,
   },
   pickDomain: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     fontWeight: TYPE.weights.regular,
   },
   pickReview: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     marginTop: 4,
@@ -739,7 +759,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.hairline,
+    borderTopColor: COLORS.hairlineLight,
   },
   askPill: {
     minHeight: ICON.minTarget,
@@ -773,7 +793,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   restartLabel: {
-    color: COLORS.textSecondary,
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     fontWeight: TYPE.weights.semibold,
