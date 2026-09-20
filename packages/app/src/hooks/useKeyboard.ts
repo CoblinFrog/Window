@@ -26,7 +26,21 @@ function matches(binding: readonly string[], key: string): boolean {
   return binding.includes(key);
 }
 
-export function useKeyboardControls(handlers: KeyboardHandlers, enabled: boolean): void {
+export function useKeyboardControls(
+  handlers: KeyboardHandlers,
+  enabled: boolean,
+  /**
+   * Whether a sheet is covering the feed.
+   *
+   * This suppresses the *feed* bindings without suppressing the hook, because
+   * Escape is how a sheet is closed. Disabling the whole listener while a sheet
+   * is open makes the one key that can dismiss it the one key that cannot run —
+   * and since the wheel is suppressed too, the result is an interface that
+   * accepts no keyboard or scroll input at all until the user finds the close
+   * control with a mouse.
+   */
+  sheetOpen = false,
+): void {
   // Handlers change every render; the listener is registered once and reads
   // them through a ref so a key press never runs against a stale closure.
   const ref = useRef(handlers);
@@ -42,6 +56,16 @@ export function useKeyboardControls(handlers: KeyboardHandlers, enabled: boolean
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      // Escape always runs. Everything else waits for the sheet to close: the
+      // feed must not advance underneath something the user is reading.
+      if (sheetOpen) {
+        if (matches(KEYBINDINGS.closeSheet, event.key)) {
+          ref.current.onEscape();
+          event.preventDefault();
+        }
+        return;
+      }
 
       const handled = (): boolean => {
         if (matches(KEYBINDINGS.closeSheet, event.key)) {
@@ -88,7 +112,7 @@ export function useKeyboardControls(handlers: KeyboardHandlers, enabled: boolean
 
     globalThis.addEventListener('keydown', listener);
     return () => globalThis.removeEventListener('keydown', listener);
-  }, [enabled]);
+  }, [enabled, sheetOpen]);
 }
 
 /**

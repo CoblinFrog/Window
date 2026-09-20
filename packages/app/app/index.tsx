@@ -293,8 +293,12 @@ export default function FeedScreen(): React.ReactElement {
         if (feed.mode === 'single') switchMode('left');
       },
     },
-    layout.isWeb && !sheetOpen,
+    layout.isWeb,
+    sheetOpen,
   );
+  // The wheel stays suppressed while a sheet is open — the feed must not move
+  // behind it — but the keyboard above keeps Escape live so the sheet can be
+  // dismissed without reaching for the mouse.
   useSnappedWheel(next, prev, layout.isWeb && !sheetOpen);
 
   // ---- Guards ------------------------------------------------------------

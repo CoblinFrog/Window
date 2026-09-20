@@ -27,6 +27,7 @@ import {
   watchConnectivity,
   type CartDiff,
 } from '../src/store/cart.js';
+import { useSession } from '../src/store/session.js';
 
 /**
  * The cart.
@@ -99,6 +100,7 @@ export default function CartScreen(): React.ReactElement {
   const auctionBlock = useCart((state) => state.auctionBlock);
   const acknowledged = useCart((state) => state.acknowledged);
 
+  const session = useSession();
   const load = useCart((state) => state.load);
   const restoreQueue = useCart((state) => state.restoreQueue);
   const acknowledgeDiff = useCart((state) => state.acknowledgeDiff);
@@ -107,10 +109,22 @@ export default function CartScreen(): React.ReactElement {
   const remove = useCart((state) => state.remove);
   const clearAuctionBlock = useCart((state) => state.clearAuctionBlock);
 
+  // Wait for the session before fetching.
+  //
+  // Opening /cart directly is a cold page load: the auth token lives in memory
+  // and does not exist until `boot()` has run. Loading the cart before then
+  // sends an unauthenticated request, gets a 401, and renders an empty cart
+  // over a cart that actually has items in it — which reads as lost data
+  // rather than as a race.
   useEffect(() => {
+    if (session.status === 'idle') void session.boot();
+  }, [session.status, session]);
+
+  useEffect(() => {
+    if (session.status !== 'ready') return;
     void restoreQueue().then(() => load());
     return watchConnectivity();
-  }, [load, restoreQueue]);
+  }, [session.status, load, restoreQueue]);
 
   const linesById = new Map((cart?.lines ?? []).map((line) => [line.id, line]));
   const pendingDiffs = (cart?.diffs ?? []).filter(
