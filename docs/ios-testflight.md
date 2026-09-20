@@ -27,10 +27,60 @@ server it can reach from a phone.
   the entitlement would have needed an AASA file on a domain that does not
   serve one.
 
-## What only you can do
+## TestFlight needs the paid membership
 
-**1. Accounts.** An Apple Developer Program membership (99 USD/year) and an
-Expo account. Then `npx eas-cli login`.
+A free Apple Developer account cannot reach TestFlight at all. It cannot create
+an App Store Connect record, cannot upload a build, and cannot invite a tester.
+That is an Apple rule and no amount of configuration gets around it — the
+99 USD/year Developer Program is the entry fee for distributing to anyone,
+including yourself.
+
+What a free account *can* do is sign an app onto your own device from Xcode,
+with a provisioning profile that expires after **seven days**. Up to three apps
+at a time. After a week the app refuses to launch until Xcode re-signs it.
+
+So there are three ways to hold this thing in your hand, in increasing order of
+cost:
+
+### Expo Go — works right now, no account, no build
+
+Every native module this app uses ships inside Expo Go, so there is nothing to
+compile. Put the phone on the same Wi-Fi as the Mac and:
+
+```bash
+cd packages/server && npx tsx watch --env-file-if-exists=.env src/main.ts   # the API
+cd packages/app && npx expo start --lan                                     # Metro
+```
+
+Install Expo Go from the App Store, scan the QR in the terminal, and it loads.
+The app works out its own API address from the Metro host it connected to, so
+the LAN address is handled for you — provided `EXPO_PUBLIC_API_URL` stays
+unset, which is what `packages/app/.env` now explains.
+
+Limits worth knowing: Expo Go runs the app inside its own shell, so the icon
+and splash are Expo's rather than yours, and it stops working when the Mac
+does. It is for trying the app, not for showing it to someone else.
+
+### Xcode on your own device — free, seven days at a time
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer   # currently points at CommandLineTools
+brew install cocoapods                                            # not installed
+cd packages/app && npx expo prebuild --platform ios
+open ios/*.xcworkspace
+```
+
+In Xcode: select the target, Signing & Capabilities, tick *Automatically manage
+signing*, and pick your personal team. Plug the phone in and Run. You will have
+to trust the developer certificate on the phone the first time, under General →
+VPN & Device Management.
+
+### TestFlight — 99 USD/year
+
+Everything below applies once the membership exists.
+
+**1. Accounts.** The Apple Developer Program membership and an Expo account.
+Then `npx eas-cli login`.
 
 **2. A server the phone can reach.** This is the real blocker, and it is worth
 being blunt about it: the API runs on your Mac at `http://localhost:4000`. On a
