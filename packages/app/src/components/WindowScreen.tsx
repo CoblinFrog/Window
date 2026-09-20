@@ -6,7 +6,6 @@ import Animated, {
   Easing,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
   withSequence,
   withSpring,
   withTiming,
@@ -24,7 +23,6 @@ import {
   formatMoney,
   imageUri,
   planPane,
-  stretchDelay,
   type PaneTileSource,
   type ProductCard,
   type TilePlan,
@@ -144,6 +142,9 @@ export function WindowScreen({
                 highlightIndex={highlightIndex}
                 settleKey={ordinal}
                 settleDirection={settleDirection}
+                // The neighbours are mounted so a drag can show where it is
+                // going. They are not what arrived, so they do not settle.
+                isCurrent={page === ordinal}
                 reducedMotion={reducedMotion}
                 dataSaver={dataSaver}
                 onTap={onTap}
@@ -169,6 +170,8 @@ interface PaneProps {
   settleKey: number;
   /** Which way it arrived: 1 scrolled forward, -1 back, 0 not a scroll. */
   settleDirection: 1 | -1 | 0;
+  /** True for the pane in view. Only it settles. */
+  isCurrent: boolean;
   reducedMotion: boolean;
   dataSaver: boolean;
   onTap(index: number, card: ProductCard, rect: TileRect | null): void;
@@ -184,6 +187,7 @@ function Pane({
   highlightIndex,
   settleKey,
   settleDirection,
+  isCurrent,
   reducedMotion,
   dataSaver,
   onTap,
@@ -214,11 +218,63 @@ function Pane({
     [plan.columnWidth],
   );
 
+  // 0 at rest, 1 at the peak of the stretch.
+  //
+  // One value for the whole page. It used to be one per tile, each on its own
+  // staggered delay, and the ripple that produced read as the contents
+  // twitching independently rather than as the page arriving — twelve small
+  // boxes disagreeing about when they had landed. A single transform on the
+  // column box moves everything at once, and because the box is the height of
+  // the viewport the same percentage buys five times the travel it did on a
+  // tile.
+  const stretch = useSharedValue(0);
+  // Signed, so the page overshoots the way the surface was travelling: up when
+  // it came from below, down when it came from above. An unsigned lift makes a
+  // backwards scroll settle forwards, which reads as the feed disagreeing with
+  // the finger.
+  const lift = useSharedValue(0);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    // Mounting is not scrolling. A pane on screen because the user came back
+    // from the pane view has not travelled, so it does not settle.
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    if (reducedMotion || settleDirection === 0 || !isCurrent) {
+      stretch.value = 0;
+      return;
+    }
+
+    lift.value = settleDirection;
+    stretch.value = withSequence(
+      withTiming(1, { duration: STRETCH.upMs, easing: EASING }),
+      // A spring back, so the page overshoots and settles rather than stopping
+      // dead on the mark. This is the bounce.
+      withSpring(0, {
+        damping: STRETCH.settleDamping,
+        stiffness: STRETCH.settleStiffness,
+        mass: STRETCH.settleMass,
+      }),
+    );
+    // A pane arriving is the whole trigger: a re-render for any other reason
+    // must not replay it, or the grid twitches while it sits still.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settleKey]);
+
+  const settle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: -STRETCH.lift * lift.value * stretch.value },
+      { scaleY: 1 + (STRETCH.scale - 1) * stretch.value },
+    ],
+  }));
+
   if (tiles.length === 0) return null;
 
   return (
     <View style={[styles.pane, { width, height }]}>
-      <View style={styles.columns}>
+      <Animated.View style={[styles.columns, settle]}>
         {([0, 1] as const).map((column) => (
           <View
             key={column}
@@ -235,9 +291,6 @@ function Pane({
                     card={card}
                     tile={tile}
                     columnWidth={plan.columnWidth}
-                    settleKey={settleKey}
-                    settleDirection={settleDirection}
-                    reducedMotion={reducedMotion}
                     dataSaver={dataSaver}
                     selected={paneStart + tile.order === highlightIndex}
                     onLayout={(event: LayoutChangeEvent) => {
@@ -261,7 +314,7 @@ function Pane({
               })}
           </View>
         ))}
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -270,9 +323,6 @@ interface WindowTileProps {
   card: ProductCard;
   tile: TilePlan;
   columnWidth: number;
-  settleKey: number;
-  settleDirection: 1 | -1 | 0;
-  reducedMotion: boolean;
   dataSaver: boolean;
   selected: boolean;
   onPress(): void;
@@ -280,66 +330,20 @@ interface WindowTileProps {
   onLayout(event: LayoutChangeEvent): void;
 }
 
+/**
+ * A tile is now purely a tile. The settle belongs to the page above it, which
+ * is the thing that actually arrived.
+ */
 function WindowTile({
   card,
   tile,
   columnWidth,
-  settleKey,
-  settleDirection,
-  reducedMotion,
   dataSaver,
   selected,
   onPress,
   onLongPress,
   onLayout,
 }: WindowTileProps): React.ReactElement {
-  // 0 at rest, 1 at the peak of the stretch.
-  const stretch = useSharedValue(0);
-  // Signed, so the tile overshoots the way the surface was travelling: up when
-  // the pane came from below, down when it came from above. An unsigned lift
-  // makes a backwards scroll settle forwards, which reads as the feed
-  // disagreeing with the finger.
-  const lift = useSharedValue(0);
-  const mounted = useRef(false);
-
-  useEffect(() => {
-    // Mounting is not scrolling. A pane on screen because the user came back
-    // from the pane view has not travelled, so it does not settle.
-    if (!mounted.current) {
-      mounted.current = true;
-      return;
-    }
-    if (reducedMotion || settleDirection === 0) {
-      stretch.value = 0;
-      return;
-    }
-
-    lift.value = settleDirection;
-    stretch.value = withDelay(
-      stretchDelay(tile.order, STRETCH.staggerMs),
-      withSequence(
-        withTiming(1, { duration: STRETCH.upMs, easing: EASING }),
-        // A spring back, so the tile overshoots and settles rather than
-        // stopping dead on the mark. This is the bounce.
-        withSpring(0, {
-          damping: STRETCH.settleDamping,
-          stiffness: STRETCH.settleStiffness,
-          mass: STRETCH.settleMass,
-        }),
-      ),
-    );
-    // A pane arriving is the whole trigger: a re-render for any other reason
-    // must not replay it, or the grid twitches while it sits still.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settleKey]);
-
-  const animated = useAnimatedStyle(() => ({
-    transform: [
-      { translateY: -STRETCH.lift * lift.value * stretch.value },
-      { scaleY: 1 + (STRETCH.scale - 1) * stretch.value },
-    ],
-  }));
-
   const hero = card.media.hero;
   // The shared helper, which prefers the listing's own image over our
   // derivatives — a real listing's photograph lives at the source until the
@@ -347,7 +351,7 @@ function WindowTile({
   const uri = imageUri(hero, dataSaver);
 
   return (
-    <Animated.View style={[{ marginBottom: tile.gapBelow }, animated]} onLayout={onLayout}>
+    <View style={{ marginBottom: tile.gapBelow }} onLayout={onLayout}>
       <Pressable
         onPress={onPress}
         // The window screen has no rail, so a long press is the only way to
@@ -412,7 +416,7 @@ function WindowTile({
           />
         </View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 

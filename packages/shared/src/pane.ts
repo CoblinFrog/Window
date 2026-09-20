@@ -248,11 +248,3 @@ export function planPane(
 
   return { columnWidth, drops, tiles: scaled, fitScale };
 }
-
-/**
- * Delay before a tile joins the settle, by reading order. The pane ripples in
- * the direction the eye already travels.
- */
-export function stretchDelay(order: number, staggerMs: number): number {
-  return order * staggerMs;
-}

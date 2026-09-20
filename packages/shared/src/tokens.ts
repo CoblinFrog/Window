@@ -149,18 +149,31 @@ export const WINDOW = {
  * under the finger — and it leans the way the surface was moving, so a
  * backwards scroll does not settle forwards.
  */
+/**
+ * The settle: what a pane does on arrival.
+ *
+ * One motion, applied to the whole page rather than to each tile. Tuned for a
+ * viewport-sized box, so the numbers are larger than they look — 6% of an
+ * 812 px page is roughly 24 px at each edge, where 5% of a 200 px tile was 5.
+ * Scaling a full page also spreads the stretch across everything at once
+ * instead of asking twelve small boxes to agree, which is what makes it read
+ * as the page settling rather than as the contents twitching.
+ */
 export const STRETCH = {
-  /** Peak vertical scale. Past about 1.06 the text visibly distorts. */
-  scale: 1.05,
+  /** Peak vertical scale. Past about 1.07 the captions visibly distort. */
+  scale: 1.06,
   /** Peak lift, in px, signed by the direction of travel. */
-  lift: 9,
-  upMs: 110,
-  /** The return is a spring, so tiles overshoot and settle rather than stop dead. */
-  settleDamping: 11,
-  settleStiffness: 190,
-  settleMass: 0.55,
-  /** Per-tile stagger, in reading order. */
-  staggerMs: 34,
+  lift: 24,
+  upMs: 130,
+  /**
+   * The return is a spring, so the page overshoots and settles rather than
+   * stopping dead. These give a damping ratio near 0.36 — light enough that the
+   * overshoot is unmistakably a bounce, heavy enough that it is done in about
+   * 600 ms rather than wobbling under the next scroll.
+   */
+  settleDamping: 9,
+  settleStiffness: 220,
+  settleMass: 0.7,
 } as const;
 
 /**
