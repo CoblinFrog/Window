@@ -14,7 +14,6 @@ import {
   CAPTION_MAX_LINES,
   CAPTION_SPACING,
   COLORS,
-  MOTION,
   PANE_SIZE,
   RADIUS,
   STRETCH,
@@ -56,7 +55,15 @@ import { Rating } from './Rating.js';
  * user is scanning the same four things without the photographs to scan by.
  */
 
-const EASING = Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number]));
+/**
+ * The reach of the settle, as distinct from its return.
+ *
+ * `out(exp)` front-loads almost all of the travel and then decelerates for a
+ * long time, so the page springs out and hangs at the top rather than arriving
+ * at a constant rate. A bezier tuned to look similar still crosses its midpoint
+ * around halfway through; this one is most of the way there by a third.
+ */
+const REACH_EASING = Easing.out(Easing.exp);
 
 export interface WindowScreenProps {
   /** The whole ranked buffer; this screen windows it itself. */
@@ -249,7 +256,7 @@ function Pane({
 
     lift.value = settleDirection;
     stretch.value = withSequence(
-      withTiming(1, { duration: STRETCH.upMs, easing: EASING }),
+      withTiming(1, { duration: STRETCH.upMs, easing: REACH_EASING }),
       // A spring back, so the page overshoots and settles rather than stopping
       // dead on the mark. This is the bounce.
       withSpring(0, {

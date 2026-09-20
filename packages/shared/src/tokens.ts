@@ -160,21 +160,31 @@ export const WINDOW = {
  * as the page settling rather than as the contents twitching.
  */
 export const STRETCH = {
-  /** Peak vertical scale. Past about 1.07 the captions visibly distort. */
-  scale: 1.04,
+  /** Peak vertical scale. Past about 1.08 the captions visibly distort. */
+  scale: 1.07,
   /** Peak lift, in px, signed by the direction of travel. */
-  lift: 16,
-  upMs: 120,
+  lift: 26,
+  /**
+   * The stretch out, on an exponential ease-out.
+   *
+   * It carries further than before and takes nearly three times as long, and
+   * those two together are what keep it calm: the same distance covered
+   * linearly at this size would read as a lurch. Exponential is the right
+   * curve rather than a bezier because almost all of the travel happens in the
+   * first third and the rest is a long decelerating drift into the turn — the
+   * page reaches out quickly and then hangs, which is the part that reads as
+   * weight.
+   */
+  upMs: 320,
   /**
    * The return is a spring, so the page overshoots and settles rather than
-   * stopping dead. These give a damping ratio near 0.48: the page still passes
-   * its resting position and comes back, so the bounce is there to be seen,
-   * but it does it once and is finished in well under half a second instead of
-   * rocking through several visible swings.
+   * stopping dead. Damping ratio near 0.47, softened to match the slower reach
+   * above: a snappier return after a drawn-out stretch reads as two unrelated
+   * movements rather than one.
    */
-  settleDamping: 11,
-  settleStiffness: 210,
-  settleMass: 0.62,
+  settleDamping: 10,
+  settleStiffness: 160,
+  settleMass: 0.7,
 } as const;
 
 /**

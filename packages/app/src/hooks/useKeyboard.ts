@@ -127,22 +127,30 @@ export function useKeyboardControls(
  * wheel was quiet for long enough beforehand, and the tail behind it is
  * discarded.
  *
- * There used to be a second way through. A scroll still going after a sustain
- * interval turned another page, on the theory that a long deliberate scroll
- * should not be taken for one flick and ignored. But Chrome delivers trackpad
- * momentum at a steady 60 Hz with a decaying delta for as long as it runs, so
- * "still going" is exactly what a flick the user has already finished looks
- * like. Replaying realistic timings through both versions: a 1.0 s flick paged
- * twice, a 1.6 s flick three times, a held two-finger scroll three times. One
- * gesture, one page now, with no exception — to go further, scroll again.
+ * That alone is too strict, and shipping it broke scrolling. A wheel spun
+ * continuously never falls quiet, so after the first page it never turned
+ * another — the feed simply stopped responding while the user kept scrolling.
+ * A gesture that has not ended still has to be able to ask for more.
  *
- * The idle gap has to clear a trackpad's 16 ms delivery without swallowing a
- * mouse wheel's notches, which are single events maybe 120 ms apart and each
- * genuinely a separate request. At 140 ms it ate them; 100 ms passes every
- * notch while leaving momentum suppressed by a wide margin.
+ * What separates the two is the shape of the deltas, not their timing.
+ * Momentum only ever decays, and it decays proportionally, so a delta that
+ * holds steady or grows is a hand still on the wheel; a delta that jumps is a
+ * hand pushing again into the tail of its own flick. Neither can happen while
+ * a flick coasts. Only once the deltas say the input is live does a held
+ * scroll page again, and then no faster than `WHEEL_REPEAT_MS`.
+ *
+ * Replaying realistic timings: flicks of every strength up to 2.5 s turn one
+ * page, a held scroll turns one roughly every 400 ms, a mouse wheel turns one
+ * per notch, and a flick the user pushes again mid-tail turns two.
  */
 /** Quiet the wheel must fall for one gesture to have ended. */
 const WHEEL_IDLE_GAP_MS = 100;
+/** A scroll the deltas say is still being driven pages again, no faster than this. */
+const WHEEL_REPEAT_MS = 400;
+/** Consecutive non-decaying events before the input counts as live. */
+const WHEEL_LIVE_RUN = 2;
+/** A delta this much above the last is a fresh push, not a tail. */
+const WHEEL_SPIKE = 1.5;
 /** Below this a wheel event is noise, not intent. */
 const WHEEL_MIN_DELTA = 12;
 
@@ -153,6 +161,14 @@ export function useSnappedWheel(
 ): void {
   /** When the previous wheel event arrived, burst or not. */
   const lastEventAt = useRef(0);
+  /** When a page was last turned. */
+  const lastActionAt = useRef(0);
+  /** The previous event's magnitude, for reading the decay curve. */
+  const lastDelta = useRef(0);
+  /** Consecutive events that did not decay. */
+  const liveRun = useRef(0);
+  /** Whether the deltas say a hand is still driving this. */
+  const live = useRef(false);
   const next = useRef(onNext);
   const prev = useRef(onPrev);
   next.current = onNext;
@@ -168,10 +184,32 @@ export function useSnappedWheel(
       const sincePrevious = now - lastEventAt.current;
       lastEventAt.current = now;
 
-      if (Math.abs(event.deltaY) < WHEEL_MIN_DELTA) return;
+      const delta = Math.abs(event.deltaY);
+      if (delta < WHEEL_MIN_DELTA) {
+        lastDelta.current = delta;
+        return;
+      }
 
-      // Mid-burst: the tail of a flick already acted on.
-      if (sincePrevious <= WHEEL_IDLE_GAP_MS) return;
+      // Read the decay curve. Coasting momentum falls away proportionally on
+      // every event; anything that holds, grows, or jumps is a hand.
+      if (delta > lastDelta.current * WHEEL_SPIKE + 5) {
+        live.current = true;
+        liveRun.current = WHEEL_LIVE_RUN;
+      } else if (delta > lastDelta.current * 0.99) {
+        liveRun.current += 1;
+        if (liveRun.current >= WHEEL_LIVE_RUN) live.current = true;
+      } else {
+        liveRun.current = 0;
+      }
+      lastDelta.current = delta;
+
+      const opensGesture = sincePrevious > WHEEL_IDLE_GAP_MS;
+      const stillDriven = live.current && now - lastActionAt.current > WHEEL_REPEAT_MS;
+      if (!opensGesture && !stillDriven) return;
+
+      lastActionAt.current = now;
+      live.current = false;
+      liveRun.current = 0;
 
       if (event.deltaY > 0) next.current();
       else prev.current();
