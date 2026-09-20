@@ -20,7 +20,9 @@ const FAKE = {
 };
 
 const out = new URL('../../../../.data/demo', import.meta.url).pathname;
-const merchant = await startMockMerchant(4545);
+// Ephemeral port: the demo brings its own merchant, so it must never collide
+// with a long-running one someone left on a fixed port.
+const merchant = await startMockMerchant();
 const browser = new PlaywrightCheckoutBrowser({ headless: true, allowUncheckedHosts: true });
 const vault = new VaultHandle(FAKE);
 
