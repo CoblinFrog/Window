@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import { Image } from 'expo-image';
 import { GestureDetector } from 'react-native-gesture-handler';
@@ -97,34 +97,39 @@ export function WindowScreen({
   const ordinal = Math.max(0, Math.round(paneStart / PANE_SIZE));
   const paneCount = Math.max(1, Math.ceil(buffer.length / PANE_SIZE));
 
+  // The pane a settle is travelling to, known from the moment it starts rather
+  // than the moment it lands.
+  //
+  // This used to be derived from `ordinal`, which only changes once the surface
+  // has arrived: the pager commits the index at the far end of its animation on
+  // purpose, so the buffer, the seen-set and the dwell timers agree with what is
+  // on screen. That made the two motions strictly sequential — 260 ms of travel,
+  // and only then the stretch. The wheel and the keyboard hide it, because they
+  // move the index first and let the surface follow, so the two overlap. A drag
+  // does the reverse, and a drag is the only input a phone has: the page
+  // arrived, stopped, and then bounced on its own.
+  //
+  // `key` is a counter rather than the target index, so scrolling back onto a
+  // pane plays the settle again instead of being a no-op.
+  const [settle, setSettle] = useState<{
+    key: number;
+    target: number;
+    direction: 1 | -1;
+  } | null>(null);
+  const settleCount = useRef(0);
+  const beginSettle = useCallback((target: number, direction: 1 | -1) => {
+    settleCount.current += 1;
+    setSettle({ key: settleCount.current, target, direction });
+  }, []);
+
   const pager = usePager({
     index: ordinal,
     count: paneCount,
     height,
     reducedMotion,
     onPage: onScroll,
+    onSettleStart: beginSettle,
   });
-
-  // Which way the surface last moved, and whether it moved at all.
-  //
-  // The settle belongs to scrolling. Mounting is not scrolling: arriving here
-  // from the pane view, or from a fresh load, puts a pane on screen without it
-  // having travelled, and bouncing then says the feed moved when it did not.
-  // So the first render after a mount is explicitly not a settle — the ref
-  // starts empty and only a later change to `ordinal` counts.
-  const previousOrdinal = useRef<number | null>(null);
-  const settleDirection: 1 | -1 | 0 =
-    previousOrdinal.current === null || previousOrdinal.current === ordinal
-      ? 0
-      : ordinal > previousOrdinal.current
-        ? 1
-        : -1;
-
-  // Effects run children-first, so every tile has already read the direction
-  // above by the time this records the new position for next time.
-  useEffect(() => {
-    previousOrdinal.current = ordinal;
-  }, [ordinal]);
 
   return (
     <GestureDetector gesture={pager.pan}>
@@ -147,11 +152,11 @@ export function WindowScreen({
                 width={width}
                 height={height}
                 highlightIndex={highlightIndex}
-                settleKey={ordinal}
-                settleDirection={settleDirection}
-                // The neighbours are mounted so a drag can show where it is
-                // going. They are not what arrived, so they do not settle.
-                isCurrent={page === ordinal}
+                // Only the pane being travelled to settles. At the moment a
+                // settle starts that is a neighbour, not the current pane —
+                // which is the whole point, since it is the one arriving.
+                settleKey={settle?.target === page ? settle.key : 0}
+                settleDirection={settle?.target === page ? settle.direction : 0}
                 reducedMotion={reducedMotion}
                 dataSaver={dataSaver}
                 onTap={onTap}
@@ -173,12 +178,10 @@ interface PaneProps {
   width: number;
   height: number;
   highlightIndex: number | undefined;
-  /** Changes when a pane arrives, which is what plays the settle. */
+  /** Changes when a settle toward this pane begins, which is what plays it. */
   settleKey: number;
-  /** Which way it arrived: 1 scrolled forward, -1 back, 0 not a scroll. */
+  /** Which way it is arriving: 1 scrolling forward, -1 back, 0 not arriving. */
   settleDirection: 1 | -1 | 0;
-  /** True for the pane in view. Only it settles. */
-  isCurrent: boolean;
   reducedMotion: boolean;
   dataSaver: boolean;
   onTap(index: number, card: ProductCard, rect: TileRect | null): void;
@@ -194,7 +197,6 @@ function Pane({
   highlightIndex,
   settleKey,
   settleDirection,
-  isCurrent,
   reducedMotion,
   dataSaver,
   onTap,
@@ -240,16 +242,12 @@ function Pane({
   // backwards scroll settle forwards, which reads as the feed disagreeing with
   // the finger.
   const lift = useSharedValue(0);
-  const mounted = useRef(false);
-
   useEffect(() => {
-    // Mounting is not scrolling. A pane on screen because the user came back
-    // from the pane view has not travelled, so it does not settle.
-    if (!mounted.current) {
-      mounted.current = true;
-      return;
-    }
-    if (reducedMotion || settleDirection === 0 || !isCurrent) {
+    // Not the pane being arrived at, or not a scroll at all. Mounting lands
+    // here too: a pane on screen because the user came back from the pane view
+    // has not travelled, and bouncing then says the feed moved when it did not.
+    if (settleDirection === 0) return;
+    if (reducedMotion) {
       stretch.value = 0;
       return;
     }
@@ -265,8 +263,8 @@ function Pane({
         mass: STRETCH.settleMass,
       }),
     );
-    // A pane arriving is the whole trigger: a re-render for any other reason
-    // must not replay it, or the grid twitches while it sits still.
+    // A settle beginning is the whole trigger: a re-render for any other
+    // reason must not replay it, or the grid twitches while it sits still.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settleKey]);
 

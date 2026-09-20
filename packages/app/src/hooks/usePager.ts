@@ -53,6 +53,16 @@ export interface PagerOptions {
   reducedMotion: boolean;
   /** Called once a drag has settled onto the neighbouring page. */
   onPage(direction: 'next' | 'prev'): void;
+  /**
+   * Called when a settle *begins*, with the page it is heading for.
+   *
+   * `onPage` fires at the far end of the travel, because the index must not
+   * move until the surface has arrived — the buffer, the seen-set and the dwell
+   * timers all read it and all have to agree with what is on screen. Anything
+   * that wants to animate *with* the travel rather than after it needs the near
+   * end instead, which is this.
+   */
+  onSettleStart?(target: number, direction: 1 | -1): void;
   /** Pages kept mounted either side of the one in view. Defaults to 1. */
   neighbours?: number;
 }
@@ -85,6 +95,7 @@ export function usePager({
   height,
   reducedMotion,
   onPage,
+  onSettleStart,
   neighbours = 1,
 }: PagerOptions): Pager {
   const last = Math.max(0, count - 1);
@@ -97,17 +108,33 @@ export function usePager({
   /** Non-zero while a finger is down, so the sync effect keeps out of the way. */
   const dragging = useSharedValue(0);
 
+  const settleStart = useCallback(
+    (target: number, direction: 1 | -1) => {
+      onSettleStart?.(target, direction);
+    },
+    [onSettleStart],
+  );
+
+  /** The index this effect last saw, so a relayout is not mistaken for a move. */
+  const previousIndex = useRef(current);
+
   // Keeps the surface in step with the index when something other than a drag
   // moved it — the keyboard, the wheel, a deep link, a refill landing. Those
   // get the same settle as a release rather than a cut.
   useEffect(() => {
+    const from = previousIndex.current;
+    previousIndex.current = current;
     if (dragging.value === 1) return;
     const target = current * height;
+    // Already there: the drag path, which moved the surface first and is only
+    // now committing the index. It announced its own settle at the near end.
     if (Math.abs(scrollY.value - target) < 0.5) return;
+    // A height change is a relayout, not a move, and must not announce one.
+    if (from !== current) settleStart(current, current > from ? 1 : -1);
     scrollY.value = reducedMotion
       ? target
       : withTiming(target, { duration: SCROLL.settleMs, easing: EASING });
-  }, [current, height, reducedMotion, scrollY, dragging]);
+  }, [current, height, reducedMotion, scrollY, dragging, settleStart]);
 
   const commit = useCallback(
     (direction: 'next' | 'prev') => {
@@ -161,6 +188,10 @@ export function usePager({
 
           const direction = target > current ? 'next' : target < current ? 'prev' : null;
 
+          // The near end of the travel. Anything that animates the arriving
+          // page starts now, alongside it, rather than when it lands.
+          if (direction) runOnJS(settleStart)(target, direction === 'next' ? 1 : -1);
+
           scrollY.value = withTiming(
             target * height,
             { duration: SCROLL.settleMs, easing: EASING },
@@ -188,7 +219,7 @@ export function usePager({
         .onFinalize(() => {
           dragging.value = 0;
         }),
-    [commit, current, dragOrigin, dragging, height, last, markDragged, scrollY],
+    [commit, current, dragOrigin, dragging, height, last, markDragged, scrollY, settleStart],
   );
 
   const surfaceStyle = useAnimatedStyle<ViewStyle>(() => ({
