@@ -19,3 +19,9 @@ web-build/
 # packages/server/src/config/supabase.ts both carry the Supabase service-role
 # key, which bypasses row-level security. Rotate it before making the
 # repository public or adding collaborators.
+
+# Cookie jars the marketplace fetchers prime before a crawl. These hold live
+# session tokens for amazon.com and ebay.com, they are re-minted on demand, and
+# they are per-machine — so unlike the generated media above they must never be
+# committed.
+**/.data/cookies/
