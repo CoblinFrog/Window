@@ -37,9 +37,22 @@ export interface ShopifyStore {
  * than assumed, because a store owner can edit the file and the whole
  * justification for this crawl rests on it.
  */
-export async function robotsAllows(domain: string, path: string): Promise<boolean> {
+export async function robotsAllows(
+  domain: string,
+  path: string,
+  /**
+   * The origin to ask, when it is not `https://<domain>`.
+   *
+   * robots.txt is defined per origin — scheme, host *and* port — so a service
+   * on a non-default port has its own file. Reconstructing the URL from the
+   * hostname alone silently asks the wrong server, and since an unreachable
+   * robots.txt is treated as a refusal, the result is a merchant that can never
+   * be driven for a reason that has nothing to do with what it permits.
+   */
+  origin?: string,
+): Promise<boolean> {
   try {
-    const response = await fetch(`https://${domain}/robots.txt`, {
+    const response = await fetch(`${origin ?? `https://${domain}`}/robots.txt`, {
       headers: { 'user-agent': USER_AGENT },
       redirect: 'follow',
       signal: AbortSignal.timeout(10_000),

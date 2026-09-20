@@ -194,6 +194,11 @@ export interface CheckoutPage {
  * hand-maintained mapping plugs in.
  */
 export interface FieldMap {
+  /**
+   * Origin override. Real merchants are reached at `https://<domain>`; this is
+   * for a local stand-in, whose domain does not resolve.
+   */
+  origin?: string;
   /** Where the checkout form lives, relative to the merchant origin. */
   checkoutPath: string;
   /** Vault field → CSS selector on the merchant's form. */
@@ -285,8 +290,17 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
       input.onStep?.('navigate: checkout opened');
 
       // Delivery details, by reference. The agent does not know what it typed.
+      //
+      // Only fields the vault actually holds are filled. A second address line
+      // is optional for most people, and a form that offers the box must not
+      // fail the order because the user has nothing to put in it.
+      const held = new Set(this.config.vault?.availableFields() ?? []);
       for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
         input.signal?.throwIfAborted();
+        if (!held.has(field)) {
+          input.onStep?.(`skip: ${field} (not held for this user)`);
+          continue;
+        }
         await page.type(selector, referenceFor(field));
         input.onStep?.(`type: ${field} into ${selector}`);
       }
@@ -375,7 +389,9 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
       input.signal?.throwIfAborted();
       await page.navigate(`${this.originOf(input.merchantDomain)}${map.checkoutPath}`);
 
+      const held = new Set(this.config.vault?.availableFields() ?? []);
       for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
+        if (!held.has(field)) continue;
         await page.type(selector, referenceFor(field));
       }
       if (map.shipping) await page.select(map.shipping.selector, map.shipping.value);

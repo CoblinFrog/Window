@@ -6,7 +6,7 @@ import { CheckoutOrchestrator } from '../checkout/orchestrator.js';
 import { CouponStore } from '../checkout/coupons.js';
 import { SupabaseCheckoutRepository } from '../checkout/repository.supabase.js';
 import { PlaywrightCheckoutBrowser } from '../checkout/browser.js';
-import { fieldMapFor } from '../checkout/field-maps.js';
+import { fieldMapFor, originFor } from '../checkout/field-maps.js';
 import { VaultHandle, type ShippingDetails } from '../checkout/vault.js';
 import type { CheckoutRepository } from '../checkout/repository.js';
 import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
@@ -85,6 +85,7 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     coupons,
     browser,
     fieldMapFor,
+    originFor,
     // Delivery details, held encrypted for the life of the job.
     //
     // A real deployment loads these from the user's saved address at job

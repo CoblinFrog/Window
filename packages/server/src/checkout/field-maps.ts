@@ -18,8 +18,10 @@ import type { FieldMap } from './agent.js';
  * independently of this file.
  */
 const MAPS: Record<string, FieldMap> = {
-  // The local stand-in used by the demo and the tests.
+  // The local stand-in used by the demo and the tests. Its domain does not
+  // resolve, so it carries the origin it is actually served from.
   'northwind.test': {
+    origin: process.env.MOCK_MERCHANT_URL ?? 'http://127.0.0.1:4545',
     checkoutPath: '/checkout',
     fields: {
       'ship.name': '#f-recipient',
@@ -45,6 +47,11 @@ const MAPS: Record<string, FieldMap> = {
 
 export function fieldMapFor(merchantDomain: string): FieldMap | null {
   return MAPS[merchantDomain] ?? null;
+}
+
+/** Where a mapped merchant is actually reached. */
+export function originFor(merchantDomain: string): string {
+  return MAPS[merchantDomain]?.origin ?? `https://${merchantDomain}`;
 }
 
 export function mappedMerchants(): string[] {

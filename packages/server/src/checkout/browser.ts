@@ -108,7 +108,7 @@ class PlaywrightCheckoutPage implements CheckoutPage {
     const target = new URL(url);
 
     if (!this.config.allowUncheckedHosts && !this.robotsChecked) {
-      const allowed = await robotsAllows(target.hostname, target.pathname);
+      const allowed = await robotsAllows(target.hostname, target.pathname, target.origin);
       if (!allowed) {
         throw new RobotsDisallowed(
           `${target.hostname} disallows ${target.pathname} in robots.txt. ` +
