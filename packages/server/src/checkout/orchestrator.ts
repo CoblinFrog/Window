@@ -385,6 +385,10 @@ export class CheckoutOrchestrator {
       });
 
       await this.writeAudit(runtime, order, 'quote');
+      // Carries the state, and the client refetches the full summary. The
+      // payload type allows a summary here, but building one needs the source
+      // and risk lookups the route does — so the event stays a signal and the
+      // route stays the single place a summary is assembled.
       this.emit(runtime, { event: 'quote_ready', state: 'awaiting_auth' });
 
       return updated as Order;

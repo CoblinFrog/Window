@@ -372,6 +372,9 @@ function applyFrame(jobId: string, raw: string, set: Setter, get: Getter): void 
   switch (payload.event) {
     case 'state':
       if (job && payload.state) mergeJob({ ...job, status: payload.state }, set, get);
+      // A state arriving for a job we have not seen yet is not something to
+      // drop: it is the first thing we know about it.
+      else if (payload.state) void get().refresh(jobId);
       break;
     case 'step':
       if (payload.step) pushStep(jobId, payload.step, set, get);
@@ -385,7 +388,12 @@ function applyFrame(jobId: string, raw: string, set: Setter, get: Getter): void 
       }
       break;
     case 'quote_ready':
+      // The server signals that quoting finished; it does not necessarily carry
+      // the summary with it. Merging only when `quote` is present means the one
+      // event that ends the waiting state gets silently dropped, and the screen
+      // sits on "Working at the merchant" while the job is long since done.
       if (payload.quote) mergeJob(payload.quote, set, get);
+      else void get().refresh(jobId);
       break;
   }
 }

@@ -175,7 +175,7 @@ export function authenticate(collections: CollectionSet, cache: KeyValueCache) {
       const principal = raw
         ? await principalFromToken(collections, raw)
         : typeof ticket === 'string'
-          ? await principalFromTicket(collections, cache, ticket, req.path)
+          ? await principalFromTicket(collections, cache, ticket, requestPath(req))
           : null;
 
       if (!principal) {
@@ -217,6 +217,19 @@ async function principalFromToken(
       epoch: user.sessionEpoch ?? 1,
     },
   };
+}
+
+/**
+ * The request path as the client asked for it.
+ *
+ * This middleware runs inside a router mounted at `/v1`, so `req.path` has the
+ * mount point stripped — it is `/checkout/...` where the client asked for
+ * `/v1/checkout/...`. A ticket is bound to the path it was minted for, and
+ * minting happens in a route handler that knows the full path, so comparing
+ * against the stripped one rejects every ticket that was ever issued.
+ */
+function requestPath(req: Request): string {
+  return (req.originalUrl ?? req.url).split('?')[0] ?? '';
 }
 
 export interface StreamTicket {
