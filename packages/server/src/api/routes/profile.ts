@@ -7,6 +7,7 @@ import {
   ONBOARDING_TOPIC_COUNT,
   UPVOTE_REASONS,
   getCategory,
+  imageUri,
   type ClientEvent,
   type MeResponse,
   type OnboardingTopicsResponse,
@@ -14,6 +15,7 @@ import {
 import { env } from '../../config/env.js';
 import { localEmbeddingProvider } from '../../embedding/local.js';
 import type { AppContext } from '../context.js';
+import type { Product } from '../../db/supabase-collections.js';
 import { bootstrapDevice, rateLimit } from '../middleware.js';
 import { mintToken, requireAuthenticated } from '../auth.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
@@ -34,6 +36,42 @@ export function profileRoutes(ctx: AppContext): Router {
   });
 
   /** The 18 L1 tiles with imagery. */
+  /**
+   * One real photograph per topic, taken from the catalog.
+   *
+   * The tile used to be a generated collage: deterministic, identical on every
+   * device, and an abstract smear of colour that told nobody what "Home and
+   * kitchen" contains. A picker whose job is to ask what someone likes has to
+   * show them the thing.
+   *
+   * The choice is deterministic rather than random — sorted by id and the first
+   * one taken — so a topic keeps the same face between requests and reloads.
+   * Picking freshly each time would make the grid flicker into a different set
+   * of products on every visit, which reads as a bug.
+   *
+   * A topic the catalog cannot cover keeps the generated tile. That is a real
+   * state, not a transitional one: the taxonomy has eighteen L1 topics and a
+   * young catalog will not stock all of them, so the grid has to stay complete
+   * with holes in it rather than render gaps.
+   */
+  async function topicImages(): Promise<Map<string, string>> {
+    const products = await find<Product>(
+      collections.products,
+      { status: 'active' },
+      { select: 'id,category,media', limit: 2000 },
+    );
+    products.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+    const images = new Map<string, string>();
+    for (const product of products) {
+      const l1 = product.category?.l1;
+      if (!l1 || images.has(l1)) continue;
+      const uri = product.media?.hero ? imageUri(product.media.hero) : undefined;
+      if (uri) images.set(l1, uri);
+    }
+    return images;
+  }
+
   router.get('/onboarding/topics', async (_req, res, next) => {
     try {
       // `tile.order` is a JSONB property, not a SQL column. Fetch the L1
@@ -42,10 +80,16 @@ export function profileRoutes(ctx: AppContext): Router {
       const docs = await find(collections.categories, { level: 1 });
       docs.sort((a, b) => (a.tile?.order ?? 0) - (b.tile?.order ?? 0));
 
+      const photos = await topicImages();
+      // A seeded `tile.image` points at the generated collage, so the catalog
+      // photograph is preferred over it rather than the other way round.
+      const tileFor = (slug: string, seeded?: string | undefined): string =>
+        photos.get(slug) ?? seeded ?? `${env.publicUrl}/media/topic/${slug}`;
+
       const topics = docs.map((doc) => ({
         id: doc.slug,
         displayName: doc.displayName,
-        image: doc.tile?.image ?? `${env.publicUrl}/media/topic/${doc.slug}`,
+        image: tileFor(doc.slug, doc.tile?.image),
         order: doc.tile?.order ?? 0,
       }));
 
@@ -54,7 +98,7 @@ export function profileRoutes(ctx: AppContext): Router {
       const fallback = L1_TOPICS.map((node, index) => ({
         id: node.id,
         displayName: node.displayName,
-        image: `${env.publicUrl}/media/topic/${node.id}`,
+        image: tileFor(node.id),
         order: node.tileOrder ?? index,
       }));
 
