@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Linking from 'expo-linking';
-import { Redirect } from 'expo-router';
+import { Redirect, useRouter } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated from 'react-native-reanimated';
 import {
@@ -53,6 +53,7 @@ export default function FeedScreen(): React.ReactElement {
   const session = useSession();
   const feed = useFeed();
   const cart = useCart();
+  const router = useRouter();
 
   const [reviewsFor, setReviewsFor] = useState<{ card: ProductCard; critical: boolean } | null>(
     null,
@@ -334,6 +335,18 @@ export default function FeedScreen(): React.ReactElement {
   /** The pane view is the only place a single product is what the screen is about. */
   const inPane = feed.mode === 'single';
 
+  // The cart is loaded here rather than only by the cart screen, because the
+  // count on the button has to be right before anyone has opened that screen.
+  // A cart that fills up silently and shows nothing until you go looking is
+  // the same as no cart at all.
+  const loadCart = cart.load;
+  useEffect(() => {
+    if (session.status !== 'ready') return;
+    void loadCart();
+  }, [session.status, loadCart]);
+
+  const cartCount = cart.itemCount();
+
   useKeyboardControls(
     {
       onNext: next,
@@ -496,6 +509,38 @@ export default function FeedScreen(): React.ReactElement {
             </View>
           ) : null}
 
+          {/* The way to the cart, and the only one: nothing else in the app
+              navigates to that screen. It lives in the window screen's top
+              left, which is free — the pane view puts its back control there,
+              which is why this is not drawn in that mode, and why the ask
+              strip above is inset from both edges rather than spanning them.
+
+              The count is on the button because a cart you cannot see the size
+              of is one you have to open to learn anything about. */}
+          {!inPane ? (
+            <Pressable
+              onPress={() => router.push('/cart')}
+              accessibilityRole="button"
+              accessibilityLabel={
+                cartCount > 0
+                  ? `Cart, ${cartCount} ${cartCount === 1 ? 'item' : 'items'}`
+                  : 'Cart, empty'
+              }
+              style={styles.cartButton}
+              hitSlop={8}
+            >
+              {/* The button's body is `card`, which is white — the window
+                  screen inverts the frame. So the glyph takes the light-surface
+                  ink, not the default, which is also white. */}
+              <Icon name="cart" size={20} color={COLORS.textPrimaryLight} />
+              {cartCount > 0 ? (
+                <View style={styles.cartBadge}>
+                  <Text style={styles.cartBadgeText}>{cartCount > 9 ? '9+' : cartCount}</Text>
+                </View>
+              ) : null}
+            </Pressable>
+          ) : null}
+
           {/* The single coach mark in the product: a 2-second hint, dismissed
               on first interaction and never shown again. */}
           {showSwipeHint && feed.mode === 'window' && card ? (
@@ -624,6 +669,39 @@ const styles = StyleSheet.create({
   // A floating pill in the top right. Every other corner is spoken for: the
   // back control has the top left, the price and similar-products link have the
   // bottom, and the middle is the photograph.
+  // Circular, in the top left, on the same band as the ask pill above it. The
+  // pill is inset 60 px from each edge, so the two never meet.
+  cartButton: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.card,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.hairlineLight,
+  },
+  cartBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.accent,
+  },
+  cartBadgeText: {
+    color: COLORS.textPrimary,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: TYPE.weights.semibold,
+  },
   staleBar: {
     position: 'absolute',
     top: 14,

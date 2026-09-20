@@ -461,7 +461,7 @@ export function AskPanel({
                 pointer. The pull still works for anyone who does know; this is
                 what tells everyone else there is something here. */}
             <Animated.View style={[styles.askPillInner, handleStyle]}>
-              <Icon name="search" size={16} color={COLORS.textSecondary} />
+              <Icon name="search" size={16} color={COLORS.textSecondaryLight} />
               <Text style={styles.askPillText}>Ask for anything</Text>
             </Animated.View>
           </Pressable>
@@ -732,11 +732,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: RADIUS.tile,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: COLORS.hairline,
+    borderColor: COLORS.hairlineLight,
     backgroundColor: COLORS.card,
   },
   askPillText: {
-    color: COLORS.textSecondary,
+    // `card` is white. The default secondary ink is white too, so the label
+    // was white on white — present in the accessibility tree and invisible on
+    // the screen.
+    color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
   },
