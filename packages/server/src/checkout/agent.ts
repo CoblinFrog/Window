@@ -154,6 +154,17 @@ export interface CheckoutPage {
   type(selector: string, text: string): Promise<void>;
   select(selector: string, value: string): Promise<void>;
   readDom(selector?: string): Promise<string>;
+  /**
+   * Whether a field currently holds the value behind a vault reference.
+   *
+   * The agent has to confirm a field took what it typed — merchant forms
+   * reformat, truncate and silently reject — but handing the value back would
+   * undo the entire point of the vault. So the comparison happens in the
+   * driver and only the boolean crosses back.
+   */
+  isFilledWith(selector: string, reference: string): Promise<boolean>;
+  /** Whether a field is empty. Used to prove the agent left payment alone. */
+  isEmpty(selector: string): Promise<boolean>;
   screenshot(): Promise<Buffer>;
   close(): Promise<void>;
 }
