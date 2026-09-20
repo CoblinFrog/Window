@@ -322,6 +322,36 @@ export function profileRoutes(ctx: AppContext): Router {
     }
   });
 
+  const challengeSchema = z.object({ email: z.string().email().max(254) });
+
+  /**
+   * Step one of an email claim: send a code to the address and prove nothing yet.
+   *
+   * The response is identical whether or not the address is already attached to
+   * another account. Telling the caller "that email is taken" turns this into an
+   * oracle for which of a list of addresses has a Window account, which is a
+   * privacy leak paid for with no security benefit.
+   */
+  router.post('/me/claim/email', rateLimit(ctx.cache, 'claim'), async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+
+      const parsed = challengeSchema.safeParse(req.body);
+      if (!parsed.success) throw ApiError.validation('A valid email address is required.');
+
+      const { expiresAt } = await issueEmailChallenge(
+        ctx.cache,
+        ctx.mailer,
+        user.id,
+        parsed.data.email,
+      );
+      res.status(202).json({ expiresAt: expiresAt.toISOString() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   const claimSchema = z.object({
     provider: z.enum(['email', 'apple', 'google']),
     email: z.string().email().max(254).optional(),

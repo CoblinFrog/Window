@@ -133,6 +133,12 @@ export default function CartScreen(): React.ReactElement {
   const blockedReason = useCart((state) => state.checkoutBlockedReason());
   const canCheckout = blockedReason === null;
 
+  // Browsing is anonymous; ordering is not. Rather than letting checkout fail
+  // with "an anonymous principal cannot place orders" — which is true, and
+  // useless to the person reading it — the button says what it needs and goes
+  // and gets it.
+  const needsAccount = session.isAnonymous;
+
   const openBid = useCallback(() => {
     if (auctionBlock?.sourceUrl) void Linking.openURL(auctionBlock.sourceUrl);
     clearAuctionBlock();
@@ -335,12 +341,16 @@ export default function CartScreen(): React.ReactElement {
         {blockedReason ? <Text style={styles.smallText}>{blockedReason}</Text> : null}
         <Control
           label="Review checkout"
-          onPress={() => router.push('/checkout')}
+          onPress={() => router.push(needsAccount ? '/claim' : '/checkout')}
           disabled={!canCheckout}
           style={[styles.primary, canCheckout ? null : styles.primaryDisabled]}
         >
           <Text style={styles.primaryText}>
-            {canCheckout ? 'Review checkout' : 'Checkout unavailable'}
+            {!canCheckout
+              ? 'Checkout unavailable'
+              : needsAccount
+                ? 'Confirm your email to check out'
+                : 'Review checkout'}
           </Text>
         </Control>
       </View>
