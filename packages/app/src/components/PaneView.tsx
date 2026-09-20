@@ -37,6 +37,9 @@ import { Scrim } from './Scrim.js';
  * is the whole screen, so every scroll would finish with a phantom tap.
  */
 
+/** Inset either side of the glass, so it reads as a panel laid on the black. */
+const GLASS_MARGIN = 12;
+
 const CONDITION_LABELS: Record<string, string> = {
   new: 'New',
   like_new: 'Like new',
@@ -47,6 +50,21 @@ const CONDITION_LABELS: Record<string, string> = {
   for_parts: 'For parts',
   unknown: 'Condition unknown',
 };
+
+/**
+ * How many photographs this product has, which is not always how many have
+ * arrived.
+ *
+ * A card promoted from the window screen was fetched in window mode, where the
+ * server sends `galleryCount` but not the gallery itself — so the array holds
+ * only the hero until the live refresh lands. Counting the array would draw one
+ * tick for a product with nine pictures and then silently grow, which reads as
+ * the indicator being broken. Counting what the server says exists is right the
+ * moment the pane opens.
+ */
+export function galleryLength(card: ProductCard): number {
+  return Math.max(1 + card.media.gallery.length, 1 + card.media.galleryCount);
+}
 
 export interface PaneViewProps {
   card: ProductCard;
@@ -85,7 +103,27 @@ export function PaneView({
   dataSaver = false,
 }: PaneViewProps): React.ReactElement {
   const images = [card.media.hero, ...card.media.gallery];
+  // The index can run ahead of what has loaded while the live refresh is in
+  // flight; hold on the last image we have rather than blanking the pane.
   const image = images[Math.min(galleryIndex, images.length - 1)] ?? card.media.hero;
+  const total = galleryLength(card);
+
+  // How tall the glass needs to be for the photograph to fill it exactly.
+  //
+  // `contain` inside a panel that always fills the screen leaves a band of
+  // black above and below a square product shot — most of a listing's
+  // photographs are square, so that is the common case, not the edge one.
+  // Capping the panel at the height the image actually wants removes the bands
+  // and lets the flap sit under the photograph instead of under a void.
+  //
+  // The cap comes from the hero rather than the current gallery image, so the
+  // panel holds still while someone taps through the gallery; a panel that
+  // resized per photograph would walk the price up and down the screen.
+  const hero = card.media.hero;
+  const glassWidth = width - GLASS_MARGIN * 2;
+  const heroAspect =
+    hero.width > 0 && hero.height > 0 ? hero.height / hero.width : 1;
+  const glassMaxHeight = Math.round(glassWidth * heroAspect);
 
   // Data saver serves 480 px images; everything else takes the 1080 px variant,
   // which is under the 120 KB per-card budget at typical compression. The
@@ -99,7 +137,7 @@ export function PaneView({
   return (
     <View style={[styles.container, { width, height }]}>
       {/* ---- The glass ---------------------------------------------------- */}
-      <View style={styles.glass}>
+      <View style={[styles.glass, { maxHeight: glassMaxHeight }]}>
         <View
           style={StyleSheet.absoluteFill}
           accessibilityRole="image"
@@ -109,14 +147,19 @@ export function PaneView({
             source={{ uri: sourceUri }}
             placeholder={{ blurhash: image.blurhash }}
             transition={0}
-            contentFit="cover"
+            // `contain`, so the whole product is in frame. The glass is a
+            // fixed panel and product photography is mostly square, so `cover`
+            // scales to the panel's height and takes the sides off — which on a
+            // listing shot is where the product usually ends. Letterboxing costs
+            // some black; cropping costs the thing being sold.
+            contentFit="contain"
             style={StyleSheet.absoluteFill}
             recyclingKey={card.productId}
             cachePolicy="memory-disk"
           />
         </View>
 
-        <Scrim top right bottom={images.length > 1} />
+        <Scrim top right bottom={total > 1} />
 
         <Pressable
           onPress={onBack}
@@ -130,11 +173,12 @@ export function PaneView({
 
         {rail}
 
-        {/* Gallery position, as dashes rather than dots-with-a-count. Nothing
-            appears until it is needed: one image means no indicator at all. */}
-        {images.length > 1 ? (
+        {/* Gallery position, as dashes rather than dots-with-a-count: one per
+            photograph the product has. Nothing appears until it is needed, so a
+            single-image listing gets no indicator at all. */}
+        {total > 1 ? (
           <View style={styles.ticks} pointerEvents="none">
-            {images.map((entry, index) => (
+            {Array.from({ length: total }, (_, index) => (
               <View
                 key={`${card.productId}-${index}`}
                 style={[styles.tick, index === galleryIndex ? styles.tickActive : null]}
@@ -267,13 +311,17 @@ export function PaneView({
 }
 
 const styles = StyleSheet.create({
-  container: { backgroundColor: COLORS.surface },
+  // Centred, because the glass is capped at the photograph's own height: a
+  // square product shot leaves the page with space to spare, and hanging it all
+  // off the bottom makes the pane look like it failed to load rather than like
+  // it fits.
+  container: { backgroundColor: COLORS.surface, justifyContent: 'center' },
   // The photograph is the top of the screen and the information hangs off the
   // bottom of it as a flap. The inset is what makes the pane read as a single
   // pane of glass laid on the black rather than as a full-bleed background.
   glass: {
     flex: 1,
-    marginHorizontal: 12,
+    marginHorizontal: GLASS_MARGIN,
     marginTop: 14,
     marginBottom: 0,
     borderRadius: RADIUS.media,
