@@ -146,12 +146,19 @@ export function PaneDeck({
     [card, onLongPress],
   );
 
-  // Order is priority. The drags outrank the taps, so movement always wins; the
-  // double tap outranks the single so an upvote is never also a gallery
-  // advance; and the long press sits last, where only a still finger reaches it.
+  // A race at the top level, with only the two taps disambiguated by priority
+  // inside it.
+  //
+  // The drags and the taps are already mutually exclusive by configuration —
+  // the pan needs 12px of movement to activate and the taps allow at most 12px
+  // — so they do not need `Exclusive` to keep them apart. Putting the pan
+  // inside one actively harms it: the pan has to wait on the other gestures
+  // resolving before it finalises, and its `onEnd` never arrives, which leaves
+  // a drag tracking the finger perfectly and then never settling onto a page.
+  const taps = useMemo(() => Gesture.Exclusive(doubleTap, singleTap), [doubleTap, singleTap]);
   const gesture = useMemo(
-    () => Gesture.Exclusive(pager.pan, swipeBack, doubleTap, longPress, singleTap),
-    [pager.pan, swipeBack, doubleTap, longPress, singleTap],
+    () => Gesture.Race(pager.pan, swipeBack, taps, longPress),
+    [pager.pan, swipeBack, taps, longPress],
   );
 
   return (
