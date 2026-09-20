@@ -345,7 +345,21 @@ export interface CheckoutJobSummary {
   coupon: { code: string; discount: number; attempts: number } | null;
   /** Savings are always the observed pre-code minus post-code merchant total. */
   savings: { amount: number; currency: string } | null;
-  items: Array<{ productId: string; title: string; quantity: number; unitPrice: number }>;
+  /**
+   * The lines being bought, carrying the same hero image the feed showed.
+   *
+   * Checkout is the screen where someone commits money, so it has to show the
+   * thing they are committing it to — a title alone asks them to trust that the
+   * agent picked the product they were looking at. Nullable for the same reason
+   * the cart's is: a listing can reach checkout without usable imagery.
+   */
+  items: Array<{
+    productId: string;
+    title: string;
+    quantity: number;
+    unitPrice: number;
+    hero: MediaImage | null;
+  }>;
   protocol: 'acp' | 'mpp' | 'tap' | 'browser' | null;
   needsInput: CheckoutInputPrompt | null;
   failure: { code: string; message: string; recoverable: boolean } | null;

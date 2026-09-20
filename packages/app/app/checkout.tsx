@@ -10,6 +10,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { goBackOrFeed } from '../src/navigation.js';
 import {
@@ -19,6 +20,7 @@ import {
   TYPE,
   formatMoney,
   formatTimeRemaining,
+  imageUri,
   type CheckoutInputPrompt,
   type CheckoutJobSummary,
   type OrderStatus,
@@ -230,11 +232,29 @@ function JobCard({ job, now }: JobCardProps): React.ReactElement {
         <Text style={styles.smallText}>{STATUS_WORD[job.status]}</Text>
       </View>
 
-      {job.items.map((item) => (
-        <Text key={item.productId} style={styles.smallText} numberOfLines={1}>
-          {item.quantity} × {item.title}
-        </Text>
-      ))}
+      {/* The photograph, not just the title. This is the screen where money
+          moves, and the thing being bought should be recognisable as the thing
+          that was on screen in the feed. */}
+      {job.items.map((item) => {
+        const uri = item.hero ? imageUri(item.hero) : undefined;
+        return (
+          <View key={item.productId} style={styles.itemRow}>
+            {uri ? (
+              <Image
+                source={{ uri }}
+                style={styles.itemThumb}
+                contentFit="cover"
+                accessibilityLabel={item.title}
+              />
+            ) : (
+              <View style={styles.itemThumb} />
+            )}
+            <Text style={[styles.smallText, styles.itemTitle]} numberOfLines={2}>
+              {item.quantity} × {item.title}
+            </Text>
+          </View>
+        );
+      })}
 
       {steps.length > 0 && !quote ? (
         <View style={styles.blockInner}>
@@ -551,6 +571,16 @@ const styles = StyleSheet.create({
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
   },
+  itemRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  // Small enough that a three-line order still fits above the total, large
+  // enough to recognise the product rather than merely notice a picture.
+  itemThumb: {
+    width: 40,
+    height: 52,
+    borderRadius: RADIUS.media,
+    backgroundColor: COLORS.sheet,
+  },
+  itemTitle: { flex: 1 },
   price: {
     color: COLORS.accent,
     fontSize: TYPE.sizes.price,

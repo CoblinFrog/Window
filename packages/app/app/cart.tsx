@@ -25,6 +25,7 @@ import {
   SPACING,
   TYPE,
   formatMoney,
+  imageUri,
   type CartLine,
   type MediaImage,
 } from '@window/shared';
@@ -50,14 +51,21 @@ import { goBackOrFeed } from '../src/navigation.js';
 /**
  * The best available image URL for a line, or null.
  *
- * A line whose product has no hero is an ordinary state — a listing can reach
- * the cart without usable imagery. Taking `MediaImage` non-null here meant one
- * such line threw inside `lines.map` and took down the whole cart screen,
- * including the items that were fine.
+ * Delegates to the same `imageUri` the feed uses, which prefers the listing's
+ * own CDN copy over our transcoded derivative. Choosing `webp[0]` directly
+ * here — as this did — skipped `sourceUrl` entirely and requested a derivative
+ * that is not kept on disk, so every cart thumbnail 404ed while the identical
+ * product rendered fine one screen earlier. Two helpers, one of them wrong, is
+ * how that survives review; there is now one.
+ *
+ * A line whose product has no hero is still an ordinary state — a listing can
+ * reach the cart without usable imagery. Taking `MediaImage` non-null here
+ * meant one such line threw inside `lines.map` and took down the whole cart
+ * screen, including the items that were fine.
  */
 function heroUri(hero: MediaImage | null | undefined): string | null {
   if (!hero) return null;
-  return hero.webp?.[0] ?? hero.avif?.[0] ?? null;
+  return imageUri(hero) ?? null;
 }
 
 interface ControlProps {

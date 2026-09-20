@@ -16,6 +16,7 @@ import {
   SPACING,
   TYPE,
   formatMoney,
+  imageUri,
   isoDay,
   type MediaImage,
   type OrderStatus,
@@ -44,9 +45,10 @@ const STATUS_WORD: Record<OrderStatus, string> = {
   cancelled: 'Cancelled',
 };
 
+/** As in the cart: one helper, preferring the source's own CDN copy. */
 function heroUri(hero: MediaImage | null): string | null {
   if (!hero) return null;
-  return hero.webp[0] ?? hero.avif[0] ?? null;
+  return imageUri(hero) ?? null;
 }
 
 function dayLabel(iso: string): string {
