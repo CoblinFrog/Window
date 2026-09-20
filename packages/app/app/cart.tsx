@@ -39,8 +39,17 @@ import { goBackOrFeed } from '../src/navigation.js';
  * until every change has been looked at. Nothing here auto-accepts.
  */
 
-function heroUri(hero: MediaImage): string | null {
-  return hero.webp[0] ?? hero.avif[0] ?? null;
+/**
+ * The best available image URL for a line, or null.
+ *
+ * A line whose product has no hero is an ordinary state — a listing can reach
+ * the cart without usable imagery. Taking `MediaImage` non-null here meant one
+ * such line threw inside `lines.map` and took down the whole cart screen,
+ * including the items that were fine.
+ */
+function heroUri(hero: MediaImage | null | undefined): string | null {
+  if (!hero) return null;
+  return hero.webp?.[0] ?? hero.avif?.[0] ?? null;
 }
 
 interface ControlProps {

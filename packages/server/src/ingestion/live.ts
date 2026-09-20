@@ -167,8 +167,19 @@ export class AdapterVerifier implements StockVerifier {
           { sourceId: product.source.sourceId, url: product.source.url },
           REFRESH_CONTEXT,
         );
-        if (check === null || check.removed) {
+        if (check?.removed) {
+          // The listing is confirmed gone. That is a fact about the merchant.
           results.push({ ...stored, inStock: false });
+          continue;
+        }
+        if (check === null) {
+          // The probe could not determine anything — unreachable, unparseable,
+          // or a page shape the adapter does not know. That is a fact about us,
+          // not about the listing, and delisting on it is what this class's own
+          // contract rules out: "a price that might be stale is a better answer
+          // than no cart." Marking it out of stock empties the cart and blocks
+          // checkout on every product the adapter cannot read.
+          results.push(stored);
           continue;
         }
         results.push({
