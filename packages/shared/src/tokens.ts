@@ -161,19 +161,20 @@ export const WINDOW = {
  */
 export const STRETCH = {
   /** Peak vertical scale. Past about 1.07 the captions visibly distort. */
-  scale: 1.06,
+  scale: 1.04,
   /** Peak lift, in px, signed by the direction of travel. */
-  lift: 24,
-  upMs: 130,
+  lift: 16,
+  upMs: 120,
   /**
    * The return is a spring, so the page overshoots and settles rather than
-   * stopping dead. These give a damping ratio near 0.36 — light enough that the
-   * overshoot is unmistakably a bounce, heavy enough that it is done in about
-   * 600 ms rather than wobbling under the next scroll.
+   * stopping dead. These give a damping ratio near 0.48: the page still passes
+   * its resting position and comes back, so the bounce is there to be seen,
+   * but it does it once and is finished in well under half a second instead of
+   * rocking through several visible swings.
    */
-  settleDamping: 9,
-  settleStiffness: 220,
-  settleMass: 0.7,
+  settleDamping: 11,
+  settleStiffness: 210,
+  settleMass: 0.62,
 } as const;
 
 /**

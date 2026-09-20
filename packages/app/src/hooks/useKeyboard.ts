@@ -123,16 +123,26 @@ export function useKeyboardControls(
  * still pages several times from a single flick, which is how a feed ends up
  * three products further on than anyone asked for.
  *
- * So the burst is what gets counted, not the events: an event acts only if it
- * opens a new one — meaning the wheel was quiet for long enough beforehand —
- * and the tail behind it is discarded. A scroll held continuously still pages,
- * slowly, on the sustain interval, so a long deliberate scroll is not mistaken
- * for a single flick and ignored.
+ * So the burst is what gets counted, not the events: an event acts only if the
+ * wheel was quiet for long enough beforehand, and the tail behind it is
+ * discarded.
+ *
+ * There used to be a second way through. A scroll still going after a sustain
+ * interval turned another page, on the theory that a long deliberate scroll
+ * should not be taken for one flick and ignored. But Chrome delivers trackpad
+ * momentum at a steady 60 Hz with a decaying delta for as long as it runs, so
+ * "still going" is exactly what a flick the user has already finished looks
+ * like. Replaying realistic timings through both versions: a 1.0 s flick paged
+ * twice, a 1.6 s flick three times, a held two-finger scroll three times. One
+ * gesture, one page now, with no exception — to go further, scroll again.
+ *
+ * The idle gap has to clear a trackpad's 16 ms delivery without swallowing a
+ * mouse wheel's notches, which are single events maybe 120 ms apart and each
+ * genuinely a separate request. At 140 ms it ate them; 100 ms passes every
+ * notch while leaving momentum suppressed by a wide margin.
  */
-/** Quiet time that marks the end of one wheel gesture and the start of the next. */
-const WHEEL_IDLE_GAP_MS = 140;
-/** A scroll held down keeps paging, but no faster than this. */
-const WHEEL_SUSTAIN_MS = 650;
+/** Quiet the wheel must fall for one gesture to have ended. */
+const WHEEL_IDLE_GAP_MS = 100;
 /** Below this a wheel event is noise, not intent. */
 const WHEEL_MIN_DELTA = 12;
 
@@ -143,8 +153,6 @@ export function useSnappedWheel(
 ): void {
   /** When the previous wheel event arrived, burst or not. */
   const lastEventAt = useRef(0);
-  /** When a page was last turned. */
-  const lastActionAt = useRef(0);
   const next = useRef(onNext);
   const prev = useRef(onPrev);
   next.current = onNext;
@@ -162,13 +170,9 @@ export function useSnappedWheel(
 
       if (Math.abs(event.deltaY) < WHEEL_MIN_DELTA) return;
 
-      // Mid-burst: this is the tail of a flick already acted on, unless the
-      // scroll has been sustained long enough to mean a second page.
-      const startsNewGesture = sincePrevious > WHEEL_IDLE_GAP_MS;
-      const sustained = now - lastActionAt.current > WHEEL_SUSTAIN_MS;
-      if (!startsNewGesture && !sustained) return;
+      // Mid-burst: the tail of a flick already acted on.
+      if (sincePrevious <= WHEEL_IDLE_GAP_MS) return;
 
-      lastActionAt.current = now;
       if (event.deltaY > 0) next.current();
       else prev.current();
     };
