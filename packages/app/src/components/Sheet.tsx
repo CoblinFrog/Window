@@ -18,6 +18,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { COLORS, ICON, KEYBINDINGS, MOTION, SHEET, SPACING, TYPE } from '@window/shared';
 import { Icon } from './Icon.js';
+import { ABSOLUTE_FILL } from '../styles.js';
 
 /**
  * The bottom sheet.
@@ -267,13 +268,13 @@ export function SheetOption({
 
 const styles = StyleSheet.create({
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...ABSOLUTE_FILL,
     justifyContent: 'flex-end',
     // Above the feed and above the rail; nothing stacks above a sheet.
     zIndex: 100,
   },
   backdropLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...ABSOLUTE_FILL,
     backgroundColor: 'rgba(0,0,0,0.6)',
   },
   backdropPress: {

@@ -14,7 +14,13 @@ config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),
   path.resolve(workspaceRoot, 'node_modules'),
 ];
-config.resolver.disableHierarchicalLookup = true;
+// Left on (the default) deliberately. Turning it off confines Metro to the two
+// paths above, and a package whose own dependency npm had to nest — because the
+// hoisted copy is a different major — then resolves to nothing: Reanimated 4
+// needs semver 7, the root has semver 6 for something else, and npm put 7 under
+// `react-native-reanimated/node_modules`, where a non-hierarchical resolver
+// will never look. `expo-doctor` flags this setting for exactly this reason.
+config.resolver.disableHierarchicalLookup = false;
 
 /**
  * TypeScript's ESM convention is that a relative import written `./foo.js`

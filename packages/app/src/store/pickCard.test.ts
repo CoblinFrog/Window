@@ -47,11 +47,18 @@ describe('pickToCard', () => {
     // No cluster: the reviews sheet and the detail route are unreachable, and
     // both would 404 against a product the catalog has never seen.
     assert.equal(card.clusterId, null);
-    assert.equal(card.canAddToCart, false);
     assert.equal(card.otherOffers, null);
     assert.equal(card.badges.caution, null);
     assert.equal(card.media.gallery.length, 0);
     assert.equal(card.media.video, null);
+  });
+
+  it('can be added to a cart, because adding adopts it into the catalog first', () => {
+    // This was false, on the reasoning that a pick has no row for the cart to
+    // hold. It has none *yet*: pressing the control ingests the listing and
+    // adds the row that comes back. Left false the action bar read it as an
+    // auction and offered "Open to bid" on a pair of earbuds.
+    assert.equal(pickToCard(pick()).canAddToCart, true);
   });
 
   it('counts one photograph, so the feed draws no gallery indicator', () => {

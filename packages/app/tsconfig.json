@@ -12,7 +12,7 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    "types": ["react", "expo"],
+    "types": ["react", "expo", "node"],
     "paths": {
       "@/*": ["./src/*"]
     }

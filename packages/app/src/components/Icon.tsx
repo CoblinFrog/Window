@@ -72,7 +72,11 @@ function renderGlyph(
     fill: string;
   },
   stroke: string,
-): React.ReactElement {
+  // `JSX.Element`, not `ReactElement`. React 19's types made the latter
+  // generic over `unknown` rather than `any`, and a `ReactElement<unknown>`
+  // is no longer assignable to `ReactNode` — which is what this is used as,
+  // one line below, as the child of an `Svg`.
+): React.JSX.Element {
   switch (name) {
     // A thumb rather than a heart: this is a judgement about a product, not an
     // emotion about a post. It is the most heavily weighted explicit signal in

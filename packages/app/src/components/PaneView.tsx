@@ -14,6 +14,7 @@ import {
 import { Icon } from './Icon.js';
 import { PressScale } from './PressScale.js';
 import { Scrim } from './Scrim.js';
+import { ABSOLUTE_FILL } from '../styles.js';
 
 /**
  * The pane view.
@@ -428,7 +429,7 @@ const styles = StyleSheet.create({
   tick: { flex: 1, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.34)' },
   tickActive: { backgroundColor: COLORS.textPrimary },
   warningVeil: {
-    ...StyleSheet.absoluteFillObject,
+    ...ABSOLUTE_FILL,
     backgroundColor: 'rgba(0,0,0,0.72)',
     alignItems: 'center',
     justifyContent: 'center',

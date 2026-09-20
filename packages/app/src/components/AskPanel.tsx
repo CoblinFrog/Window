@@ -25,6 +25,7 @@ import Animated, {
 import { COLORS, ICON, MOTION, SPACING, TYPE, type ChatResponse } from '@window/shared';
 import { Icon } from './Icon.js';
 import { PressScale } from './PressScale.js';
+import { ABSOLUTE_FILL } from '../styles.js';
 
 /**
  * Ask — the shopping assistant, pulled down from the top edge.
@@ -628,12 +629,12 @@ function PickRow({
 
 const styles = StyleSheet.create({
   layer: {
-    ...StyleSheet.absoluteFillObject,
+    ...ABSOLUTE_FILL,
     // Above the feed and the rail, below a sheet: a sheet is modal and this
     // is not, so a sheet opened from a pick still covers this.
     zIndex: 90,
   },
-  scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000000' },
+  scrim: { ...ABSOLUTE_FILL, backgroundColor: '#000000' },
   /**
    * The box that grows. Its geometry is entirely animated, so nothing here
    * sets a size — and it clips, because the contents inside are laid out at
@@ -649,7 +650,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.hairlineLight,
     overflow: 'hidden',
   },
-  pillPress: { ...StyleSheet.absoluteFillObject },
+  pillPress: { ...ABSOLUTE_FILL },
   pillContent: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   content: { position: 'absolute', top: 0, left: 0 },
   close: {

@@ -42,6 +42,7 @@ import { useCart } from '../src/store/cart.js';
 import { emit, emitDwell } from '../src/store/events.js';
 import { feedSessionId, useFeed } from '../src/store/feed.js';
 import { useSession } from '../src/store/session.js';
+import { ABSOLUTE_FILL } from '../src/styles.js';
 
 /**
  * The feed.
@@ -773,7 +774,7 @@ function SwipeHint({ onDone }: { onDone(): void }): React.ReactElement {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.backdrop },
   // The two layouts occupy the same rectangle so a zoom can hold both.
-  layer: { ...StyleSheet.absoluteFillObject },
+  layer: { ...ABSOLUTE_FILL },
   stage: { flex: 1, backgroundColor: COLORS.surface },
   stageCentred: { alignItems: 'center', justifyContent: 'center' },
   centre: {
