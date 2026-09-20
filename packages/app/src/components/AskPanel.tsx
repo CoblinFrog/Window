@@ -14,13 +14,16 @@ import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   Easing,
+  Extrapolation,
   interpolate,
+  interpolateColor,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { COLORS, ICON, MOTION, RADIUS, SPACING, TYPE, type ChatResponse } from '@window/shared';
+import { COLORS, ICON, MOTION, SPACING, TYPE, type ChatResponse } from '@window/shared';
 import { Icon } from './Icon.js';
 import { PressScale } from './PressScale.js';
 
@@ -68,6 +71,8 @@ export const ASK_PILL_TOP = 10;
 const ASK_PILL_WIDTH = 176;
 /** How much of the growth is over before the contents begin to appear. */
 const CONTENT_FADE_IN = 0.45;
+/** Damping ratio near 0.6: about 9% of overshoot, settled inside 350 ms. */
+const OPEN_SPRING = { damping: 13.8, stiffness: 220, mass: 0.6 } as const;
 /** The panel never takes more than this much of the screen. */
 const MAX_HEIGHT_FRACTION = 0.82;
 /**
@@ -158,13 +163,32 @@ export function AskPanel({
     [onOpenChange],
   );
 
+  /**
+   * Opening springs; closing does not.
+   *
+   * A spring overshoots, and here that means the box goes momentarily wider
+   * and taller than the panel before settling into it — which is the bounce.
+   * Roughly 9% over at this damping ratio, which is enough to see and little
+   * enough that the overshoot does not read as a mistake. Everything the
+   * overshoot pushes past the screen is clipped by the layer, so the only
+   * thing it costs is the frame or two it takes to come back.
+   *
+   * Closing is a timing. A spring on the way down undershoots instead — the
+   * box would shrink past the pill, to something smaller than the control it
+   * is becoming, and then grow back into it. A thing being put away should not
+   * bounce; only a thing arriving should.
+   */
   const animateTo = useCallback(
     (target: 0 | 1) => {
       openRef.value = target;
-      progress.value = withTiming(target, {
-        duration: reducedMotion ? 0 : MOTION.sheetMs,
-        easing: EASING,
-      });
+      if (reducedMotion) {
+        progress.value = target;
+        return;
+      }
+      progress.value =
+        target === 1
+          ? withSpring(1, OPEN_SPRING)
+          : withTiming(0, { duration: MOTION.sheetMs, easing: EASING });
     },
     [progress, openRef, reducedMotion],
   );
@@ -284,7 +308,16 @@ export function AskPanel({
       left: interpolate(t, [0, 1], [(viewportWidth - ASK_PILL_WIDTH) / 2, 0]),
       width: interpolate(t, [0, 1], [ASK_PILL_WIDTH, viewportWidth]),
       height: interpolate(t, [0, 1], [ASK_PILL_HEIGHT, Math.min(height.value, maxHeight)]),
-      borderRadius: interpolate(t, [0, 1], [ASK_PILL_HEIGHT / 2, 0]),
+      // Clamped, unlike the four above. They are meant to overshoot — that is
+      // the bounce — but a radius carried past 1 goes negative, which is not a
+      // shape.
+      borderRadius: interpolate(t, [0, 1], [ASK_PILL_HEIGHT / 2, 0], Extrapolation.CLAMP),
+      // The box wears the pill's colours at rest and the panel's once open. It
+      // was the panel's throughout, which left a ring of near-black showing
+      // around a white pill that did not fill it — a dark rounded slab over
+      // the feed, most obvious with a tile scrolling behind it.
+      backgroundColor: interpolateColor(t, [0, 0.4], [COLORS.card, COLORS.sheet]),
+      borderColor: interpolateColor(t, [0, 0.4], [COLORS.hairlineLight, 'rgba(0,0,0,0)']),
       // No opacity ramp. At rest this box *is* the pill, so fading it in from
       // nothing leaves the control invisible until someone presses where they
       // cannot see it.
@@ -293,18 +326,18 @@ export function AskPanel({
 
   /** The contents, which arrive once the box has most of its size. */
   const contentStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [CONTENT_FADE_IN, 1], [0, 1]),
+    opacity: interpolate(progress.value, [CONTENT_FADE_IN, 1], [0, 1], Extrapolation.CLAMP),
   }));
 
   /** The pill itself, which is what the box looks like while it is small. */
   const pillStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.25], [1, 0]),
+    opacity: interpolate(progress.value, [0, 0.25], [1, 0], Extrapolation.CLAMP),
   }));
 
   // The scrim only darkens what the panel does not already cover, and it fades
   // in late: a peek should not dim the feed the user is still reading.
   const scrimStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.5, 1], [0, 0, 0.55]),
+    opacity: interpolate(progress.value, [0, 0.5, 1], [0, 0, 0.55], Extrapolation.CLAMP),
   }));
 
 
@@ -587,7 +620,9 @@ const styles = StyleSheet.create({
    */
   bubble: {
     position: 'absolute',
-    backgroundColor: COLORS.sheet,
+    // Colour comes from the animation: this box is the pill at rest and the
+    // panel when open, and it has to look like whichever it currently is.
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
   pillPress: { ...StyleSheet.absoluteFillObject },
@@ -711,16 +746,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'flex-start',
   },
+  // Just the icon and the label. The background, border and radius belong to
+  // the box around it, which is the thing that grows.
   askPillInner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     height: ASK_PILL_HEIGHT,
     paddingHorizontal: 14,
-    borderRadius: RADIUS.tile,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: COLORS.hairlineLight,
-    backgroundColor: COLORS.card,
   },
   askPillText: {
     // `card` is white. The default secondary ink is white too, so the label

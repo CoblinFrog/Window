@@ -5,12 +5,15 @@ import { COLORS, TYPE } from '@window/shared';
 import { Icon } from './Icon.js';
 
 /**
- * A rating readout: the mean, five stars, a chevron, and the review count.
+ * A rating readout: the mean, and five stars.
  *
- * The count is the affordance, not the stars — it is coloured as a link and it
- * is what the chevron points at, because "13.2K" is the number that makes a
- * reader want to go and read them. The stars alone are a summary, and a summary
- * is not something anyone taps.
+ * The count used to sit on the end, coloured as a link, on the argument that
+ * "13.2K" is the number that makes a reader want to go and read them. That is
+ * true where the row opens the reviews, and this row does not — the only
+ * caller draws it inside a tile whose tap opens the pane view. So it was a
+ * link-coloured number that led nowhere, repeated across every tile on the
+ * screen, competing with the price for the one line under the title. The
+ * count is still on the reviews control in the pane, and in the sheet itself.
  *
  * The mean is drawn to a fifth of a star rather than rounded to a whole one. A
  * 4.5 shown as five filled stars is a small lie told thousands of times a day,
@@ -25,6 +28,11 @@ const SLOTS = [0, 1, 2, 3, 4];
 export interface RatingProps {
   /** Mean rating out of five, or null when the corpus has none. */
   rating: number | null;
+  /**
+   * How many reviews there are. Not drawn — it decides whether this row is
+   * drawn at all, since no rating and no reviews is an unrated product rather
+   * than a zero-star one.
+   */
   count: number;
   size?: number;
   /** Dark backgrounds need the light text ramp. */
@@ -50,10 +58,11 @@ export function Rating({
       style={styles.row}
       accessible
       accessibilityRole={interactive ? 'button' : 'text'}
+      // Says what is drawn and no more. A name that announces a count the
+      // screen does not show sends a reader looking for something that is not
+      // there.
       accessibilityLabel={
-        rating === null
-          ? `${count.toLocaleString()} reviews`
-          : `${rating.toFixed(1)} out of 5 stars, ${count.toLocaleString()} reviews`
+        rating === null ? `${count.toLocaleString()} reviews` : `${rating.toFixed(1)} out of 5 stars`
       }
     >
       {rating !== null ? (
@@ -71,10 +80,6 @@ export function Rating({
           size={size - 2}
           color={onDark ? COLORS.textSecondary : COLORS.textSecondaryLight}
         />
-      ) : null}
-
-      {count > 0 ? (
-        <Text style={[styles.count, { fontSize: size - 1 }]}>{`(${compact(count)})`}</Text>
       ) : null}
     </View>
   );
@@ -124,5 +129,4 @@ const styles = StyleSheet.create({
   stars: { flexDirection: 'row' },
   mean: { color: COLORS.textPrimaryLight, fontWeight: TYPE.weights.semibold, marginRight: 2 },
   onDark: { color: COLORS.textPrimary },
-  count: { color: COLORS.link, fontWeight: TYPE.weights.semibold, marginLeft: 1 },
 });
