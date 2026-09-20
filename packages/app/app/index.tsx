@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
+import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
-import { Redirect, useFocusEffect, useRouter } from 'expo-router';
+import { Redirect, useRouter } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
@@ -54,6 +55,9 @@ import { useSession } from '../src/store/session.js';
  * gestures, so there is no stage-level gesture out here: one would only be
  * competing with them for the same drag.
  */
+/** How long "Link copied" stays up. Long enough to read, short enough not to nag. */
+const COPIED_MS = 1800;
+
 export default function FeedScreen(): React.ReactElement {
   const layout = useLayout();
   const reducedMotion = useReducedMotion();
@@ -184,14 +188,37 @@ export default function FeedScreen(): React.ReactElement {
     [cart, feed.cursor, feed.mode],
   );
 
+  /**
+   * Share, which is copying the link.
+   *
+   * It used to be two different things depending on where it ran: the web
+   * share sheet where that exists, and otherwise `openURL` — which does not
+   * share anything, it navigates away from the app to the page you were trying
+   * to send someone. One behaviour now, everywhere, and one that cannot fail
+   * silently: the link goes to the clipboard and the control says so.
+   */
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [copiedFor, setCopiedFor] = useState<string | null>(null);
+  useEffect(() => () => {
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+  }, []);
+
   const share = useCallback(
     (target: ProductCard) => {
       const url = `https://window.app/p/${target.clusterId ?? target.productId}`;
-      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.share) {
-        void navigator.share({ title: target.title, url }).catch(() => undefined);
-      } else {
-        void Linking.openURL(url).catch(() => undefined);
-      }
+      void Clipboard.setStringAsync(url)
+        .then((copied) => {
+          // Only on success, and success is the value rather than the promise:
+          // on the web this resolves either way, falling back to the legacy
+          // copy when the clipboard API refuses and returning whether *that*
+          // worked. A confirmation shown regardless is worse than none,
+          // because it stops you checking.
+          if (!copied) return;
+          setCopiedFor(target.productId);
+          if (copiedTimer.current) clearTimeout(copiedTimer.current);
+          copiedTimer.current = setTimeout(() => setCopiedFor(null), COPIED_MS);
+        })
+        .catch(() => undefined);
       emit('share', { productId: target.productId, position: feed.cursor, mode: feed.mode });
     },
     [feed.cursor, feed.mode],
@@ -356,69 +383,10 @@ export default function FeedScreen(): React.ReactElement {
 
   const cartCount = cart.itemCount();
 
-  /**
-   * Diving into the cart.
-   *
-   * The same idea as promoting a tile into the pane view — the feed leans
-   * towards what you picked and gets out of the way — but it can only be half
-   * of it. The pane view is a layer in this screen, so it can be grown out of
-   * the tile it came from; the cart is a route, and a route cannot be made to
-   * grow out of a button. What is animated is the departure: the feed shrinks
-   * towards the cart button and fades, and only then is the route pushed, so
-   * the modal is not already covering the thing that is moving.
-   *
-   * The target is in the column's own coordinates. On a phone the column is
-   * the screen and that is exactly where the button is; on desktop the column
-   * is centred and the button is out at the window's edge, so the feed heads
-   * for its own top-left corner instead — the same direction, a shorter trip.
-   */
-  const cartDive = useSharedValue(0);
-  const diveTargetX = 12 + ASK_PILL_HEIGHT / 2;
-  const diveTargetY = insets.top + ASK_PILL_TOP + ASK_PILL_HEIGHT / 2;
-  // `layout` rather than the `width`/`height` bindings below, which are derived
-  // from it further down the component than this runs.
-  const diveStyle = useAnimatedStyle(() => {
-    const t = cartDive.value;
-    // Identity at rest: the feed must not pay for a transform it is not using.
-    if (t === 0) return {};
-    return {
-      opacity: 1 - 0.9 * t,
-      transform: [
-        { translateX: (diveTargetX - layout.columnWidth / 2) * t },
-        { translateY: (diveTargetY - layout.columnHeight / 2) * t },
-        { scale: 1 - 0.16 * t },
-      ],
-    };
-  }, [diveTargetX, diveTargetY, layout.columnWidth, layout.columnHeight]);
-
-  const goCart = useCallback(() => {
-    router.push('/cart');
-  }, [router]);
 
   const openCart = useCallback(() => {
-    if (reducedMotion) {
-      goCart();
-      return;
-    }
-    cartDive.value = withTiming(
-      1,
-      { duration: MOTION.promoteMs, easing: Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number])) },
-      (finished) => {
-        if (finished) runOnJS(goCart)();
-      },
-    );
-  }, [cartDive, goCart, reducedMotion]);
-
-  // Coming back is the dive played backwards. Resetting on the spot instead
-  // would snap the feed to full size behind a modal that is still fading out.
-  useFocusEffect(
-    useCallback(() => {
-      cartDive.value = withTiming(0, {
-        duration: MOTION.promoteMs,
-        easing: Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number])),
-      });
-    }, [cartDive]),
-  );
+    router.push('/cart');
+  }, [router]);
 
   useKeyboardControls(
     {
@@ -501,7 +469,7 @@ export default function FeedScreen(): React.ReactElement {
             the feed anchors to it rather than to the stage, because on desktop
             the stage is the whole window and the rail sits *outside* the
             column — anchored to the stage it lands off the right edge. */}
-        <Animated.View style={[{ width, height }, diveStyle]}>
+        <View style={{ width, height }}>
           {/* Both layouts stay mounted for the length of a zoom: the grid has
               to be visible leaning about the tile, and the pane has to be
               painting the product the whole way out of it. The window screen is
@@ -552,6 +520,7 @@ export default function FeedScreen(): React.ReactElement {
                     onCartLongPress={() => addToCart(target)}
                     onShare={() => share(target)}
                     onShareLongPress={() => share(target)}
+                    shareCopied={copiedFor === target.productId}
                     suppressTap={suppressTap}
                   />
                 )}
@@ -588,7 +557,7 @@ export default function FeedScreen(): React.ReactElement {
           {showSwipeHint && feed.mode === 'window' && card ? (
             <SwipeHint onDone={() => setShowSwipeHint(false)} />
           ) : null}
-        </Animated.View>
+        </View>
       </View>
 
       {layout.showKeyboardHints ? (
@@ -660,10 +629,9 @@ export default function FeedScreen(): React.ReactElement {
           It sits beside the ask pill on the same band, anchored to the screen
           rather than to the column — the pill is, and two controls that are
           meant to read as a pair cannot be pinned to two different boxes. It
-          borrows the pill's height so they match, and takes the top-left
-          corner, which is free on the window screen. The pane view puts its
-          back control there, which is why this is not drawn in that mode and
-          why the ask strip is inset from both edges rather than spanning them.
+          borrows the pill's height so they match, and takes the top-right
+          corner. The strip between them is inset from both edges, so neither
+          corner is ever under the pull zone.
 
           The count rides on the button, because a cart you cannot see the size
           of is one you have to open to learn anything about. */}
@@ -748,12 +716,12 @@ const styles = StyleSheet.create({
   // A floating pill in the top right. Every other corner is spoken for: the
   // back control has the top left, the price and similar-products link have the
   // bottom, and the middle is the photograph.
-  // Circular, in the top left, on the ask pill's band and at its height. The
+  // Circular, in the top right, on the ask pill's band and at its height. The
   // pill is inset 60 px from each edge, so the two never meet. `top` is set
   // where it is rendered, because it has to clear the safe area.
   cartButton: {
     position: 'absolute',
-    left: 12,
+    right: 12,
     width: ASK_PILL_HEIGHT,
     height: ASK_PILL_HEIGHT,
     borderRadius: ASK_PILL_HEIGHT / 2,
@@ -766,7 +734,7 @@ const styles = StyleSheet.create({
   cartBadge: {
     position: 'absolute',
     top: -2,
-    right: -2,
+    left: -2,
     minWidth: 18,
     height: 18,
     borderRadius: 9,
@@ -783,7 +751,8 @@ const styles = StyleSheet.create({
   },
   staleBar: {
     position: 'absolute',
-    top: 14,
+    // Below the control band, which the cart button now occupies on this side.
+    top: 56,
     right: 14,
     maxWidth: '62%',
     paddingVertical: 6,

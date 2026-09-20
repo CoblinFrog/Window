@@ -1,8 +1,9 @@
 import React from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { COLORS, ICON, TYPE, type ProductCard } from '@window/shared';
 import { Icon, type IconName } from './Icon.js';
+import { PressScale } from './PressScale.js';
 import { compact } from './Rating.js';
 
 /**
@@ -46,6 +47,12 @@ export interface ActionBarProps {
   onShare(): void;
   onShareLongPress(): void;
   /**
+   * The link for this product is on the clipboard. Said under the control that
+   * did it rather than in a toast: a copy is invisible, so the only place the
+   * confirmation means anything is where you just pressed.
+   */
+  shareCopied?: boolean;
+  /**
    * Asks whether a press arriving right now is a drag's ghost. The bar rides
    * at the foot of a pane that scrolls, and on the web a drag that starts and
    * ends on the same element still emits a click — so a scroll begun on this
@@ -81,7 +88,7 @@ function BarButton({
   suppressTap,
 }: BarButtonProps): React.ReactElement {
   return (
-    <Pressable
+    <PressScale
       onPress={() => {
         if (suppressTap?.()) return;
         tick();
@@ -93,6 +100,7 @@ function BarButton({
       accessibilityLabel={caption ? `${label}, ${caption}` : label}
       accessibilityState={{ selected: active }}
       style={styles.button}
+      contentStyle={styles.buttonContent}
       hitSlop={6}
     >
       <Icon name={name} active={active} size={26} />
@@ -108,7 +116,7 @@ function BarButton({
       <Text style={styles.caption} numberOfLines={1}>
         {caption ?? ''}
       </Text>
-    </Pressable>
+    </PressScale>
   );
 }
 
@@ -128,9 +136,11 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
         suppressTap={suppressTap}
       />
 
-      {/* Auction items cannot be added to a cart; they deep-link to the bid book. */}
+      {/* Auction items cannot be added to a cart; they deep-link to the bid
+          book, so they keep the plain cart — a plus would promise something
+          that control does not do. */}
       <BarButton
-        name="cart"
+        name={card.canAddToCart ? 'cartAdd' : 'cart'}
         label={card.canAddToCart ? 'Add to cart' : 'Open to bid'}
         active={props.inCart}
         onPress={props.onCart}
@@ -150,7 +160,14 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
 
       <BarButton
         name="share"
+        // The label stays "Share" — the caption below becomes the confirmation,
+        // and the accessible name is built from both, so putting it in both
+        // read out as "Link copied, Link copied".
         label="Share"
+        // The caption slot is already reserved on every control, so the
+        // confirmation costs no layout — nothing below it moves when the text
+        // appears and nothing moves back when it goes.
+        caption={props.shareCopied ? 'Link copied' : undefined}
         onPress={props.onShare}
         onLongPress={props.onShareLongPress}
         suppressTap={suppressTap}
@@ -168,6 +185,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: COLORS.surface,
   },
+  buttonContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
   button: {
     // Four equal columns rather than four intrinsic widths spaced apart. Under
     // `space-around` a control is as wide as its widest child, so a product
@@ -184,6 +206,10 @@ const styles = StyleSheet.create({
   },
   caption: {
     height: TYPE.lineHeights.small,
+    // Counts are two or three characters; "Link copied" is eleven, and a
+    // quarter of a narrow screen is not much. Smaller, and allowed to use the
+    // whole column rather than just the glyph's width.
+    maxWidth: '100%',
     color: COLORS.textSecondary,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,

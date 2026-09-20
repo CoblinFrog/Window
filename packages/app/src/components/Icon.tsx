@@ -16,6 +16,7 @@ export type IconName =
   | 'star'
   | 'reviews'
   | 'cart'
+  | 'cartAdd'
   | 'share'
   | 'seller'
   | 'close'
@@ -119,6 +120,22 @@ function renderGlyph(
           <Path d="M2.6 4h2.5l2.6 10.4h9.6l2.1-7.6H6.3" {...common} fill="none" />
           <Circle cx={9} cy={19} r={1.6} {...common} />
           <Circle cx={16.6} cy={19} r={1.6} {...common} />
+        </>
+      );
+
+    // The same cart with a plus in the basket. The bar's cart control is not a
+    // way to the cart — that is the button on the window screen — it is the
+    // act of putting this product in one, and the two should not look alike.
+    // The basket is shortened to make room rather than the plus hung off the
+    // side, where at this size it reads as a smudge next to the glyph.
+    case 'cartAdd':
+      return (
+        <>
+          <Path d="M2.6 4h2.5l2.6 10.4h9.6l1.2-4.3" {...common} fill="none" />
+          <Path d="M6.3 6.8h6.4" {...common} fill="none" />
+          <Circle cx={9} cy={19} r={1.6} {...common} />
+          <Circle cx={16.6} cy={19} r={1.6} {...common} />
+          <Path d="M18 3.4v5M15.5 5.9h5" {...common} fill="none" />
         </>
       );
 

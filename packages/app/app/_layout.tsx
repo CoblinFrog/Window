@@ -65,7 +65,14 @@ export default function RootLayout(): React.ReactElement {
           <Stack.Screen name="onboarding" />
           {/* Sheet-style presentation for everything that is not the feed: the
               feed is never unmounted, only covered. */}
-          <Stack.Screen name="cart" options={{ presentation: 'modal' }} />
+          {/* The cart comes in from the right, like a page pushed onto a
+              stack. `animation: 'slide_from_right'` is the obvious way to ask
+              for that and it does nothing here: it is a native-stack option,
+              and on the web the navigator drops it — measured, the transition
+              produced no transform, no class change and no keyframe. So the
+              screen animates itself, which also means one implementation
+              rather than a native one and a web one that drift apart. */}
+          <Stack.Screen name="cart" options={{ presentation: 'card', animation: 'none' }} />
           <Stack.Screen name="checkout" options={{ presentation: 'modal' }} />
           <Stack.Screen name="orders" options={{ presentation: 'modal' }} />
         </Stack>

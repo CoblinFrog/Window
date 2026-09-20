@@ -6,13 +6,21 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import {
   COLORS,
+  MOTION,
   RADIUS,
   SPACING,
   TYPE,
@@ -157,8 +165,32 @@ export default function CartScreen(): React.ReactElement {
     clearAuctionBlock();
   }, [auctionBlock, clearAuctionBlock]);
 
+  /**
+   * The screen arrives from the right.
+   *
+   * It is done here rather than by the navigator because the navigator cannot
+   * do it on the web — `slide_from_right` is a native-stack option and is
+   * simply dropped, which is why this screen used to appear on the spot. One
+   * implementation, every platform.
+   *
+   * Only the entrance. Leaving would need the navigator to hold the screen
+   * mounted while it animated out, which is the thing it is not doing.
+   */
+  const { width: screenWidth } = useWindowDimensions();
+  const slide = useSharedValue(1);
+  useEffect(() => {
+    slide.value = withTiming(0, {
+      duration: MOTION.sheetMs,
+      easing: Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number])),
+    });
+  }, [slide]);
+  const enter = useAnimatedStyle(
+    () => ({ transform: [{ translateX: slide.value * screenWidth }] }),
+    [screenWidth],
+  );
+
   return (
-    <View style={styles.screen}>
+    <Animated.View style={[styles.screen, enter]}>
       <View style={styles.header}>
         <Control label="Back" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
@@ -367,7 +399,7 @@ export default function CartScreen(): React.ReactElement {
           </Text>
         </Control>
       </View>
-    </View>
+    </Animated.View>
   );
 }
 

@@ -13,12 +13,25 @@ web-build/
 .DS_Store
 *.log
 
-# Deliberately NOT ignored, so a clone is runnable as-is:
-#   .env, packages/*/.env  — Supabase credentials and the local API origin
-# This only holds while the repository stays private: packages/server/.env and
-# packages/server/src/config/supabase.ts both carry the Supabase service-role
-# key, which bypasses row-level security. Rotate it before making the
-# repository public or adding collaborators.
+# Secrets. These were deliberately tracked once, so a clone would be runnable
+# as-is, on the reasoning that the repository was private. That trade stopped
+# being worth it: the file now carries an Anthropic API key, which is billable
+# on sight, alongside the Supabase service-role key, which bypasses row-level
+# security entirely. Neither is a thing to hand to everyone who clones.
+#
+# Ignoring it does not unpublish it. `packages/server/.env` is in the history
+# and the service-role key in it should be treated as compromised and rotated —
+# along with anything else that was ever committed here.
+#
+# `packages/server/.env.example` stays tracked, so a clone still knows what it
+# needs. So does `packages/app/.env`, which holds one `EXPO_PUBLIC_` variable —
+# that prefix means Expo compiles it into the client bundle, so it is published
+# to every visitor by definition and there is nothing in it to protect.
+.env
+packages/server/.env
+!.env.example
+!packages/*/.env.example
+!packages/app/.env
 
 # Fetched product imagery. Every file here is re-downloadable from the source
 # on demand — the media route regenerates a derivative on first request — so
