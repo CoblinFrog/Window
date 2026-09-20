@@ -54,7 +54,17 @@ export function securityHeaders() {
     res.setHeader('referrer-policy', 'no-referrer');
     // The API and the media origin have no legitimate use for any of these.
     res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), payment=()');
-    res.setHeader('cross-origin-resource-policy', 'same-site');
+
+    // Media is a public, content-addressed CDN origin and the client is served
+    // from a different origin — `localhost:8081` against `127.0.0.1:4000` in
+    // development, an app origin against a CDN in production. `same-site` there
+    // blocks every product image with ERR_BLOCKED_BY_RESPONSE.NotSameSite and
+    // the feed renders as black cards. Everything else stays locked down:
+    // nothing under /v1 is a subresource another origin has cause to embed.
+    res.setHeader(
+      'cross-origin-resource-policy',
+      req.path.startsWith('/media/') ? 'cross-origin' : 'same-site',
+    );
     // A JSON API that renders nothing still benefits: if a response is ever
     // coerced into an HTML context, there is nothing it is permitted to load.
     res.setHeader(
