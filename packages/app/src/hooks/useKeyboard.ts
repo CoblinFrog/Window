@@ -123,42 +123,35 @@ export function useKeyboardControls(
  * still pages several times from a single flick, which is how a feed ends up
  * three products further on than anyone asked for.
  *
- * So the burst is what gets counted, not the events: an event acts only if the
- * wheel was quiet for long enough beforehand, and the tail behind it is
- * discarded.
+ * What gets counted is how far a gesture has travelled, not what any single
+ * event carried. Judging events one at a time meant a floor under each of
+ * them, and a gentle scroll is not a small number of small events — it is a
+ * run of events of two or three pixels each. Every one fell under the floor,
+ * so a soft scroll did nothing at all and the only way to move the feed was to
+ * shove it. Summing instead, a nudge of eighteen pixels spread over three
+ * events counts the same as one event of eighteen.
  *
- * What counts as the next gesture is the whole question, and it must not be a
- * duration. Paging again after the scroll had run for some interval made the
- * feed move twice for one flick simply because that flick was a hard one — the
- * length of a gesture became the number of pages, which is not something
- * anyone is aiming with.
+ * A gesture pages once, when its total passes `WHEEL_TRAVEL`, and then not
+ * again however far it goes on to travel. That is what keeps a hard flick and
+ * a soft one worth one page each: the length of a gesture must not decide the
+ * number of pages.
  *
- * So there are exactly two ways to turn another page, and both mean "again"
- * rather than "still": the wheel falls quiet, or the deltas spike. Momentum
- * only ever decays, so a delta that jumps well above the one before it is a
- * hand shoving into the tail of its own flick — a second gesture that never
- * paused. Neither can happen while a flick coasts, however long it coasts for.
+ * A gesture ends when the wheel falls quiet. The window is generous because
+ * the settle runs on this same thread, and a long frame swallows the events
+ * that should have arrived during it — on the clock, a stall is exactly what
+ * stopping looks like, and a tighter window turned one flick through three
+ * stalled frames into four pages.
  *
- * A quiet gap is necessary but not sufficient, because the settle runs on this
- * same thread and a long frame swallows the events that should have arrived
- * during it. On the clock alone that stall is indistinguishable from the user
- * stopping, and a hard flick across three of them pages four times — which is
- * exactly the length-dependent double scroll this is supposed to prevent. The
- * deltas tell them apart: a flick coasting through a stall comes back decayed
- * by every frame it missed, where a genuinely new gesture comes back larger.
- *
- * The cost is that a scroll held at a constant speed is one gesture and pages
- * once, and to go further you lift, pause, or push. That is the rule working,
- * not failing.
+ * Two things restart a gesture without waiting for quiet, because both mean
+ * "again" rather than "still". A spike: momentum only ever decays, so a delta
+ * that jumps is a hand shoving into the tail of its own flick. And a notch: a
+ * single large delta arriving well after the last one is a mouse wheel, where
+ * every click is its own deliberate request and should page.
  */
 /** Quiet the wheel must fall for one gesture to have ended. */
-const WHEEL_IDLE_GAP_MS = 100;
-/**
- * Across that quiet the delta must not have kept decaying. Momentum always
- * does; a hand starting again does not. The margin is tight because the two
- * are only a couple of percent apart per event near the end of a tail.
- */
-const WHEEL_STILL_COASTING = 0.99;
+const WHEEL_IDLE_GAP_MS = 250;
+/** How far a gesture must travel, in px, before it turns a page. */
+const WHEEL_TRAVEL = 16;
 /**
  * A delta this many times the last one is a fresh push rather than a tail.
  * High enough that the wobble of a hand held on a trackpad never reaches it.
@@ -166,8 +159,9 @@ const WHEEL_STILL_COASTING = 0.99;
 const WHEEL_SPIKE = 2;
 /** ...and this much above it, so the test still holds for small deltas. */
 const WHEEL_SPIKE_FLOOR = 8;
-/** Below this a wheel event is noise, not intent. */
-const WHEEL_MIN_DELTA = 12;
+/** A delta at least this large, this long after the last, is a mouse notch. */
+const WHEEL_NOTCH = 80;
+const WHEEL_NOTCH_GAP_MS = 80;
 
 export function useSnappedWheel(
   onNext: () => void,
@@ -178,6 +172,10 @@ export function useSnappedWheel(
   const lastEventAt = useRef(0);
   /** The previous event's magnitude, for telling a push from a tail. */
   const lastDelta = useRef(0);
+  /** How far the current gesture has travelled, signed. */
+  const travelled = useRef(0);
+  /** Whether this gesture has already turned its page. */
+  const spent = useRef(false);
   const next = useRef(onNext);
   const prev = useRef(onPrev);
   next.current = onNext;
@@ -194,23 +192,27 @@ export function useSnappedWheel(
       lastEventAt.current = now;
 
       const delta = Math.abs(event.deltaY);
-      if (delta < WHEEL_MIN_DELTA) {
-        lastDelta.current = delta;
-        return;
-      }
+      // Only exact noise is dropped. There is no floor under a single event
+      // any more; a soft scroll is made of events this small and it has to
+      // count.
+      if (delta < 1) return;
 
       const previous = lastDelta.current;
       lastDelta.current = delta;
 
-      // Quiet before it, and not still coasting through it: a gesture that had
-      // really ended. Or a spike: momentum only decays, so a jump is a hand
-      // pushing again without having paused.
-      const opensGesture =
-        sincePrevious > WHEEL_IDLE_GAP_MS && delta > previous * WHEEL_STILL_COASTING;
+      const fellQuiet = sincePrevious > WHEEL_IDLE_GAP_MS;
       const pushedAgain = delta > previous * WHEEL_SPIKE + WHEEL_SPIKE_FLOOR;
-      if (!opensGesture && !pushedAgain) return;
+      const mouseNotch = delta >= WHEEL_NOTCH && sincePrevious >= WHEEL_NOTCH_GAP_MS;
+      if (fellQuiet || pushedAgain || mouseNotch) {
+        travelled.current = 0;
+        spent.current = false;
+      }
 
-      if (event.deltaY > 0) next.current();
+      travelled.current += event.deltaY;
+      if (spent.current || Math.abs(travelled.current) < WHEEL_TRAVEL) return;
+      spent.current = true;
+
+      if (travelled.current > 0) next.current();
       else prev.current();
     };
 
