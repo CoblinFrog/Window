@@ -88,16 +88,26 @@ function renderGlyph(
 
     // A star inside a speech bubble: reviews are other people's verdicts, which
     // is a different thing from a comment thread and should not look like one.
+    //
+    // The star is solid while the bubble is outlined, which breaks the set's
+    // one rule on purpose. A five-point star drawn as an outline has two stroke
+    // walls and a hairline of gap between them at every one of its ten
+    // vertices; at the size this is actually rendered that gap closes and the
+    // star fills in unevenly, reading as a smudge rather than a star. Solid, it
+    // survives. It is also the only glyph in the set nested inside another, so
+    // it is the only one where the two weights can be told apart.
     case 'reviews':
       return (
         <>
           <Path
-            d="M4 4.8h16a1 1 0 0 1 1 1v9.6a1 1 0 0 1-1 1h-6.2L12 21l-1.8-4.6H4a1 1 0 0 1-1-1V5.8a1 1 0 0 1 1-1Z"
+            d="M5.4 4h13.2a2.4 2.4 0 0 1 2.4 2.4v7.2a2.4 2.4 0 0 1-2.4 2.4h-5l-2.3 3.6-1.9-3.6H5.4A2.4 2.4 0 0 1 3 13.6V6.4A2.4 2.4 0 0 1 5.4 4Z"
             {...common}
+            fill="none"
           />
           <Path
-            d="m12 7.6 1.32 2.76 2.93.4-2.12 2.1.52 3-2.65-1.44L9.35 15.86l.52-3-2.12-2.1 2.93-.4L12 7.6Z"
-            {...common}
+            d="M12 5.8 13.05 8.56 15.99 8.7 13.69 10.55 14.47 13.4 12 11.78 9.53 13.4 10.31 10.55 8.01 8.7 10.95 8.56Z"
+            fill={stroke}
+            stroke="none"
           />
         </>
       );

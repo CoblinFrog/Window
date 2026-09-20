@@ -64,7 +64,6 @@ export default function RootLayout(): React.ReactElement {
           <Stack.Screen name="cart" options={{ presentation: 'modal' }} />
           <Stack.Screen name="checkout" options={{ presentation: 'modal' }} />
           <Stack.Screen name="orders" options={{ presentation: 'modal' }} />
-          <Stack.Screen name="p/[clusterId]" options={{ presentation: 'modal' }} />
         </Stack>
       </View>
     </QueryClientProvider>

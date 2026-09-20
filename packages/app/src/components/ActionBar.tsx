@@ -87,8 +87,17 @@ function BarButton({
     >
       <Icon name={name} active={active} size={26} />
       {/* Off the photograph there is finally room for the counts, and they are
-          the two numbers that say whether anyone else agreed. */}
-      {caption ? <Text style={styles.caption}>{caption}</Text> : null}
+          the two numbers that say whether anyone else agreed.
+
+          The slot is always here, even on the two controls that have nothing to
+          put in it. A column that renders no caption is shorter than one that
+          does, and four columns of two different heights centred in a row put
+          their glyphs on two different baselines — which is the misalignment,
+          not the caption itself. Reserving the line costs 17 px of a bar that
+          already refuses to shrink. */}
+      <Text style={styles.caption} numberOfLines={1}>
+        {caption ?? ''}
+      </Text>
     </Pressable>
   );
 }
@@ -143,19 +152,27 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-around',
     backgroundColor: COLORS.surface,
   },
   button: {
-    minWidth: ICON.target,
+    // Four equal columns rather than four intrinsic widths spaced apart. Under
+    // `space-around` a control is as wide as its widest child, so a product
+    // with 12.4K reviews made the reviews column wider than the others and
+    // pushed every glyph off the quarter-points it should sit on — the count
+    // moved the icon. Equal flex means the text can grow to the column and
+    // stop, and where the glyphs sit stops depending on the numbers.
+    flex: 1,
     minHeight: ICON.minTarget,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 4,
     gap: 2,
   },
   caption: {
+    height: TYPE.lineHeights.small,
     color: COLORS.textSecondary,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
+    textAlign: 'center',
   },
 });

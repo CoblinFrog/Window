@@ -4,7 +4,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS } from 'react-native-reanimated';
 import { COLORS, type ProductCard } from '@window/shared';
 import { usePager } from '../hooks/usePager.js';
-import { PaneView, galleryLength } from './PaneView.js';
+import { PaneView } from './PaneView.js';
 
 /**
  * The pane view as a scrolling deck.
@@ -51,7 +51,6 @@ export interface PaneDeckProps {
   onSeller(card: ProductCard): void;
   onSimilar?: ((card: ProductCard) => void) | undefined;
   onGalleryAdvance(card: ProductCard, index: number): void;
-  onGalleryEnd(card: ProductCard): void;
   onDoubleTap(card: ProductCard): void;
   onLongPress(card: ProductCard): void;
   dataSaver?: boolean;
@@ -69,7 +68,6 @@ export function PaneDeck({
   onSeller,
   onSimilar,
   onGalleryAdvance,
-  onGalleryEnd,
   onDoubleTap: onDoubleTapProp,
   onLongPress,
   dataSaver = false,
@@ -84,9 +82,9 @@ export function PaneDeck({
   });
 
   const card = buffer[cursor] ?? null;
-  // What the product has, and what has actually arrived. They differ while the
-  // live refresh is in flight, and navigation has to respect the smaller one.
-  const total = card ? galleryLength(card) : 1;
+  // How many photographs have actually arrived, which is not always how many
+  // the product claims: the gallery fills in behind the live refresh, and
+  // stepping has to respect what is really there.
   const loaded = card ? Math.max(1, 1 + card.media.gallery.length) : 1;
 
   // A new card starts at its first image. Arriving at a product part-way
@@ -97,22 +95,23 @@ export function PaneDeck({
     setGalleryIndex(0);
   }, [card?.productId]);
 
-  /** Move through the gallery. `delta` is +1 forward, -1 back. */
+  /**
+   * Move through the gallery. `delta` is +1 forward, -1 back.
+   *
+   * Both ends are walls. Tapping past the last photograph used to push a
+   * separate landing screen, which meant the last tap of a gallery quietly
+   * left the feed for a page with a button on it asking to be let back in.
+   * Running out of photographs is not a destination.
+   */
   const stepGallery = useCallback(
     (delta: number) => {
       if (!card) return;
       const next = galleryIndex + delta;
-      if (next < 0) return;
-      if (next >= loaded) {
-        // Only leave for the detail view once this really is the last
-        // photograph — not merely the last one that has downloaded.
-        if (delta > 0 && loaded >= total) onGalleryEnd(card);
-        return;
-      }
+      if (next < 0 || next >= loaded) return;
       setGalleryIndex(next);
       if (delta > 0) onGalleryAdvance(card, next);
     },
-    [card, galleryIndex, loaded, total, onGalleryAdvance, onGalleryEnd],
+    [card, galleryIndex, loaded, onGalleryAdvance],
   );
 
   const swipeBack = useMemo(

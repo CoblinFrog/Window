@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Linking from 'expo-linking';
-import { Redirect, useRouter } from 'expo-router';
+import { Redirect } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated from 'react-native-reanimated';
 import {
@@ -45,7 +45,6 @@ import { useSession } from '../src/store/session.js';
  * competing with them for the same drag.
  */
 export default function FeedScreen(): React.ReactElement {
-  const router = useRouter();
   const layout = useLayout();
   const reducedMotion = useReducedMotion();
 
@@ -386,12 +385,6 @@ export default function FeedScreen(): React.ReactElement {
                     productId: target.productId,
                     position: feed.cursor,
                     mode: feed.mode,
-                  })
-                }
-                onGalleryEnd={(target) =>
-                  router.push({
-                    pathname: '/p/[clusterId]',
-                    params: { clusterId: target.clusterId ?? target.productId },
                   })
                 }
                 onDoubleTap={toggleUpvote}
