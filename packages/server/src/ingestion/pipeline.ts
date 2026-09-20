@@ -545,10 +545,7 @@ export class IngestionPipeline {
 
     // 3. Fuzzy: embedding, price and category must all agree.
     if (input.sourceType === 'new') {
-      const nearby = await collections.clusters
-        .find({ 'category.l3': input.categoryL3 })
-        .limit(200)
-        .toArray();
+      const nearby = await find<Cluster>(collections.clusters, { 'category.l3': input.categoryL3 }, { limit: 200 });
       const candidates: FuzzyCandidate[] = nearby.map((c) => ({
         clusterId: c.id,
         embedding: c.embedding,
@@ -644,12 +641,11 @@ export class IngestionPipeline {
     l3: string,
   ): Promise<{ median: number; p10: number } | null> {
     const { collections } = this.deps;
-    const prices = await collections.products
-      .find(
-        { 'category.l3': l3, status: 'active' },
-        { projection: { 'price.amount': 1 }, limit: 500 },
-      )
-      .toArray();
+    const prices = await find<Product>(
+      collections.products,
+      { 'category.l3': l3, status: 'active' },
+      { select: 'price', limit: 500 },
+    );
     if (prices.length < 5) return null;
     const amounts = prices.map((p) => p.price.amount).sort((a, b) => a - b);
     return {

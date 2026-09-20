@@ -13,6 +13,15 @@ import type {
 } from '@window/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+/**
+ * A table handle is intentionally kept loose at this boundary. The project
+ * does not yet maintain generated Supabase Database types, while the domain
+ * models below provide the types used by the application and helper functions.
+ * Keeping the PostgREST builder opaque prevents its `unknown` row type from
+ * leaking through every service during the MongoDB-to-Supabase migration.
+ */
+export type SupabaseTable = any;
+
 /** Document shapes as they sit in Supabase, with UUID ids. */
 export type Product = ProductDoc<string>;
 export type Cluster = ClusterDoc<string>;
@@ -62,19 +71,19 @@ export interface MerchantLinkDoc {
  * Each is a Supabase query builder for the respective table
  */
 export interface CollectionSet {
-  products: ReturnType<SupabaseClient['from']>;
-  clusters: ReturnType<SupabaseClient['from']>;
-  users: ReturnType<SupabaseClient['from']>;
-  interactions: ReturnType<SupabaseClient['from']>;
-  categories: ReturnType<SupabaseClient['from']>;
-  sellers: ReturnType<SupabaseClient['from']>;
-  reviews: ReturnType<SupabaseClient['from']>;
-  carts: ReturnType<SupabaseClient['from']>;
-  orders: ReturnType<SupabaseClient['from']>;
-  coupons: ReturnType<SupabaseClient['from']>;
-  sources: ReturnType<SupabaseClient['from']>;
-  reports: ReturnType<SupabaseClient['from']>;
-  merchantLinks: ReturnType<SupabaseClient['from']>;
+  products: SupabaseTable;
+  clusters: SupabaseTable;
+  users: SupabaseTable;
+  interactions: SupabaseTable;
+  categories: SupabaseTable;
+  sellers: SupabaseTable;
+  reviews: SupabaseTable;
+  carts: SupabaseTable;
+  orders: SupabaseTable;
+  coupons: SupabaseTable;
+  sources: SupabaseTable;
+  reports: SupabaseTable;
+  merchantLinks: SupabaseTable;
 }
 
 export const TABLE_NAMES = {

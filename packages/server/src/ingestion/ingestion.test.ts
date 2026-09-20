@@ -627,7 +627,7 @@ describe('quad coherence', () => {
 
   const tile = (id: string, l2: string, price: number) =>
     ({
-      _id: { toHexString: () => id, equals: (other: { toHexString(): string }) => other.toHexString() === id },
+      id,
       category: { l1: 'tech', l2, l3: 'x' },
       price: { amount: price, currency: 'USD' },
     }) as never;
@@ -764,7 +764,7 @@ describe('coupon outcomes', () => {
 
 describe('tier-1 API adapter routing', () => {
   const sourceFor = (domain: string) => {
-    const source = SOURCE_REGISTRY.find((candidate) => candidate._id === domain);
+    const source = SOURCE_REGISTRY.find((candidate) => candidate.id === domain);
     assert.ok(source !== undefined, `${domain} must be in the registry`);
     return source;
   };

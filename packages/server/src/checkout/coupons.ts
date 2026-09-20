@@ -1,7 +1,7 @@
-import type { Collection } from 'mongodb';
+import type { SupabaseTable, Coupon } from '../db/supabase-collections.js';
 import { CHECKOUT_CONFIG } from '@window/shared';
-import type { Coupon } from '../db/collections.js';
 import { logger } from '../lib/logger.js';
+import { find, findOne, updateOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('coupons');
 
@@ -46,7 +46,7 @@ export type CouponFailureReason =
   | 'unknown';
 
 export class CouponStore {
-  constructor(private readonly coupons: Collection<Coupon>) {}
+  constructor(private readonly coupons: SupabaseTable) {}
 
   /**
    * Ranked candidates for a merchant. Constraints that can be evaluated before
@@ -59,11 +59,13 @@ export class CouponStore {
     now = new Date(),
     limit = CHECKOUT_CONFIG.maxCouponAttempts,
   ): Promise<CouponCandidate[]> {
-    const docs = await this.coupons
-      .find({ merchantDomain, status: 'active' })
-      .sort({ 'performance.successRate': -1, 'performance.meanDiscountPct': -1 })
-      .limit(limit * 4)
-      .toArray();
+    const docs = await find<Coupon>(this.coupons, { merchantDomain, status: 'active' }, {
+      limit: limit * 4,
+      orderBy: [
+        { column: 'performance.successRate', ascending: false },
+        { column: 'performance.meanDiscountPct', ascending: false },
+      ],
+    });
 
     const eligible = docs.filter((doc) => {
       const c = doc.constraints;
@@ -80,7 +82,7 @@ export class CouponStore {
     });
 
     return eligible.slice(0, limit).map((doc) => ({
-      id: doc._id.toHexString(),
+      id: doc.id,
       code: doc.code,
       merchantDomain: doc.merchantDomain,
       expectedDiscountPct: doc.performance.meanDiscountPct,
@@ -101,7 +103,7 @@ export class CouponStore {
     outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
     now = new Date(),
   ): Promise<void> {
-    const doc = await this.coupons.findOne({ merchantDomain, code });
+    const doc = await findOne<Coupon>(this.coupons, { merchantDomain, code });
     if (!doc) return;
 
     const attempts = doc.performance.attempts + 1;
@@ -119,18 +121,20 @@ export class CouponStore {
 
     const retired = consecutiveFailures >= CHECKOUT_CONFIG.couponRetirementFailures;
 
-    await this.coupons.updateOne(
-      { _id: doc._id },
+    await updateOne<Coupon>(
+      this.coupons,
+      { id: doc.id },
       {
-        $set: {
-          'performance.attempts': attempts,
-          'performance.successes': successes,
-          'performance.successRate': successes / attempts,
-          'performance.meanDiscountPct': Math.round(meanDiscountPct * 10) / 10,
-          'performance.consecutiveFailures': consecutiveFailures,
-          ...(outcome.applied ? { 'performance.lastSuccessAt': now } : {}),
-          ...(retired ? { status: 'retired' as const } : {}),
+        performance: {
+          ...doc.performance,
+          attempts,
+          successes,
+          successRate: successes / attempts,
+          meanDiscountPct: Math.round(meanDiscountPct * 10) / 10,
+          consecutiveFailures,
+          ...(outcome.applied ? { lastSuccessAt: now } : {}),
         },
+        ...(retired ? { status: 'retired' as const } : {}),
       },
     );
 
