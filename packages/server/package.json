@@ -16,6 +16,7 @@
     "ingest:api": "tsx --env-file-if-exists=.env src/scripts/ingest-api.ts",
     "ingest:web": "tsx --env-file-if-exists=.env src/scripts/ingest-web.ts",
     "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts",
+    "reset:onboarding": "tsx --env-file-if-exists=.env src/scripts/reset-onboarding.ts",
     "ingest:listings": "tsx --env-file-if-exists=.env src/scripts/ingest-listings.ts",
     "fill": "tsx --env-file-if-exists=.env src/scripts/fill-catalog.ts"
   },

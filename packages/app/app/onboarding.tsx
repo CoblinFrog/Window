@@ -9,8 +9,8 @@ import {
   RADIUS,
   SPACING,
   TYPE,
-  type PriceBand,
 } from '@window/shared';
+import { LinearGradient } from 'expo-linear-gradient';
 import { api } from '../src/api/client.js';
 import { useLayout } from '../src/hooks/useLayout.js';
 import { useSession } from '../src/store/session.js';
@@ -27,12 +27,19 @@ import { useSession } from '../src/store/session.js';
  * which is the one thing a cold-start vector must not be.
  */
 
-const PRICE_BANDS: Array<{ id: PriceBand | null; label: string }> = [
-  { id: 'budget', label: 'Budget' },
-  { id: 'mid', label: 'Mid' },
-  { id: 'premium', label: 'Premium' },
-  { id: null, label: 'Skip' },
-];
+/**
+ * The gradient behind a tile's label.
+ *
+ * Reaches 0.72 alpha a quarter of the way down and finishes near opaque, which
+ * is what it takes to clear 4.5:1 for white text over a white product cut-out.
+ * It covers the bottom 70% because a two-line label in a ~113 px tile occupies
+ * nearly half of it — a band sized for a full-screen pane simply misses.
+ */
+const TILE_SCRIM = {
+  colors: ['rgba(0,0,0,0)', 'rgba(0,0,0,0.72)', 'rgba(0,0,0,0.9)'] as const,
+  locations: [0, 0.25, 1] as const,
+  heightFraction: 0.7,
+} as const;
 
 export default function OnboardingScreen(): React.ReactElement {
   const router = useRouter();
@@ -63,12 +70,16 @@ export default function OnboardingScreen(): React.ReactElement {
   }, []);
 
   const finish = useCallback(
-    async (priceBand: PriceBand | null) => {
+    async () => {
       if (!ready || submitting) return;
       setSubmitting(true);
       setError(null);
       try {
-        await api.completeOnboarding({ topics: selected, priceBand });
+        // `priceBand` stays in the request and stays null. The server seeds a
+        // price prior from it and already treats null as "no opinion", so
+        // dropping the question costs nothing and keeps the field there for
+        // whatever replaces it.
+        await api.completeOnboarding({ topics: selected, priceBand: null });
         session.markOnboarded();
         await session.refreshSession();
         router.replace('/');
@@ -128,7 +139,20 @@ export default function OnboardingScreen(): React.ReactElement {
                   transition={0}
                   cachePolicy="memory-disk"
                 />
-                <View style={styles.tileScrim} pointerEvents="none" />
+                {/* Catalog photographs are mostly cut-outs on white, so the
+                    label's background is the worst case for white text: a flat
+                    35% wash over white leaves 1.6:1, and the pane's own scrim,
+                    tuned for a full screen carrying a row of ticks, only
+                    reaches about 0.2 alpha where a tile's label starts.
+                    Contrast needs 0.54 alpha over white for 4.5:1, so this
+                    ramps hard and early and holds ~0.8 across the whole label
+                    rather than easing gently to the floor. */}
+                <LinearGradient
+                    colors={TILE_SCRIM.colors as unknown as [string, string, string]}
+                    locations={TILE_SCRIM.locations as unknown as [number, number, number]}
+                    style={styles.tileScrim}
+                    pointerEvents="none"
+                />
                 <Text style={styles.tileLabel} numberOfLines={2}>
                   {topic.displayName}
                 </Text>
@@ -149,27 +173,30 @@ export default function OnboardingScreen(): React.ReactElement {
             {selected.length} of {ONBOARDING_TOPIC_COUNT}
           </Text>
 
-          {/* One tap: budget, mid, premium, or skip. A soft price prior, not a
-              filter, and skipping is a real answer rather than an escape. */}
-          <View style={styles.bands}>
-            {PRICE_BANDS.map((band) => (
-              <Pressable
-                key={band.label}
-                disabled={!ready || submitting}
-                onPress={() => void finish(band.id)}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  band.id ? `Continue with a ${band.label} budget` : 'Continue without a budget'
-                }
-                accessibilityState={{ disabled: !ready || submitting }}
-                style={[styles.band, !ready || submitting ? styles.bandDisabled : null]}
-              >
-                <Text style={[styles.bandText, ready ? styles.bandTextReady : null]}>
-                  {band.label}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+          {/* The band row used to live here and double as the submit control:
+              picking a budget was how you finished. With the question gone the
+              screen needs a button of its own, and it says what is missing
+              rather than sitting there greyed out with no explanation. */}
+          <Pressable
+            disabled={!ready || submitting}
+            onPress={() => void finish()}
+            accessibilityRole="button"
+            accessibilityLabel={
+              ready
+                ? 'Continue'
+                : `Pick ${ONBOARDING_TOPIC_COUNT - selected.length} more to continue`
+            }
+            accessibilityState={{ disabled: !ready || submitting }}
+            style={[styles.continue, ready && !submitting ? styles.continueReady : null]}
+          >
+            <Text style={[styles.continueText, ready ? styles.continueTextReady : null]}>
+              {submitting
+                ? 'One moment'
+                : ready
+                  ? 'Continue'
+                  : `Pick ${ONBOARDING_TOPIC_COUNT - selected.length} more`}
+            </Text>
+          </Pressable>
 
           {error ? <Text style={styles.error}>{error}</Text> : null}
         </View>
@@ -210,13 +237,17 @@ const styles = StyleSheet.create({
   },
   tileSelected: { borderWidth: 2, borderColor: COLORS.accent },
   tileScrim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: `${TILE_SCRIM.heightFraction * 100}%`,
   },
   tileLabel: {
     color: COLORS.textPrimary,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
+    fontWeight: TYPE.weights.semibold,
     padding: 8,
   },
   tileBadge: {
@@ -237,18 +268,20 @@ const styles = StyleSheet.create({
   },
   footer: { paddingHorizontal: SPACING.screenMargin, gap: 12 },
   counter: { color: COLORS.textSecondary, fontSize: TYPE.sizes.small },
-  bands: { flexDirection: 'row', gap: 8 },
-  band: {
-    flex: 1,
-    minHeight: 48,
+  continue: {
+    minHeight: 52,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: RADIUS.tile,
     borderWidth: 1,
     borderColor: COLORS.hairline,
   },
-  bandDisabled: { opacity: 0.4 },
-  bandText: { color: COLORS.textSecondary, fontSize: TYPE.sizes.body },
-  bandTextReady: { color: COLORS.textPrimary },
+  continueReady: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
+  continueText: { color: COLORS.textSecondary, fontSize: TYPE.sizes.body },
+  continueTextReady: {
+    color: COLORS.textPrimary,
+    fontWeight: TYPE.weights.semibold,
+  },
   error: { color: COLORS.accent, fontSize: TYPE.sizes.small },
   action: { color: COLORS.accent, fontSize: TYPE.sizes.body, paddingHorizontal: SPACING.screenMargin },
 });

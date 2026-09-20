@@ -83,8 +83,16 @@ export interface CategoryRef {
 }
 
 export interface CategoryDoc<Id = string> {
-  /** Slug id, e.g. "mechanical-keyboards". */
-  id: string;
+  /**
+   * Row id. A uuid under Supabase — *not* the taxonomy key.
+   *
+   * The taxonomy is keyed by `slug`, and conflating the two is a comparison
+   * Postgres refuses outright: `id = 'tech'` is a uuid type error, not a
+   * no-match. Everything that means "which topic is this" uses `slug`.
+   */
+  id: Id;
+  /** The taxonomy key, e.g. "mechanical-keyboards". */
+  slug: string;
   level: 1 | 2 | 3;
   parent: string | null;
   l1: string;
