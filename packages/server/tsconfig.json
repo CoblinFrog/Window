@@ -4,7 +4,9 @@
     "rootDir": "src",
     "outDir": "dist",
     "types": ["node"],
-    "lib": ["ES2022"]
+    "lib": ["ES2022"],
+    "noImplicitAny": false,
+    "noUncheckedIndexedAccess": false
   },
   "include": ["src/**/*.ts"],
   "references": [{ "path": "../shared" }]

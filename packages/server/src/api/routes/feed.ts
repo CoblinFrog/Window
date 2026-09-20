@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import type { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import {
   ApiError,
@@ -12,7 +11,7 @@ import type { AppContext } from '../context.js';
 import { bloomAdd, deserializeBloom, serializeBloom } from '../../lib/bloom.js';
 import { discardBuffer } from '../../feed/service.js';
 import { rateLimit } from '../middleware.js';
-import { updateOne } from '../../db/supabase-helpers.js';
+import { findOne, updateOne } from '../../db/supabase-helpers.js';
 
 const pageSchema = z.object({
   mode: z.enum(['single', 'window']),
@@ -66,7 +65,7 @@ export function feedRoutes(ctx: AppContext): Router {
       // The seen-set is updated after the response is sent. A served card is
       // not yet an impression — the client reports those — but the server must
       // not hand the same product to the very next page request either.
-      void recordServed(ctx, user._id, result.servedProductIds);
+      void recordServed(ctx, user.id, result.servedProductIds);
     } catch (error) {
       next(error);
     }
@@ -77,7 +76,7 @@ export function feedRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      await discardBuffer(ctx.cache, user._id.toHexString());
+      await discardBuffer(ctx.cache, user.id);
       res.status(204).end();
     } catch (error) {
       next(error);
@@ -158,21 +157,19 @@ export function feedRoutes(ctx: AppContext): Router {
  */
 async function recordServed(
   ctx: AppContext,
-  userId: ObjectId,
+  userId: string,
   productIds: readonly string[],
 ): Promise<void> {
   if (productIds.length === 0) return;
   try {
-    const user = await ctx.db.collections.users.findOne(
-      { _id: userId },
-      { projection: { seenFilter: 1 } },
-    );
+    const user = await findOne(ctx.db.collections.users, { id: userId });
     if (!user) return;
     const bloom = deserializeBloom(user.seenFilter);
     for (const id of productIds) bloomAdd(bloom, id);
-    await ctx.db.collections.users.updateOne(
-      { _id: userId },
-      { $set: { seenFilter: serializeBloom(bloom, user.seenFilter.rebuiltAt) } },
+    await updateOne(
+      ctx.db.collections.users,
+      { id: userId },
+      { seenFilter: serializeBloom(bloom, user.seenFilter.rebuiltAt) },
     );
   } catch {
     // Intentionally swallowed. See the comment above.

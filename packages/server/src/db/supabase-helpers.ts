@@ -3,7 +3,7 @@
  * These provide compatibility layers for common MongoDB operations
  */
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseTable } from './supabase-collections.js';
 
 /** Supabase exposes SQL columns in snake_case while the application contract
  * intentionally keeps the original Mongo-style camelCase names. */
@@ -88,6 +88,7 @@ function applyFilters(query: any, filters: Record<string, any>): any {
     if (value === null || value === undefined) query = query.is(key, null);
     else if (typeof value === 'object' && '$ne' in value) query = query.neq(key, value.$ne);
     else if (typeof value === 'object' && '$in' in value) query = query.in(key, value.$in);
+    else if (typeof value === 'object' && '$nin' in value) query = query.not(key, 'in', `(${value.$nin.join(',')})`);
     else if (typeof value === 'object' && '$gt' in value) query = query.gt(key, value.$gt);
     else if (typeof value === 'object' && '$gte' in value) query = query.gte(key, value.$gte);
     else if (typeof value === 'object' && '$lt' in value) query = query.lt(key, value.$lt);
@@ -100,8 +101,8 @@ function applyFilters(query: any, filters: Record<string, any>): any {
 /**
  * MongoDB findOne equivalent
  */
-export async function findOne<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function findOne<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any> = {},
   options: { select?: string; orderBy?: { column: string; ascending?: boolean } } = {}
 ): Promise<T | null> {
@@ -130,8 +131,8 @@ export async function findOne<T>(
 /**
  * MongoDB find equivalent
  */
-export async function find<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function find<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any> = {},
   options: { 
     select?: string; 
@@ -172,8 +173,8 @@ export async function find<T>(
 /**
  * MongoDB insertOne equivalent
  */
-export async function insertOne<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function insertOne<T = any>(
+  table: SupabaseTable,
   document: Record<string, any>
 ): Promise<T> {
   const { data, error } = await table.insert(toDatabaseObject(document)).select().single();
@@ -186,8 +187,8 @@ export async function insertOne<T>(
 /**
  * MongoDB insert equivalent (for cases where we use .insert() directly)
  */
-export async function insert<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function insert<T = any>(
+  table: SupabaseTable,
   document: Record<string, any>
 ): Promise<T> {
   const { data, error } = await table.insert(toDatabaseObject(document)).select().single();
@@ -200,8 +201,8 @@ export async function insert<T>(
 /**
  * MongoDB insertMany equivalent
  */
-export async function insertMany<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function insertMany<T = any>(
+  table: SupabaseTable,
   documents: Record<string, any>[]
 ): Promise<T[]> {
   const { data, error } = await table.insert(documents.map(toDatabaseObject)).select();
@@ -214,8 +215,8 @@ export async function insertMany<T>(
 /**
  * MongoDB updateOne equivalent
  */
-export async function updateOne<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function updateOne<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any>,
   update: Record<string, any>
 ): Promise<T> {
@@ -233,8 +234,8 @@ export async function updateOne<T>(
 /**
  * MongoDB updateMany equivalent
  */
-export async function updateMany<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function updateMany<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any>,
   update: Record<string, any>
 ): Promise<T[]> {
@@ -252,8 +253,8 @@ export async function updateMany<T>(
 /**
  * MongoDB deleteOne equivalent
  */
-export async function deleteOne<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function deleteOne<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any>
 ): Promise<T> {
   let query = table.delete();
@@ -270,8 +271,8 @@ export async function deleteOne<T>(
 /**
  * MongoDB deleteMany equivalent
  */
-export async function deleteMany<T>(
-  table: ReturnType<SupabaseClient['from']>,
+export async function deleteMany<T = any>(
+  table: SupabaseTable,
   filters: Record<string, any>
 ): Promise<T[]> {
   let query = table.delete();
@@ -289,7 +290,7 @@ export async function deleteMany<T>(
  * MongoDB count equivalent
  */
 export async function count(
-  table: ReturnType<SupabaseClient['from']>,
+  table: SupabaseTable,
   filters: Record<string, any> = {}
 ): Promise<number> {
   let query = table.select('*', { count: 'exact', head: true });

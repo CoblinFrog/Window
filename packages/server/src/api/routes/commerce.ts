@@ -11,10 +11,12 @@ import {
 } from '@window/shared';
 import { env } from '../../config/env.js';
 import type { AppContext } from '../context.js';
-import type { Order } from '../../db/supabase-collections.js';
+import type { Order, Product, Source } from '../../db/supabase-collections.js';
 import { CheckoutConflict } from '../../checkout/orchestrator.js';
 import { rateLimit } from '../middleware.js';
 import { requireAuthenticated } from '../auth.js';
+import { find, findOne, updateOne, insert } from '../../db/supabase-helpers.js';
+import type { MerchantLinkDoc } from '../../db/supabase-collections.js';
 
 function conflictToApiError(error: CheckoutConflict): ApiError {
   const type =
@@ -99,14 +101,14 @@ export function commerceRoutes(ctx: AppContext): Router {
   // -------------------------------------------------------------------------
 
   async function summarize(order: Order): Promise<CheckoutJobSummary> {
-    const source = await collections.sources.select('*').eq('id', order.merchantDomain).single();
+    const source = await findOne<Source>(collections.sources, { id: order.merchantDomain });
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
       jobId: order.agentRun?.jobId ?? order.id,
       orderId: order.id,
       merchantDomain: order.merchantDomain,
-      merchantName: source.data?.displayName ?? order.merchantDomain,
+      merchantName: source?.displayName ?? order.merchantDomain,
       status: order.status,
       quote: order.quote
         ? {
@@ -161,7 +163,7 @@ export function commerceRoutes(ctx: AppContext): Router {
         throw ApiError.validation('There is nothing available in the cart to check out.');
       }
 
-      const orders = await ctx.checkout.createJobs(user, cart._id);
+      const orders = await ctx.checkout.createJobs(user, cart.id);
 
       // Quoting is long-running — 25 s at p50, 60 s at p95, and up to 180 s
       // before it fails cleanly — and a job can stop mid-run to ask the user
@@ -195,9 +197,9 @@ export function commerceRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
       if (!req.params.id) throw ApiError.validation('Invalid job id.');
 
-      const order = await collections.orders.select('*').eq('id', req.params.id).eq('userId', user.id).single();
-      if (!order.data) throw ApiError.notFound('That checkout job');
-      res.json(await summarize(order.data as Order));
+      const order = await findOne<Order>(collections.orders, { id: req.params.id, userId: user.id });
+      if (!order) throw ApiError.notFound('That checkout job');
+      res.json(await summarize(order));
     } catch (error) {
       next(error);
     }
@@ -215,8 +217,8 @@ export function commerceRoutes(ctx: AppContext): Router {
       if (!req.params.id) throw ApiError.validation('Invalid job id.');
 
       const orderId = req.params.id;
-      const order = await collections.orders.select('*').eq('id', orderId).eq('userId', user.id).single();
-      if (!order.data) throw ApiError.notFound('That checkout job');
+      const order = await findOne<Order>(collections.orders, { id: orderId, userId: user.id });
+      if (!order) throw ApiError.notFound('That checkout job');
 
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -323,20 +325,17 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
 
-      const orders = await collections.orders
-        .select('*')
-        .eq('userId', user.id)
-        .order('createdAt', { ascending: false })
-        .limit(50);
+      const orders = await find<Order>(collections.orders, { userId: user.id }, {
+        limit: 50,
+        orderBy: { column: 'createdAt', ascending: false },
+      });
 
-      const productIds = (orders.data || []).flatMap((o) => o.items.map((i) => i.productId));
-      const products = await collections.products
-        .select('id,media.hero')
-        .in('id', productIds);
-      const heroById = new Map((products.data || []).map((p) => [p.id, p.media.hero]));
+      const productIds = orders.flatMap((o) => o.items.map((i) => i.productId));
+      const products = await find<Product>(collections.products, { id: { $in: productIds } }, { select: 'id,media' });
+      const heroById = new Map(products.map((p) => [p.id, p.media.hero]));
 
       const response: OrdersResponse = {
-        orders: (orders.data || []).map((order) => ({
+        orders: orders.map((order) => ({
           orderId: order.id,
           merchantDomain: order.merchantDomain,
           merchantName: order.merchantDomain,
@@ -379,26 +378,35 @@ export function commerceRoutes(ctx: AppContext): Router {
         requireAuthenticated(principal, 'link merchant accounts');
 
         const domain = req.params.domain;
-        const source = await collections.sources.findOne({ _id: domain });
+        const source = await findOne(collections.sources, { id: domain });
         if (!source) throw ApiError.notFound(`Merchant ${domain}`);
 
         const now = new Date();
         const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
         const linkId = randomUUID();
 
-        await collections.merchantLinks.updateOne(
-          { userId: user._id, merchantDomain: domain },
-          {
-            $set: {
-              status: 'pending' as const,
-              encryptedSession: null,
-              createdAt: now,
-              linkedAt: null,
-              expiresAt,
-            },
-          },
-          { upsert: true },
-        );
+        const existingLink = await findOne<MerchantLinkDoc>(collections.merchantLinks, {
+          userId: user.id,
+          merchantDomain: domain,
+        });
+        if (existingLink) {
+          await updateOne<MerchantLinkDoc>(
+            collections.merchantLinks,
+            { id: existingLink.id },
+            { status: 'pending' as const, encryptedSession: null, createdAt: now, linkedAt: null, expiresAt },
+          );
+        } else {
+          await insert<MerchantLinkDoc>(collections.merchantLinks, {
+            id: linkId,
+            userId: user.id,
+            merchantDomain: domain,
+            status: 'pending' as const,
+            encryptedSession: null,
+            createdAt: now,
+            linkedAt: null,
+            expiresAt,
+          });
+        }
 
         res.json({
           merchantDomain: domain,

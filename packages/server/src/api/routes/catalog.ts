@@ -31,7 +31,7 @@ export function catalogRoutes(ctx: AppContext): Router {
 
   async function merchantNames(): Promise<Map<string, string>> {
     const { data: sources } = await collections.sources.select('id,displayName');
-    return new Map((sources || []).map((s) => [s.id, s.displayName]));
+    return new Map((sources || []).map((s: { id: string; displayName: string }) => [s.id, s.displayName]));
   }
 
   /**
@@ -116,16 +116,7 @@ export function catalogRoutes(ctx: AppContext): Router {
           rating: context.sellers.get(product.sellerId)?.metrics.rating ?? null,
         },
         category: product.category,
-        badges: context.badges.get(product.id) ?? {
-          source: product.sourceType,
-          condition: product.condition,
-          priceContext: null,
-          onlyOne: product.stock.singleUnit,
-          endsAt: product.auction?.endsAt?.toISOString() ?? null,
-          riskFlag: riskFlagText(product.risk),
-          wellReviewed: product.quality.score > 0.8,
-          caution: cautionText(product.quality),
-        },
+        badges: toProductCard(candidate, context).badges,
         media: {
           hero: product.media.hero,
           galleryCount: product.media.gallery.length,
@@ -151,9 +142,9 @@ export function catalogRoutes(ctx: AppContext): Router {
         sourceType: product.sourceType,
         quality: {
           score: product.quality.score,
-          cautions: (product.quality.cautions ?? []).map((c) => ({
+          cautions: (product.quality.cautions ?? []).map((c: { theme: string }) => ({
             theme: c.theme,
-            text: cautionText(c),
+            text: cautionText(c as never),
           })),
         },
         risk: { tier: product.risk.tier, flag: riskFlagText(product.risk as never) },
