@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { goBackOrFeed } from '../src/navigation.js';
 import {
   COLORS,
@@ -454,9 +455,11 @@ export default function CheckoutScreen(): React.ReactElement {
     return () => clearInterval(timer);
   }, []);
 
+  const insets = useSafeAreaInsets();
+
   return (
     <View style={styles.screen}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + HEADER_PAD_V }]}>
         <Control label="Back to cart" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
         </Control>
@@ -493,6 +496,14 @@ export default function CheckoutScreen(): React.ReactElement {
   );
 }
 
+/**
+ * The header's own vertical padding, named because the screen adds the device's
+ * top inset to it at render time. A full-screen route starts at y=0, which on a
+ * phone with a Dynamic Island is behind the island — the back button was there,
+ * unreachable, rather than missing.
+ */
+const HEADER_PAD_V = 8;
+
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.surface },
   header: {
@@ -500,7 +511,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: SPACING.screenMargin / 2,
     paddingHorizontal: SPACING.screenMargin,
-    paddingVertical: 8,
+    paddingVertical: HEADER_PAD_V,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.hairline,
   },
