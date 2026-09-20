@@ -1,4 +1,3 @@
-import { ObjectId, type AnyBulkWriteOperation } from 'mongodb';
 import {
   QUALITY_WEIGHTS,
   clamp,
@@ -6,9 +5,8 @@ import {
   meanVector,
   type SourceDoc,
 } from '@window/shared';
-import { connectDatabase } from '../db/client.js';
-import type { Category, Product } from '../db/collections.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { connectDatabase } from '../db/supabase-client.js';
+import type { Category, Product } from '../db/supabase-collections.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
@@ -18,6 +16,7 @@ import { AmazonPaapiAdapter, fromEnv as amazonFromEnv } from '../ingestion/adapt
 import type { CrawlContext, RawListing, SourceAdapter } from '../ingestion/types.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline } from '../media/pipeline.js';
+import { count, deleteMany, find, findOne, updateOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('ingest-api');
 
@@ -144,7 +143,6 @@ async function main(): Promise<void> {
 
   const db = await connectDatabase();
   const { collections } = db;
-  await ensureIndexes(db.db);
 
   // ---- Collect ------------------------------------------------------------
   const collected: RawListing[] = [];
@@ -207,22 +205,22 @@ async function main(): Promise<void> {
   // Done only once there is something to replace it with, so a failed run
   // never leaves an empty catalog behind.
   if (options.replace) {
-    const removed = await Promise.all([
-      collections.products.deleteMany({}),
-      collections.clusters.deleteMany({}),
-      collections.reviews.deleteMany({}),
-      collections.sellers.deleteMany({}),
+    const [productsResult, clustersResult, reviewsResult] = await Promise.all([
+      deleteMany(collections.products, {}),
+      deleteMany(collections.clusters, {}),
+      deleteMany(collections.reviews, {}),
+      deleteMany(collections.sellers, {}),
     ]);
     log.info('cleared previous catalog', {
-      products: removed[0].deletedCount,
-      clusters: removed[1].deletedCount,
-      reviews: removed[2].deletedCount,
+      products: productsResult.length,
+      clusters: clustersResult.length,
+      reviews: reviewsResult.length,
     });
   }
 
   for (const source of sources) {
     const doc: SourceDoc<string> = {
-      _id: source.domain,
+      id: source.domain,
       displayName: source.name.split(' ')[0] as string,
       tier: 1,
       sourceType: source.domain === 'ebay.com' ? 'secondhand' : 'new',
@@ -239,7 +237,7 @@ async function main(): Promise<void> {
       checkout: { supported: true, guestCheckout: true, blocksAgents: false, protocol: null, stackableCoupons: false },
       status: 'active',
     };
-    await collections.sources.updateOne({ _id: source.domain }, { $set: doc as never }, { upsert: true });
+    await updateOne(collections.sources, { id: source.domain }, doc);
   }
 
   // ---- Ingest -------------------------------------------------------------
@@ -291,11 +289,11 @@ async function main(): Promise<void> {
   await recomputeCentroids(collections, now);
   await bootstrapCoOccurrence(collections);
 
-  const active = await collections.products.countDocuments({ status: 'active' });
+  const active = await count(collections.products, { status: 'active' });
   log.info('done', {
     activeProducts: active,
-    clusters: await collections.clusters.countDocuments({}),
-    sellers: await collections.sellers.countDocuments({}),
+    clusters: await count(collections.clusters, {}),
+    sellers: await count(collections.sellers, {}),
     seconds: Math.round((Date.now() - started) / 1000),
   });
 
@@ -310,11 +308,9 @@ async function main(): Promise<void> {
 async function primeEngagement(
   collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
 ): Promise<void> {
-  const operations: Array<AnyBulkWriteOperation<Product>> = [];
-  for await (const product of collections.products.find(
-    { status: 'active' },
-    { projection: { _id: 1, quality: 1 } },
-  )) {
+  const products = await find(collections.products, { status: 'active' }, { select: 'id,quality' });
+
+  for (const product of products) {
     const term = engagementScore({
       impressions: 200,
       interactions: 8,
@@ -328,20 +324,15 @@ async function primeEngagement(
       0,
       1,
     );
-    operations.push({
-      updateOne: {
-        filter: { _id: product._id },
-        update: {
-          $set: {
-            engagement: { impressions: 200, interactions: 8, ctrSmoothed: 0.04, cartAdds: 1 },
-            'quality.engagement': Math.round(term * 1000) / 1000,
-            'quality.score': Math.round(next * 1000) / 1000,
-          },
-        },
+    await updateOne(collections.products, { id: product.id }, {
+      engagement: { impressions: 200, interactions: 8, ctrSmoothed: 0.04, cartAdds: 1 },
+      quality: {
+        ...(product.quality || {}),
+        engagement: Math.round(term * 1000) / 1000,
+        score: Math.round(next * 1000) / 1000,
       },
     });
   }
-  if (operations.length > 0) await collections.products.bulkWrite(operations);
 }
 
 /**
@@ -358,35 +349,27 @@ async function recomputeCentroids(
   const embedder = localEmbeddingProvider();
 
   for (const level of [3, 2, 1] as const) {
-    const nodes = await collections.categories.find({ level }).toArray();
-    const operations: Array<AnyBulkWriteOperation<Category>> = [];
+    const nodes = await find(collections.categories, { level });
 
     for (const node of nodes) {
       const field = level === 1 ? 'category.l1' : level === 2 ? 'category.l2' : 'category.l3';
-      const members = await collections.products
-        .find({ [field]: node._id, status: 'active' }, { projection: { embedding: 1 }, limit: 500 })
-        .toArray();
+      const members = await find(collections.products, { [field]: node.id, status: 'active' }, { select: 'embedding', limit: 500 });
 
       const centroid =
         members.length > 0
           ? meanVector(members.map((m) => m.embedding))
           : await embedder.embedText(node.displayName);
 
-      operations.push({
-        updateOne: {
-          filter: { _id: node._id },
-          update: {
-            $set: {
-              centroid,
-              centroidComputedAt: now,
-              memberCount: members.length,
-              'engagement.productCount': members.length,
-            },
-          },
+      await updateOne(collections.categories, { id: node.id }, {
+        centroid,
+        centroidComputedAt: now,
+        memberCount: members.length,
+        engagement: {
+          ...(node.engagement || {}),
+          productCount: members.length,
         },
       });
     }
-    if (operations.length > 0) await collections.categories.bulkWrite(operations);
   }
   log.info('centroids recomputed (empty categories fall back to their name vector)');
 }
@@ -394,15 +377,14 @@ async function recomputeCentroids(
 async function bootstrapCoOccurrence(
   collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
 ): Promise<void> {
-  const nodes = await collections.categories.find({ level: 1 }).toArray();
-  const operations: Array<AnyBulkWriteOperation<Category>> = [];
+  const nodes = await find(collections.categories, { level: 1 });
 
   for (const node of nodes) {
     if (!node.centroid) continue;
     const pairs = nodes
-      .filter((other) => other._id !== node._id && other.centroid)
+      .filter((other) => other.id !== node.id && other.centroid)
       .map((other) => ({
-        topic: other._id,
+        topic: other.id,
         lift:
           Math.round(clamp(1 + cosine(node.centroid as number[], other.centroid as number[]) * 2.5, 0.2, 4) * 100) /
           100,
@@ -410,11 +392,8 @@ async function bootstrapCoOccurrence(
       .sort((a, b) => b.lift - a.lift)
       .slice(0, 8);
 
-    operations.push({
-      updateOne: { filter: { _id: node._id }, update: { $set: { coOccurrence: pairs } } },
-    });
+    await updateOne(collections.categories, { id: node.id }, { coOccurrence: pairs });
   }
-  if (operations.length > 0) await collections.categories.bulkWrite(operations);
 }
 
 main().catch((error) => {

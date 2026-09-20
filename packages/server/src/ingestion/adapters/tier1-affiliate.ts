@@ -428,7 +428,7 @@ export class Tier1AffiliateAdapter implements SourceAdapter {
   private readonly itemCache = new Map<string, unknown>();
 
   constructor(private readonly source: SourceDoc<string>, deps: Tier1Deps = {}) {
-    this.domain = source._id;
+    this.domain = source.id;
     this.fetchImpl = deps.fetchImpl ?? ((input, init) => fetch(input, init));
     this.now = deps.now ?? (() => new Date());
     this.secret = deps.secret ?? ((name) => process.env[name]);

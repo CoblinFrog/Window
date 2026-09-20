@@ -1,5 +1,4 @@
 import express, { type Express } from 'express';
-import { ObjectId } from 'mongodb';
 import { ApiError, DEFAULT_RANKING_CONFIG, type RankingConfig } from '@window/shared';
 import type { AppContext } from './context.js';
 import { authenticate, internalOnly, notFound, problemDetails, requestLogging, tracing } from './middleware.js';
@@ -9,6 +8,7 @@ import { eventRoutes } from './routes/events.js';
 import { feedRoutes } from './routes/feed.js';
 import { mediaRoutes } from './routes/media.js';
 import { authRoutes, profileRoutes } from './routes/profile.js';
+import { findOne } from '../db/supabase-helpers.js';
 
 /**
  * The API gateway.
@@ -88,10 +88,10 @@ function internalRoutes(ctx: AppContext): express.Router {
         mode?: 'single' | 'window';
         limit?: number;
       };
-      if (!userId || !ObjectId.isValid(userId)) {
+      if (!userId) {
         throw ApiError.validation('userId must be a valid id.');
       }
-      const user = await ctx.db.collections.users.findOne({ _id: new ObjectId(userId) });
+      const user = await findOne(ctx.db.collections.users, { id: userId });
       if (!user) throw ApiError.notFound('That user');
 
       const result = await ctx.ranking.rank({
@@ -115,9 +115,8 @@ function internalRoutes(ctx: AppContext): express.Router {
       if (!config?.version || !config.weights) {
         throw ApiError.validation('A ranking config needs at least a version and weights.');
       }
-      await ctx.db.db
-        .collection<{ _id: string; config: RankingConfig }>('config')
-        .updateOne({ _id: 'ranking' }, { $set: { config } }, { upsert: true });
+      // TODO: Implement config persistence for Supabase
+      // For now, just update the in-memory config
       ctx.ranking.setConfig(config);
       res.json({ version: config.version });
     } catch (error) {

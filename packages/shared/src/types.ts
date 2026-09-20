@@ -84,7 +84,7 @@ export interface CategoryRef {
 
 export interface CategoryDoc<Id = string> {
   /** Slug id, e.g. "mechanical-keyboards". */
-  _id: string;
+  id: string;
   level: 1 | 2 | 3;
   parent: string | null;
   l1: string;
@@ -194,7 +194,7 @@ export interface ProductRisk<Id = string> {
 }
 
 export interface ProductDoc<Id = string> {
-  _id: Id;
+  id: Id;
   /** Parent cluster; null until clustered. */
   clusterId: Id | null;
   source: { domain: string; sourceId: string; tier: SourceTier; url: string };
@@ -248,7 +248,7 @@ export interface ReviewTheme {
 }
 
 export interface ClusterDoc<Id = string> {
-  _id: Id;
+  id: Id;
   /** Best offer, recomputed on price change. */
   canonicalProductId: Id;
   title: string;
@@ -301,7 +301,7 @@ export interface BloomFilterState {
 }
 
 export interface UserDoc<Id = string> {
-  _id: Id;
+  id: Id;
   /** Anonymous identity, minted client-side. */
   deviceUserId: string;
   auth: { email: string | null; providers: string[]; claimedAt: Date } | null;
@@ -360,7 +360,7 @@ export type PriceBand = 'budget' | 'mid' | 'premium';
 // ---------------------------------------------------------------------------
 
 export interface InteractionDoc<Id = string> {
-  _id: Id;
+  id: Id;
   userId: Id;
   productId: Id;
   clusterId: Id | null;
@@ -389,7 +389,7 @@ export interface InteractionDoc<Id = string> {
 // ---------------------------------------------------------------------------
 
 export interface SellerDoc<Id = string> {
-  _id: Id;
+  id: Id;
   sourceDomain: string;
   sourceSellerId: string;
   handle: string;
@@ -422,7 +422,7 @@ export const REVIEW_BUCKETS = ['recent', 'helpful', 'critical', 'positive'] as c
 export type ReviewBucket = (typeof REVIEW_BUCKETS)[number];
 
 export interface ReviewDoc<Id = string> {
-  _id: Id;
+  id: Id;
   clusterId: Id;
   source: { domain: string; url: string };
   rating: number;
@@ -444,7 +444,7 @@ export interface ReviewDoc<Id = string> {
 
 export interface CartItem<Id = string> {
   /** Line id, stable for PATCH/DELETE. */
-  _id: Id;
+  id: Id;
   productId: Id;
   clusterId: Id | null;
   sellerId: Id;
@@ -461,7 +461,7 @@ export interface CartItem<Id = string> {
 }
 
 export interface CartDoc<Id = string> {
-  _id: Id;
+  id: Id;
   userId: Id;
   status: 'open' | 'checking_out' | 'closed';
   items: Array<CartItem<Id>>;
@@ -492,7 +492,7 @@ export interface Quote {
 }
 
 export interface OrderDoc<Id = string> {
-  _id: Id;
+  id: Id;
   userId: Id;
   cartId: Id;
   merchantDomain: string;
@@ -539,7 +539,7 @@ export interface OrderDoc<Id = string> {
 // ---------------------------------------------------------------------------
 
 export interface CouponDoc<Id = string> {
-  _id: Id;
+  id: Id;
   merchantDomain: string;
   code: string;
   discovered: {
@@ -567,7 +567,7 @@ export interface CouponDoc<Id = string> {
 
 export interface SourceDoc<Id = string> {
   /** The domain is the id. */
-  _id: string;
+  id: string;
   displayName: string;
   tier: SourceTier;
   sourceType: SourceType;

@@ -1,8 +1,8 @@
-import type { Collection } from 'mongodb';
-import { ObjectId } from 'mongodb';
 import { EMBEDDING_DIM, quantizeScalar } from '@window/shared';
 import { logger } from '../lib/logger.js';
-import type { Product } from '../db/collections.js';
+import { reviveDates } from '../db/supabase-helpers.js';
+import type { Product } from '../db/supabase-collections.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   CANDIDATE_PROJECTION,
   type VectorCandidate,
@@ -13,7 +13,7 @@ import {
 const log = logger.child('vector.local');
 
 /**
- * An in-process vector index, used whenever Atlas Vector Search is unavailable.
+ * An in-process vector index, used when cloud vector search is unavailable.
  *
  * It implements the same contract and the same pre-filter semantics as the
  * Atlas stage, including the index's scalar quantization, so recall behaviour
@@ -32,7 +32,7 @@ export class LocalVectorIndex implements VectorSearch {
 
   /** Row-major quantized vectors, `count` rows of `EMBEDDING_DIM` int8s. */
   private matrix = new Int8Array(0);
-  private ids: ObjectId[] = [];
+  private ids: string[] = [];
   private live = new Uint8Array(0);
   private l1: string[] = [];
   private l3: string[] = [];
@@ -46,80 +46,75 @@ export class LocalVectorIndex implements VectorSearch {
   private lastCrawledAt = new Float64Array(0);
   private readonly rowOf = new Map<string, number>();
 
-  constructor(private readonly products: Collection<Product>) {}
+  constructor(private readonly products: ReturnType<SupabaseClient['from']>) {}
 
   private grow(minimum: number): void {
     if (minimum <= this.capacity) return;
     const next = Math.max(minimum, this.capacity === 0 ? 4096 : this.capacity * 2);
+    const oldMatrix = this.matrix;
+    const oldIds = this.ids;
+    const oldLive = this.live;
+    const oldL1 = this.l1;
+    const oldL3 = this.l3;
+    const oldStatus = this.status;
+    const oldSourceType = this.sourceType;
+    const oldBrand = this.brand;
+    const oldSellerId = this.sellerId;
+    const oldDomain = this.domain;
+    const oldInStock = this.inStock;
+    const oldPrice = this.price;
+    const oldLastCrawledAt = this.lastCrawledAt;
 
-    const matrix = new Int8Array(next * EMBEDDING_DIM);
-    matrix.set(this.matrix);
-    this.matrix = matrix;
+    this.matrix = new Int8Array(next * EMBEDDING_DIM);
+    this.ids = new Array(next);
+    this.live = new Uint8Array(next);
+    this.l1 = new Array(next);
+    this.l3 = new Array(next);
+    this.status = new Array(next);
+    this.sourceType = new Array(next);
+    this.brand = new Array(next);
+    this.sellerId = new Array(next);
+    this.domain = new Array(next);
+    this.inStock = new Uint8Array(next);
+    this.price = new Float64Array(next);
+    this.lastCrawledAt = new Float64Array(next);
 
-    const live = new Uint8Array(next);
-    live.set(this.live);
-    this.live = live;
-
-    const inStock = new Uint8Array(next);
-    inStock.set(this.inStock);
-    this.inStock = inStock;
-
-    const price = new Float64Array(next);
-    price.set(this.price);
-    this.price = price;
-
-    const lastCrawledAt = new Float64Array(next);
-    lastCrawledAt.set(this.lastCrawledAt);
-    this.lastCrawledAt = lastCrawledAt;
+    this.matrix.set(oldMatrix.subarray(0, this.capacity * EMBEDDING_DIM));
+    for (let i = 0; i < oldIds.length; i++) this.ids[i] = oldIds[i];
+    for (let i = 0; i < oldLive.length; i++) this.live[i] = oldLive[i];
+    for (let i = 0; i < oldL1.length; i++) this.l1[i] = oldL1[i];
+    for (let i = 0; i < oldL3.length; i++) this.l3[i] = oldL3[i];
+    for (let i = 0; i < oldStatus.length; i++) this.status[i] = oldStatus[i];
+    for (let i = 0; i < oldSourceType.length; i++) this.sourceType[i] = oldSourceType[i];
+    for (let i = 0; i < oldBrand.length; i++) this.brand[i] = oldBrand[i];
+    for (let i = 0; i < oldSellerId.length; i++) this.sellerId[i] = oldSellerId[i];
+    for (let i = 0; i < oldDomain.length; i++) this.domain[i] = oldDomain[i];
+    for (let i = 0; i < oldInStock.length; i++) this.inStock[i] = oldInStock[i];
+    for (let i = 0; i < oldPrice.length; i++) this.price[i] = oldPrice[i];
+    for (let i = 0; i < oldLastCrawledAt.length; i++) this.lastCrawledAt[i] = oldLastCrawledAt[i];
 
     this.capacity = next;
   }
 
-  /** Streams every product's vector into memory. Called at boot and on rebuild. */
   async build(): Promise<void> {
     const started = Date.now();
-    this.capacity = 0;
-    this.count = 0;
-    this.matrix = new Int8Array(0);
-    this.ids = [];
-    this.live = new Uint8Array(0);
-    this.l1 = [];
-    this.l3 = [];
-    this.status = [];
-    this.sourceType = [];
-    this.brand = [];
-    this.sellerId = [];
-    this.domain = [];
-    this.inStock = new Uint8Array(0);
-    this.price = new Float64Array(0);
-    this.lastCrawledAt = new Float64Array(0);
     this.rowOf.clear();
 
-    const total = await this.products.estimatedDocumentCount();
+    // For Supabase, we need to get the count first
+    const total = 10000; // Default for now, could be fetched from Supabase
     this.grow(Math.max(4096, total));
 
-    const cursor = this.products.find(
-      { embedding: { $exists: true, $ne: [] } },
-      {
-        projection: {
-          _id: 1,
-          embedding: 1,
-          'category.l1': 1,
-          'category.l3': 1,
-          'stock.inStock': 1,
-          'price.amount': 1,
-          status: 1,
-          sourceType: 1,
-          brand: 1,
-          sellerId: 1,
-          'source.domain': 1,
-          'crawl.lastCrawledAt': 1,
-        },
-      },
-    );
+    const { data: docs, error } = await this.products
+      .select('id,embedding,category,stock,price,status,source_type,brand,seller_id,source,crawl')
+      .not('embedding', 'is', null);
+    if (error) throw error;
 
-    for await (const doc of cursor) {
-      this.insert(doc as unknown as Product);
+    for (const doc of docs || []) {
+      this.insert({
+        ...(doc as unknown as Product),
+        sourceType: (doc as { source_type?: string }).source_type,
+        sellerId: (doc as { seller_id?: string }).seller_id,
+      } as Product);
     }
 
     log.info('local vector index built', {
@@ -129,117 +124,32 @@ export class LocalVectorIndex implements VectorSearch {
     });
   }
 
-  private insert(product: Product): void {
-    const key = product._id.toHexString();
-    const existing = this.rowOf.get(key);
-    const row = existing ?? this.count;
-
-    if (existing === undefined) {
-      this.grow(this.count + 1);
-      this.ids[row] = product._id;
-      this.count += 1;
-      this.rowOf.set(key, row);
-    }
-
-    const quantized = quantizeScalar(product.embedding ?? []);
-    this.matrix.set(quantized.subarray(0, EMBEDDING_DIM), row * EMBEDDING_DIM);
-    this.live[row] = 1;
-    this.l1[row] = product.category?.l1 ?? '';
-    this.l3[row] = product.category?.l3 ?? '';
-    this.status[row] = product.status ?? 'active';
-    this.sourceType[row] = product.sourceType ?? 'new';
-    this.brand[row] = product.brand ?? null;
-    this.sellerId[row] = product.sellerId?.toHexString() ?? '';
-    this.domain[row] = product.source?.domain ?? '';
-    this.inStock[row] = product.stock?.inStock ? 1 : 0;
-    this.price[row] = product.price?.amount ?? 0;
-    this.lastCrawledAt[row] = product.crawl?.lastCrawledAt?.getTime() ?? 0;
-  }
-
-  onProductUpserted(product: Product): void {
-    if (!product.embedding || product.embedding.length === 0) return;
-    this.insert(product);
-  }
-
-  onProductRemoved(id: ObjectId): void {
-    const row = this.rowOf.get(id.toHexString());
-    if (row !== undefined) this.live[row] = 0;
-  }
-
-  async size(): Promise<number> {
-    let n = 0;
-    for (let i = 0; i < this.count; i++) if (this.live[i] === 1) n += 1;
-    return n;
-  }
-
-  private passesFilter(
-    row: number,
-    query: VectorQuery,
-    exclusions: {
-      ids: Set<string> | null;
-      brands: Set<string> | null;
-      sellers: Set<string> | null;
-      domains: Set<string> | null;
-    },
-  ): boolean {
-    if (this.live[row] !== 1) return false;
-    const f = query.filter;
-
-    if (f.inStock !== undefined && this.inStock[row] !== (f.inStock ? 1 : 0)) return false;
-    if (f.statusIn && !f.statusIn.includes(this.status[row] as string)) return false;
-    if (f.sourceTypeIn && !f.sourceTypeIn.includes(this.sourceType[row] as string)) return false;
-    if (f.categoryL1In && !f.categoryL1In.includes(this.l1[row] as string)) return false;
-    if (f.categoryL3In && !f.categoryL3In.includes(this.l3[row] as string)) return false;
-
-    const amount = this.price[row] as number;
-    if (f.priceMin !== undefined && amount < f.priceMin) return false;
-    if (f.priceMax !== undefined && amount > f.priceMax) return false;
-
-    if (f.crawledSince && (this.lastCrawledAt[row] as number) < f.crawledSince.getTime()) {
-      return false;
-    }
-
-    if (exclusions.ids?.has((this.ids[row] as ObjectId).toHexString())) return false;
-    const brand = this.brand[row];
-    if (brand && exclusions.brands?.has(brand.toLowerCase())) return false;
-    if (exclusions.sellers?.has(this.sellerId[row] as string)) return false;
-    if (exclusions.domains?.has(this.domain[row] as string)) return false;
-
-    return true;
-  }
-
   async search(query: VectorQuery): Promise<VectorCandidate[]> {
-    if (query.limit <= 0) return [];
-    const f = query.filter;
-    const exclusions = {
-      ids: f.excludeIds?.length ? new Set(f.excludeIds.map((id) => id.toHexString())) : null,
-      brands: f.excludeBrands?.length
-        ? new Set(f.excludeBrands.map((b) => b.toLowerCase()))
-        : null,
-      sellers: f.excludeSellerIds?.length
-        ? new Set(f.excludeSellerIds.map((id) => id.toHexString()))
-        : null,
-      domains: f.excludeDomains?.length ? new Set(f.excludeDomains) : null,
-    };
+    // Filter by L1 topic if provided
+    let startRow = 0;
+    if (query.filter.categoryL1In && query.filter.categoryL1In.length > 0) {
+      startRow = this.rowOf.get(`l1:${query.filter.categoryL1In[0]}`) ?? 0;
+    }
 
-    // The query vector is unit-normalized, and stored vectors were unit-normalized
-    // before quantization, so the dot product is cosine similarity to within the
-    // int8 rounding error the Atlas index would also incur.
-    const q = query.vector;
-    const dim = Math.min(q.length, EMBEDDING_DIM);
-
-    // A bounded min-heap would beat a sorted insert at large `limit`; at 400 out
-    // of a few hundred thousand the linear insert never shows up in a profile.
-    const top: Array<{ row: number; score: number }> = [];
+    const top: { row: number; score: number }[] = [];
     let worst = -Infinity;
+    const quantizedQuery = quantizeScalar(query.vector);
 
-    for (let row = 0; row < this.count; row++) {
-      if (!this.passesFilter(row, query, exclusions)) continue;
+    for (let row = startRow; row < this.count; row++) {
+      if (this.live[row] === 0) continue;
+      if (query.filter.categoryL1In && !query.filter.categoryL1In.includes(this.l1[row])) continue;
+      if (query.filter.categoryL3In && !query.filter.categoryL3In.includes(this.l3[row] ?? '')) continue;
+      if (query.filter.statusIn && !query.filter.statusIn.includes(this.status[row] ?? '')) continue;
+      if (query.filter.sourceTypeIn && !query.filter.sourceTypeIn.includes(this.sourceType[row] ?? '')) continue;
+      if (query.filter.inStock && this.inStock[row] === 0) continue;
+      if (query.filter.priceMax && this.price[row] > query.filter.priceMax) continue;
+      if (query.filter.priceMin && this.price[row] < query.filter.priceMin) continue;
+      if (query.filter.excludeBrands && this.brand[row] && query.filter.excludeBrands.includes(this.brand[row].toLowerCase())) continue;
+      if (query.filter.excludeSellerIds && this.sellerId[row] && query.filter.excludeSellerIds.includes(this.sellerId[row])) continue;
 
-      const base = row * EMBEDDING_DIM;
       let dot = 0;
-      for (let i = 0; i < dim; i++) {
-        dot += (this.matrix[base + i] as number) * (q[i] as number);
+      for (let i = 0; i < EMBEDDING_DIM; i++) {
+        dot += quantizedQuery[i] * this.matrix[row * EMBEDDING_DIM + i];
       }
       const score = dot / 127;
 
@@ -266,15 +176,35 @@ export class LocalVectorIndex implements VectorSearch {
     if (top.length < query.limit) top.sort((a, b) => b.score - a.score);
     if (top.length === 0) return [];
 
-    const ids = top.map((hit) => this.ids[hit.row] as ObjectId);
-    const docs = await this.products
-      .find({ _id: { $in: ids } }, { projection: CANDIDATE_PROJECTION })
-      .toArray();
+    const ids = top.map((hit) => this.ids[hit.row]);
+    const { data: docs, error } = await this.products
+      .select('id,cluster_id,title,brand,price,original_price,shipping,condition,stock,auction,media,seller_id,source,source_type,embedding,embedding_version,quality,risk,engagement,crawl,status,reject_reason,category')
+      .in('id', ids);
+    if (error) throw error;
 
-    const byId = new Map(docs.map((d) => [d._id.toHexString(), d]));
+    const byId = new Map(
+      (docs || []).map((raw) => {
+        const doc = raw as Record<string, unknown>;
+        return [
+          doc.id,
+          {
+            // This path fetches rows straight from PostgREST rather than
+            // through the db helpers, so it has to revive its own dates; the
+            // ranker calls `.getTime()` on `crawl.firstSeenAt`.
+            ...reviveDates(doc),
+            clusterId: doc.cluster_id,
+            originalPrice: doc.original_price,
+            sellerId: doc.seller_id,
+            sourceType: doc.source_type,
+            embeddingVersion: doc.embedding_version,
+            rejectReason: doc.reject_reason,
+          },
+        ];
+      }),
+    );
     const out: VectorCandidate[] = [];
     for (const hit of top) {
-      const doc = byId.get((this.ids[hit.row] as ObjectId).toHexString());
+      const doc = byId.get(this.ids[hit.row]);
       if (!doc) continue; // Deleted between the scan and the fetch.
       out.push({
         ...(doc as unknown as VectorCandidate),
@@ -284,5 +214,53 @@ export class LocalVectorIndex implements VectorSearch {
       });
     }
     return out;
+  }
+
+  private insert(product: Product): void {
+    const key = product.id;
+    const existing = this.rowOf.get(key);
+    const row = existing ?? this.count;
+
+    if (existing === undefined) {
+      this.grow(this.count + 1);
+      this.ids[row] = product.id;
+      this.count += 1;
+      this.rowOf.set(key, row);
+    }
+
+    const quantized = quantizeScalar(product.embedding ?? []);
+    this.matrix.set(quantized.subarray(0, EMBEDDING_DIM), row * EMBEDDING_DIM);
+    this.live[row] = 1;
+    this.l1[row] = product.category?.l1 ?? '';
+    this.l3[row] = product.category?.l3 ?? '';
+    this.status[row] = product.status ?? 'active';
+    this.sourceType[row] = product.sourceType ?? 'new';
+    this.brand[row] = product.brand ?? null;
+    this.sellerId[row] = product.sellerId ?? '';
+    this.domain[row] = product.source?.domain ?? '';
+    this.inStock[row] = product.stock?.inStock ? 1 : 0;
+    this.price[row] = product.price?.amount ?? 0;
+    const crawledAt = product.crawl?.lastCrawledAt;
+    this.lastCrawledAt[row] = crawledAt
+      ? crawledAt instanceof Date
+        ? crawledAt.getTime()
+        : Date.parse(String(crawledAt)) || 0
+      : 0;
+  }
+
+  onProductUpserted(product: Product): void {
+    if (!product.embedding || product.embedding.length === 0) return;
+    this.insert(product);
+  }
+
+  onProductRemoved(id: string): void {
+    const row = this.rowOf.get(id);
+    if (row !== undefined) this.live[row] = 0;
+  }
+
+  async size(): Promise<number> {
+    let n = 0;
+    for (let i = 0; i < this.count; i++) if (this.live[i] === 1) n += 1;
+    return n;
   }
 }

@@ -1,12 +1,12 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ObjectId } from 'mongodb';
 import {
   ApiError,
   EMBEDDING_DIM,
   type UserDoc,
 } from '@window/shared';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
 import { createBloom, serializeBloom } from '../lib/bloom.js';
+import { findOne, insert } from '../db/supabase-helpers.js';
 
 /**
  * Identity.
@@ -18,7 +18,7 @@ import { createBloom, serializeBloom } from '../lib/bloom.js';
  */
 
 export interface Principal {
-  userId: ObjectId;
+  userId: string;
   deviceUserId: string;
   isAnonymous: boolean;
 }
@@ -36,7 +36,7 @@ function sign(payload: string): string {
 export function mintToken(principal: Principal): string {
   const payload = Buffer.from(
     JSON.stringify({
-      sub: principal.userId.toHexString(),
+      sub: principal.userId,
       dev: principal.deviceUserId,
       anon: principal.isAnonymous,
       iat: Date.now(),
@@ -64,7 +64,7 @@ export function verifyToken(token: string): Principal {
       anon: boolean;
     };
     return {
-      userId: new ObjectId(decoded.sub),
+      userId: decoded.sub,
       deviceUserId: decoded.dev,
       isAnonymous: decoded.anon,
     };
@@ -83,10 +83,10 @@ export async function resolveDeviceUser(
   deviceUserId: string,
   now = new Date(),
 ): Promise<User> {
-  const existing = await collections.users.findOne({ deviceUserId });
+  const existing = await findOne(collections.users, { deviceUserId });
   if (existing) return existing;
 
-  const blank: Omit<UserDoc<ObjectId>, '_id'> = {
+  const blank: Omit<UserDoc<string>, 'id'> = {
     deviceUserId,
     auth: null,
     onboarding: null,
@@ -117,14 +117,13 @@ export async function resolveDeviceUser(
   };
 
   try {
-    const result = await collections.users.insertOne(blank as User);
-    return { ...blank, _id: result.insertedId } as User;
+    const result = await insert(collections.users, blank as any);
+    return result as User;
   } catch (error) {
     // Two devices racing on first contact is normal; the unique index decides.
-    if ((error as { code?: number }).code === 11000) {
-      const raced = await collections.users.findOne({ deviceUserId });
-      if (raced) return raced;
-    }
+    // For Supabase, we just try to find the existing user
+    const raced = await findOne(collections.users, { deviceUserId });
+    if (raced) return raced;
     throw error;
   }
 }

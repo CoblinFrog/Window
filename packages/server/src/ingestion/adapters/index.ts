@@ -119,7 +119,7 @@ export function createAdapterForTier(
     case 1: {
       const tier1: Tier1Deps = { fetchImpl: deps.fetchImpl, now: deps.now, secret: deps.secret };
 
-      const api = TIER1_API_ADAPTERS[source._id];
+      const api = TIER1_API_ADAPTERS[source.id];
       if (api !== undefined) {
         const adapter = api.create(tier1);
         if (adapter !== null) return adapter;
@@ -128,9 +128,9 @@ export function createAdapterForTier(
         // generic adapter below cannot stand in — these sources carry no feed
         // config — and naming the missing keys beats its parse error.
         throw new SourceUnavailableError(
-          source._id,
+          source.id,
           'not_configured',
-          `${source._id} is served by a dedicated API adapter; set ${api.requires.join(', ')}`,
+          `${source.id} is served by a dedicated API adapter; set ${api.requires.join(', ')}`,
         );
       }
 
@@ -155,7 +155,7 @@ export function createAdapterForTier(
  * feed configured cannot be served by tier 1 no matter how cheap tier 1 is.
  */
 export function canServe(source: SourceDoc<string>, tier: SourceTier, deps: AdapterDeps = {}): boolean {
-  const api = TIER1_API_ADAPTERS[source._id];
+  const api = TIER1_API_ADAPTERS[source.id];
   if (api !== undefined) {
     // These two are the API or nothing, at every tier. Their robots.txt
     // disallows the listing and search paths, so tier 2 and tier 3 are not
@@ -211,9 +211,9 @@ export function adapterWithFallback(source: SourceDoc<string>, deps: AdapterDeps
   const chain = fallbackChain(source, deps);
   if (chain.length === 0) {
     throw new SourceUnavailableError(
-      source._id,
+      source.id,
       'not_configured',
-      `no tier can serve ${source._id}: tier ${source.tier} is registered but nothing is configured for it`,
+      `no tier can serve ${source.id}: tier ${source.tier} is registered but nothing is configured for it`,
     );
   }
   if (chain[0] !== source.tier) {
@@ -221,7 +221,7 @@ export function adapterWithFallback(source: SourceDoc<string>, deps: AdapterDeps
     // not a routine fallback: it is how a tier-3 source quietly turns into a
     // handful of parse failures when the browser fleet is missing.
     log.warn('registered tier cannot be constructed; serving from a lower tier', {
-      domain: source._id,
+      domain: source.id,
       registeredTier: source.tier,
       servingTiers: chain,
     });
@@ -243,7 +243,7 @@ export function adapterWithFallback(source: SourceDoc<string>, deps: AdapterDeps
         // A tier that returned nothing has not necessarily failed — it may have
         // been defeated by client-side rendering, which the next tier handles.
         log.debug('tier produced no result; escalating', {
-          domain: source._id,
+          domain: source.id,
           operation,
           tier: adapter.tier,
         });
@@ -251,7 +251,7 @@ export function adapterWithFallback(source: SourceDoc<string>, deps: AdapterDeps
         if (!isEscalatable(error) || i === adapters.length - 1) throw error;
         lastError = error;
         log.warn('tier failed; falling back', {
-          domain: source._id,
+          domain: source.id,
           operation,
           tier: adapter.tier,
           reason: error instanceof SourceUnavailableError ? error.reason : 'unknown',
@@ -260,12 +260,12 @@ export function adapterWithFallback(source: SourceDoc<string>, deps: AdapterDeps
       }
     }
     if (lastError !== null) throw lastError;
-    throw new SourceUnavailableError(source._id, 'not_configured', `${operation} exhausted every tier for ${source._id}`);
+    throw new SourceUnavailableError(source.id, 'not_configured', `${operation} exhausted every tier for ${source.id}`);
   }
 
   return {
     tier: source.tier,
-    domain: source._id,
+    domain: source.id,
 
     discover(context: CrawlContext, cursor?: string) {
       return attempt(

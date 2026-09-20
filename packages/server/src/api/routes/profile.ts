@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import {
   ApiError,
@@ -13,10 +12,12 @@ import {
   type OnboardingTopicsResponse,
 } from '@window/shared';
 import { env } from '../../config/env.js';
+import { localEmbeddingProvider } from '../../embedding/local.js';
 import type { AppContext } from '../context.js';
 import { bootstrapDevice, rateLimit } from '../middleware.js';
 import { mintToken, requireAuthenticated } from '../auth.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
+import { find, findOne, updateOne, updateMany, deleteMany, deleteOne, count, insert } from '../../db/supabase-helpers.js';
 
 export function profileRoutes(ctx: AppContext): Router {
   const router = Router();
@@ -35,15 +36,16 @@ export function profileRoutes(ctx: AppContext): Router {
   /** The 18 L1 tiles with imagery. */
   router.get('/onboarding/topics', async (_req, res, next) => {
     try {
-      const docs = await collections.categories
-        .find({ level: 1 })
-        .sort({ 'tile.order': 1 })
-        .toArray();
+      // `tile.order` is a JSONB property, not a SQL column. Fetch the L1
+      // rows normally and sort the JSON metadata in application code; this
+      // also works when the category table has not been seeded yet.
+      const docs = await find(collections.categories, { level: 1 });
+      docs.sort((a, b) => (a.tile?.order ?? 0) - (b.tile?.order ?? 0));
 
-      const topics = (docs.length > 0 ? docs : []).map((doc) => ({
-        id: doc._id,
+      const topics = docs.map((doc) => ({
+        id: doc.slug,
         displayName: doc.displayName,
-        image: doc.tile?.image ?? `${env.publicUrl}/media/topic/${doc._id}`,
+        image: doc.tile?.image ?? `${env.publicUrl}/media/topic/${doc.slug}`,
         order: doc.tile?.order ?? 0,
       }));
 
@@ -92,18 +94,19 @@ export function profileRoutes(ctx: AppContext): Router {
         throw ApiError.validation('Topics must be distinct.');
       }
 
-      const categories = await collections.categories
-        .find({ _id: { $in: topics }, level: 1 })
-        .toArray();
-      const centroids = categories
-        .map((c) => c.centroid)
-        .filter((c): c is number[] => Array.isArray(c) && c.length > 0);
-
-      if (centroids.length === 0) {
-        throw ApiError.internal(
-          'Category centroids have not been computed. Run the seeder or the nightly centroid job.',
-        );
-      }
+      const categories = await find(collections.categories, { slug: { $in: topics }, level: 1 });
+      const embedder = localEmbeddingProvider();
+      // A fresh development database may not have products or computed
+      // centroids yet. Keep onboarding usable by using the deterministic local
+      // name embedding for only the missing topics; populated databases still
+      // use their data-derived centroids.
+      const centroids = await Promise.all(
+        topics.map(async (topic) => {
+          const stored = categories.find((category) => category.slug === topic)?.centroid;
+          if (Array.isArray(stored) && stored.length > 0) return stored;
+          return embedder.embedText(getCategory(topic)?.displayName ?? topic);
+        }),
+      );
 
       const now = new Date();
       const interestVector = seedUserVector(centroids);
@@ -117,17 +120,16 @@ export function profileRoutes(ctx: AppContext): Router {
         explorationState: { ...user.explorationState, counter: 0 },
       });
 
-      await collections.users.updateOne(
-        { _id: user._id },
+      await updateOne(
+        collections.users,
+        { id: user.id },
         {
-          $set: {
-            onboarding: { topics, priceBand, completedAt: now },
-            interestVector,
-            interestSet,
-            pricePrior,
-            'explorationState.counter': counter,
-            updatedAt: now,
-          },
+          onboarding: { topics, priceBand, completedAt: now },
+          interestVector,
+          interestSet,
+          pricePrior,
+          explorationState: { ...user.explorationState, counter },
+          updatedAt: now,
         },
       );
 
@@ -196,9 +198,10 @@ export function profileRoutes(ctx: AppContext): Router {
       }
       if (Object.keys(updates).length === 0) throw ApiError.validation('No settings supplied.');
 
-      await collections.users.updateOne(
-        { _id: user._id },
-        { $set: { ...updates, updatedAt: new Date() } },
+      await updateOne(
+        collections.users,
+        { id: user.id },
+        { ...updates, updatedAt: new Date() },
       );
       res.status(204).end();
     } catch (error) {
@@ -227,21 +230,28 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!parsed.success) throw ApiError.validation('Invalid suppression request.');
       const { kind, value, productId } = parsed.data;
 
-      const update =
-        kind === 'brand'
-          ? { $addToSet: { 'suppressions.brands': value } }
-          : kind === 'seller'
-            ? { $addToSet: { 'suppressions.sellers': new ObjectId(value) } }
-            : { $addToSet: { 'suppressions.products': new ObjectId(value) } };
+      // Get current user to check existing suppressions
+      const currentUser = await findOne(collections.users, { id: user.id });
+      if (!currentUser) throw ApiError.notFound('User not found');
 
-      if ((kind === 'seller' || kind === 'product') && !ObjectId.isValid(value)) {
-        throw ApiError.validation(`${kind} suppressions require a valid id.`);
+      let newSuppressions = { ...currentUser.suppressions };
+      
+      if (kind === 'brand') {
+        newSuppressions.brands = [...new Set([...newSuppressions.brands, value])];
+      } else if (kind === 'seller') {
+        newSuppressions.sellers = [...new Set([...newSuppressions.sellers, value])];
+      } else {
+        newSuppressions.products = [...new Set([...newSuppressions.products, value])];
       }
 
-      await collections.users.updateOne({ _id: user._id }, update as never);
+      await updateOne(
+        collections.users,
+        { id: user.id },
+        { suppressions: newSuppressions, updatedAt: new Date() },
+      );
 
       const signalProductId = productId ?? (kind === 'product' ? value : null);
-      if (signalProductId && ObjectId.isValid(signalProductId)) {
+      if (signalProductId) {
         const type =
           kind === 'brand' ? 'hide_brand' : kind === 'seller' ? 'mute_seller' : 'hide_product';
         const event: ClientEvent = {
@@ -299,17 +309,16 @@ export function profileRoutes(ctx: AppContext): Router {
       }
 
       const now = new Date();
-      await collections.users.updateOne(
-        { _id: user._id },
+      await updateOne(
+        collections.users,
+        { id: user.id },
         {
-          $set: {
-            auth: {
-              email: email ?? null,
-              providers: [provider],
-              claimedAt: now,
-            },
-            updatedAt: now,
+          auth: {
+            email: email ?? null,
+            providers: [provider],
+            claimedAt: now,
           },
+          updatedAt: now,
         },
       );
 
@@ -334,18 +343,19 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
 
       await Promise.all([
-        collections.interactions.deleteMany({ userId: user._id }),
-        collections.carts.deleteMany({ userId: user._id }),
-        collections.merchantLinks.deleteMany({ userId: user._id }),
-        collections.reports.deleteMany({ userId: user._id }),
+        deleteMany(collections.interactions, { userId: user.id }),
+        deleteMany(collections.carts, { userId: user.id }),
+        deleteMany(collections.merchantLinks, { userId: user.id }),
+        deleteMany(collections.reports, { userId: user.id }),
       ]);
       // Orders are retained: they are transaction records with their own legal
       // retention, so they are unlinked from the identity rather than deleted.
-      await collections.orders.updateMany(
-        { userId: user._id },
-        { $set: { userId: new ObjectId('000000000000000000000000') } },
+      await updateMany(
+        collections.orders,
+        { userId: user.id },
+        { userId: '00000000-0000-0000-0000-000000000000' },
       );
-      await collections.users.deleteOne({ _id: user._id });
+      await deleteOne(collections.users, { id: user.id });
 
       res.status(204).end();
     } catch (error) {
@@ -381,14 +391,19 @@ export function profileRoutes(ctx: AppContext): Router {
       const parsed = reportSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid report.');
 
-      const productId = new ObjectId(parsed.data.productId);
-      const product = await collections.products.findOne({ _id: productId });
+      const productId = parsed.data.productId;
+      const product = await findOne(collections.products, { id: productId });
       if (!product) throw ApiError.notFound('That product');
 
-      await collections.reports.updateOne(
-        { productId, userId: user._id },
-        {
-          $set: {
+      // Check if report already exists
+      const existingReport = await findOne(collections.reports, { productId, userId: user.id });
+      
+      if (existingReport) {
+        // Update existing report
+        await updateOne(
+          collections.reports,
+          { productId, userId: user.id },
+          {
             sellerId: product.sellerId,
             reason: parsed.data.reason,
             note: parsed.data.note ?? null,
@@ -396,20 +411,36 @@ export function profileRoutes(ctx: AppContext): Router {
             createdAt: new Date(),
             resolvedAt: null,
           },
-        },
-        { upsert: true },
-      );
+        );
+      } else {
+        // Insert new report
+        await insert(collections.reports, {
+          productId,
+          userId: user.id,
+          sellerId: product.sellerId,
+          reason: parsed.data.reason,
+          note: parsed.data.note ?? null,
+          status: 'open' as const,
+          createdAt: new Date(),
+          resolvedAt: null,
+        });
+      }
 
-      const count = await collections.reports.countDocuments({ productId, status: 'open' });
-      await collections.products.updateOne(
-        { _id: productId },
-        { $set: { 'risk.reports.count': count } },
+      const count = await count(collections.reports, { productId, status: 'open' });
+      
+      // Update product risk reports count
+      const updatedProduct = { ...product, risk: { ...product.risk, reports: { count, upheld: product.risk.reports.upheld } } };
+      await updateOne(
+        collections.products,
+        { id: productId },
+        { risk: updatedProduct.risk },
       );
 
       if (count >= 3 && product.risk.tier !== 'high' && product.risk.tier !== 'blocked') {
-        await collections.products.updateOne(
-          { _id: productId },
-          { $set: { 'risk.tier': 'high', 'risk.score': Math.max(product.risk.score, 0.75) } },
+        await updateOne(
+          collections.products,
+          { id: productId },
+          { risk: { ...updatedProduct.risk, tier: 'high', score: Math.max(product.risk.score, 0.75) } },
         );
       }
 
@@ -439,7 +470,7 @@ export function authRoutes(ctx: AppContext): Router {
       );
       res.json({
         token: mintToken(principal),
-        userId: user._id.toHexString(),
+        userId: user.id,
         isAnonymous: principal.isAnonymous,
         onboarded: user.onboarding !== null,
       });

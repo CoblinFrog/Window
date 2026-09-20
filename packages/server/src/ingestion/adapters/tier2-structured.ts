@@ -1274,7 +1274,7 @@ export class Tier2StructuredAdapter implements SourceAdapter {
   private readonly now: () => Date;
 
   constructor(private readonly source: SourceDoc<string>, deps: Tier2Deps = {}) {
-    this.domain = source._id;
+    this.domain = source.id;
     this.fetchImpl = deps.fetchImpl ?? ((input, init) => fetch(input, init));
     this.now = deps.now ?? (() => new Date());
   }

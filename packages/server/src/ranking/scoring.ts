@@ -66,7 +66,7 @@ export function affinity(candidate: VectorCandidate, context: ScoringContext): n
   const brandScore = candidate.brand
     ? (context.brandAffinities[candidate.brand.toLowerCase()] ?? 0)
     : 0;
-  const sellerScore = context.sellerAffinities[candidate.sellerId.toHexString()] ?? 0;
+  const sellerScore = context.sellerAffinities[candidate.sellerId] ?? 0;
   // Affinities accumulate in [-1, 1]; 0.5 is "no opinion", which must not
   // advantage or disadvantage a product the user has never met.
   return clamp(0.5 + 0.35 * brandScore + 0.15 * sellerScore, 0, 1);
@@ -98,8 +98,8 @@ export function penalty(candidate: VectorCandidate, context: PenaltyContext): nu
   }
 
   const sellerWindow = placed.slice(-config.penalties.sameSellerWithin);
-  const sellerId = candidate.sellerId.toHexString();
-  const sellerRepeats = sellerWindow.filter((p) => p.sellerId.toHexString() === sellerId).length;
+  const sellerId = candidate.sellerId;
+  const sellerRepeats = sellerWindow.filter((p) => p.sellerId === sellerId).length;
   if (sellerRepeats > 0) {
     total += config.penalties.sameSellerPenalty * Math.min(1, sellerRepeats / 2);
   }

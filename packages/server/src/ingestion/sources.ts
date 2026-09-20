@@ -89,7 +89,7 @@ function browserPlan(config: {
 
 function build(spec: SourceSpec): SourceDoc<string> {
   return {
-    _id: spec.domain,
+    id: spec.domain,
     displayName: spec.displayName,
     tier: spec.tier,
     sourceType: spec.sourceType,
@@ -589,7 +589,7 @@ export const SOURCE_REGISTRY: SourceDoc<string>[] = [
 // Lookups
 // ---------------------------------------------------------------------------
 
-const BY_ID = new Map(SOURCE_REGISTRY.map((source) => [source._id, source]));
+const BY_ID = new Map(SOURCE_REGISTRY.map((source) => [source.id, source]));
 
 export function sourceById(domain: string): SourceDoc<string> | null {
   return BY_ID.get(domain) ?? null;

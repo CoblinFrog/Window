@@ -1,4 +1,4 @@
-import { ObjectId } from 'mongodb';
+import { randomUUID } from 'node:crypto';
 import {
   ApiError,
   PROBLEM_TYPES,
@@ -6,10 +6,11 @@ import {
   type CartLine,
   type CartResponse,
 } from '@window/shared';
-import type { Cart, CollectionSet, Product, User } from '../db/collections.js';
+import type { Cart, CollectionSet, Product, User } from '../db/supabase-collections.js';
 import { logger } from '../lib/logger.js';
 import { cautionText } from '../ingestion/quality.js';
 import { riskFlagText } from '../ingestion/risk.js';
+import { findOne, find, updateOne, deleteOne, insert } from '../db/supabase-helpers.js';
 
 const log = logger.child('cart');
 
@@ -51,7 +52,7 @@ export interface StockVerifier {
 export class StoredListingVerifier implements StockVerifier {
   async verify(products: readonly Product[]): Promise<VerificationResult[]> {
     return products.map((product) => ({
-      productId: product._id.toHexString(),
+      productId: product.id,
       inStock: product.stock.inStock && product.status === 'active',
       priceAmount: product.price.amount,
       currency: product.price.currency,
@@ -73,17 +74,17 @@ export class CartService {
 
   async openCart(user: User, now = new Date()): Promise<Cart> {
     const { collections } = this.deps;
-    const existing = await collections.carts.findOne({ userId: user._id, status: 'open' });
+    const existing = await findOne(collections.carts, { userId: user.id, status: 'open' });
     if (existing) return existing;
 
-    const cart: Omit<Cart, '_id'> = {
-      userId: user._id,
+    const cart: Omit<Cart, 'id'> = {
+      userId: user.id,
       status: 'open',
       items: [],
       updatedAt: now,
     };
-    const result = await collections.carts.insertOne(cart as Cart);
-    return { ...cart, _id: result.insertedId } as Cart;
+    const result = await insert(collections.carts, cart as Cart);
+    return result as Cart;
   }
 
   /**
@@ -99,11 +100,11 @@ export class CartService {
     now = new Date(),
   ): Promise<Cart> {
     const { collections } = this.deps;
-    if (!ObjectId.isValid(request.productId)) {
+    if (!request.productId) {
       throw ApiError.validation('productId must be a valid id.');
     }
 
-    const product = await collections.products.findOne({ _id: new ObjectId(request.productId) });
+    const product = await findOne(collections.products, { id: request.productId });
     if (!product) throw ApiError.notFound('That product');
 
     if (product.sourceType === 'auction') {
@@ -139,15 +140,15 @@ export class CartService {
     const variantKey = JSON.stringify(variant);
     const existing = cart.items.find(
       (item) =>
-        item.productId.equals(product._id) && JSON.stringify(item.variant) === variantKey,
+        item.productId === product.id && JSON.stringify(item.variant) === variantKey,
     );
 
     if (existing) {
       existing.quantity = Math.min(existing.quantity + quantity, product.stock.quantity ?? 99);
     } else {
       cart.items.push({
-        _id: new ObjectId(),
-        productId: product._id,
+        id: randomUUID(),
+        productId: product.id,
         clusterId: product.clusterId,
         sellerId: product.sellerId,
         merchantDomain: product.source.domain,
@@ -163,9 +164,10 @@ export class CartService {
       });
     }
 
-    await collections.carts.updateOne(
-      { _id: cart._id },
-      { $set: { items: cart.items, updatedAt: now } },
+    await updateOne(
+      collections.carts,
+      { id: cart.id },
+      { items: cart.items, updatedAt: now },
     );
     return cart;
   }
@@ -177,7 +179,7 @@ export class CartService {
     now = new Date(),
   ): Promise<Cart> {
     const cart = await this.openCart(user, now);
-    const line = cart.items.find((item) => item._id.toHexString() === lineId);
+    const line = cart.items.find((item) => item.id === lineId);
     if (!line) throw ApiError.notFound('That cart line');
 
     if (patch.quantity !== undefined) {
@@ -186,21 +188,23 @@ export class CartService {
     }
     if (patch.variant) line.variant = patch.variant;
 
-    await this.deps.collections.carts.updateOne(
-      { _id: cart._id },
-      { $set: { items: cart.items, updatedAt: now } },
+    await updateOne(
+      this.deps.collections.carts,
+      { id: cart.id },
+      { items: cart.items, updatedAt: now },
     );
     return cart;
   }
 
   async removeItem(user: User, lineId: string, now = new Date()): Promise<Cart> {
     const cart = await this.openCart(user, now);
-    const next = cart.items.filter((item) => item._id.toHexString() !== lineId);
+    const next = cart.items.filter((item) => item.id !== lineId);
     if (next.length === cart.items.length) throw ApiError.notFound('That cart line');
 
-    await this.deps.collections.carts.updateOne(
-      { _id: cart._id },
-      { $set: { items: next, updatedAt: now } },
+    await updateOne(
+      this.deps.collections.carts,
+      { id: cart.id },
+      { items: next, updatedAt: now },
     );
     return { ...cart, items: next };
   }
@@ -217,7 +221,7 @@ export class CartService {
 
     if (cart.items.length === 0) {
       return {
-        cartId: cart._id.toHexString(),
+        cartId: cart.id,
         status: cart.status,
         lines: [],
         byMerchant: [],
@@ -227,10 +231,11 @@ export class CartService {
       };
     }
 
-    const products = await collections.products
-      .find({ _id: { $in: cart.items.map((i) => i.productId) } })
-      .toArray();
-    const productById = new Map(products.map((p) => [p._id.toHexString(), p]));
+    const products = await find(
+      collections.products,
+      { id: { $in: cart.items.map((i) => i.productId) } }
+    );
+    const productById = new Map(products.map((p) => [p.id, p]));
 
     const verified = await this.verifier.verify(products);
     const verifiedById = new Map(verified.map((v) => [v.productId, v]));
@@ -239,12 +244,12 @@ export class CartService {
     const lines: CartLine[] = [];
 
     for (const item of cart.items) {
-      const key = item.productId.toHexString();
+      const key = item.productId;
       const product = productById.get(key);
       const check = verifiedById.get(key);
       if (!product || !check) {
         item.available = false;
-        diffs.push({ lineId: item._id.toHexString(), kind: 'out_of_stock', from: item.priceNow, to: null });
+        diffs.push({ lineId: item.id, kind: 'out_of_stock', from: item.priceNow, to: null });
         continue;
       }
 
@@ -252,10 +257,10 @@ export class CartService {
       const next = { amount: check.priceAmount, currency: check.currency };
 
       if (!check.inStock && item.available) {
-        diffs.push({ lineId: item._id.toHexString(), kind: 'out_of_stock', from: previous, to: null });
+        diffs.push({ lineId: item.id, kind: 'out_of_stock', from: previous, to: null });
       } else if (next.amount !== previous.amount) {
         diffs.push({
-          lineId: item._id.toHexString(),
+          lineId: item.id,
           kind: next.amount > previous.amount ? 'price_up' : 'price_down',
           from: previous,
           to: next,
@@ -268,12 +273,12 @@ export class CartService {
 
       const caution = product.quality.cautions?.[0] ?? null;
       lines.push({
-        id: item._id.toHexString(),
+        id: item.id,
         productId: key,
-        clusterId: item.clusterId ? item.clusterId.toHexString() : null,
+        clusterId: item.clusterId,
         title: product.title,
         merchant: { domain: item.merchantDomain, displayName: item.merchantDomain },
-        seller: { id: item.sellerId.toHexString(), handle: item.merchantDomain },
+        seller: { id: item.sellerId, handle: item.merchantDomain },
         hero: product.media.hero,
         variant: item.variant,
         quantity: item.quantity,
@@ -295,13 +300,14 @@ export class CartService {
       });
     }
 
-    await collections.carts.updateOne(
-      { _id: cart._id },
-      { $set: { items: cart.items, updatedAt: now } },
+    await updateOne(
+      collections.carts,
+      { id: cart.id },
+      { items: cart.items, updatedAt: now },
     );
 
     if (diffs.length > 0) {
-      log.info('cart diff surfaced', { cartId: cart._id.toHexString(), diffs: diffs.length });
+      log.info('cart diff surfaced', { cartId: cart.id, diffs: diffs.length });
     }
 
     const byMerchant = new Map<string, { lineIds: string[]; subtotal: number; currency: string }>();
@@ -319,7 +325,7 @@ export class CartService {
 
     const currency = lines[0]?.priceNow.currency ?? user.settings.currency;
     return {
-      cartId: cart._id.toHexString(),
+      cartId: cart.id,
       status: cart.status,
       lines,
       byMerchant: [...byMerchant.entries()].map(([domain, entry]) => ({
