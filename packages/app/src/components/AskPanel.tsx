@@ -11,7 +11,6 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   Easing,
@@ -23,6 +22,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { COLORS, ICON, MOTION, RADIUS, SPACING, TYPE, type ChatResponse } from '@window/shared';
 import { Icon } from './Icon.js';
+import { PressScale } from './PressScale.js';
 
 /**
  * Ask — the shopping assistant, pulled down from the top edge.
@@ -35,13 +35,18 @@ import { Icon } from './Icon.js';
  * would otherwise be scrolling. Forcing both behaviours through one component
  * would have meant a flag on every rule in it.
  *
- * The gesture lives on a strip along the top edge, which is what keeps it from
- * fighting the feed: the feed's own vertical pan means "previous card", and a
- * pull that begins anywhere but the top edge still means that.
+ * It opens by expanding. The pill is the panel at rest, and pressing it grows
+ * that same box into the full prompt rather than dropping a separate surface
+ * over the screen — so the thing you pressed is the thing you get, and there
+ * is no moment where the control you touched has vanished and been replaced.
  *
- * Opening is progressive. The panel tracks the finger down, and only past a
- * commitment threshold does it snap open and take the keyboard — so a hesitant
- * drag peeks at the prompt and lets go without ever stealing focus.
+ * It used to be pulled open from a strip along the top edge, which asked the
+ * user to know that the edge was draggable. Nothing said so, and on a pointer
+ * there is nothing to pull with. The strip is gone; what is left is a button.
+ *
+ * The contents fade in behind the growth rather than scaling with it. Text
+ * scaled from a third of its size arrives blurred and then snaps sharp, which
+ * reads as a rendering fault rather than as motion.
  */
 
 const EASING = Easing.bezier(
@@ -51,29 +56,18 @@ const EASING = Easing.bezier(
   MOTION.easing[3],
 );
 
-/** The top-edge strip that owns the pull. Comfortably past the 44px floor. */
-const GRAB_STRIP_HEIGHT = 56;
-/**
- * The strip is inset from both sides rather than spanning the edge. Single
- * mode puts its back button in the top-left corner, and a full-width pull zone
- * would eat it — the one control that gets you out of an enlarged card.
- */
-const GRAB_STRIP_INSET = 60;
-/**
- * The pill's height and its offset below the safe area.
- *
- * Exported because the cart button sits beside it and has to line up with it.
- * Two controls on the same band, sized and placed by two sets of private
- * numbers, drift the moment either one is touched — which is exactly what
- * happened: a 40 px circle at top 12 next to a 34 px pill at top 10.
- */
 export const ASK_PILL_HEIGHT = 34;
 export const ASK_PILL_TOP = 10;
-/** How far the finger travels for a full open. */
-const OPEN_TRAVEL = 180;
-/** Past this fraction of the travel, or a firm flick, the pull commits. */
-const COMMIT_FRACTION = 0.4;
-const COMMIT_VELOCITY = 600;
+/**
+ * The pill's width at rest, which is where the expansion starts.
+ *
+ * The label needs every pixel of it: the icon, the gap and "Ask for anything"
+ * come to almost exactly 152, which is where it was, and at exactly its own
+ * width text wraps rather than fits.
+ */
+const ASK_PILL_WIDTH = 176;
+/** How much of the growth is over before the contents begin to appear. */
+const CONTENT_FADE_IN = 0.45;
 /** The panel never takes more than this much of the screen. */
 const MAX_HEIGHT_FRACTION = 0.82;
 /**
@@ -116,7 +110,7 @@ export function AskPanel({
   onOpenChange,
   reducedMotion = false,
 }: AskPanelProps): React.ReactElement {
-  const { height: viewportHeight } = useWindowDimensions();
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const maxHeight = Math.round(viewportHeight * MAX_HEIGHT_FRACTION);
   // The panel is the one surface pinned to the top edge, so it is the one that
@@ -148,7 +142,9 @@ export function AskPanel({
   const openRef = useSharedValue(0);
   // The panel's own height, measured once it has content. Until then the peek
   // uses the travel distance, which is close enough for an empty prompt.
-  const height = useSharedValue(GRAB_STRIP_HEIGHT + OPEN_TRAVEL);
+  // Until the contents have been measured, the pill's own height is the
+  // truthful answer: a shut bubble is exactly that tall.
+  const height = useSharedValue(ASK_PILL_HEIGHT);
 
   const settle = useCallback(
     (next: boolean) => {
@@ -267,40 +263,42 @@ export function AskPanel({
   // and the handle on the panel's own bottom edge that drags it shut — and a
   // gesture instance belongs to one detector, so the rule is built twice from
   // one definition rather than written twice.
-  const makePull = useCallback(
-    () =>
-      Gesture.Pan()
-        // Only a deliberate vertical drag; a tap or a horizontal swipe is not
-        // ours, and the feed's mode switch still needs the horizontal one.
-        .activeOffsetY([-8, 8])
-        .failOffsetX([-20, 20])
-        .onUpdate((event) => {
-          const from = openRef.value;
-          progress.value = Math.min(1, Math.max(0, from + event.translationY / OPEN_TRAVEL));
-        })
-        .onEnd((event) => {
-          // A firm upward flick always closes, however far down the finger got.
-          const flungShut = event.velocityY < -COMMIT_VELOCITY;
-          const committed =
-            progress.value > COMMIT_FRACTION || event.velocityY > COMMIT_VELOCITY;
-          const target = flungShut ? 0 : committed ? 1 : 0;
-          openRef.value = target;
-          progress.value = withTiming(
-            target,
-            { duration: reducedMotion ? 0 : MOTION.sheetMs, easing: EASING },
-            (finished) => {
-              'worklet';
-              if (finished) runOnJS(settle)(target === 1);
-            },
-          );
-        }),
-    [progress, openRef, reducedMotion, settle],
-  );
-  const pullOpen = useMemo(makePull, [makePull]);
-  const pullShut = useMemo(makePull, [makePull]);
 
-  const panelStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -height.value * (1 - progress.value) }],
+  /**
+   * The bubble growing into the panel.
+   *
+   * Every edge is interpolated rather than the whole box being scaled: a
+   * scaled box takes its text with it, and text grown from a fifth of its size
+   * arrives blurred. Width, height, position and corner radius all travel from
+   * the pill's geometry to the panel's, and the contents simply appear inside
+   * a box that is already the right shape.
+   *
+   * `height.value` is measured from the contents, not from this box, which is
+   * why the measuring view sits inside rather than being this one — a box
+   * whose height is animated cannot also be what reports its natural height.
+   */
+  const bubbleStyle = useAnimatedStyle(() => {
+    const t = progress.value;
+    return {
+      top: interpolate(t, [0, 1], [topInset + ASK_PILL_TOP, 0]),
+      left: interpolate(t, [0, 1], [(viewportWidth - ASK_PILL_WIDTH) / 2, 0]),
+      width: interpolate(t, [0, 1], [ASK_PILL_WIDTH, viewportWidth]),
+      height: interpolate(t, [0, 1], [ASK_PILL_HEIGHT, Math.min(height.value, maxHeight)]),
+      borderRadius: interpolate(t, [0, 1], [ASK_PILL_HEIGHT / 2, 0]),
+      // No opacity ramp. At rest this box *is* the pill, so fading it in from
+      // nothing leaves the control invisible until someone presses where they
+      // cannot see it.
+    };
+  }, [topInset, viewportWidth, maxHeight]);
+
+  /** The contents, which arrive once the box has most of its size. */
+  const contentStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [CONTENT_FADE_IN, 1], [0, 1]),
+  }));
+
+  /** The pill itself, which is what the box looks like while it is small. */
+  const pillStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.25], [1, 0]),
   }));
 
   // The scrim only darkens what the panel does not already cover, and it fades
@@ -309,110 +307,146 @@ export function AskPanel({
     opacity: interpolate(progress.value, [0, 0.5, 1], [0, 0, 0.55]),
   }));
 
-  const handleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.3], [1, 0]),
-  }));
 
   return (
     <View style={styles.layer} pointerEvents="box-none">
-      {/* Below the panel, above the feed. Tapping it puts the panel away. */}
-      <Animated.View style={[styles.scrim, scrimStyle]} pointerEvents={open ? 'auto' : 'none'}>
-        <Pressable
-          style={styles.scrimPress}
-          onPress={close}
-          accessibilityRole="button"
-          accessibilityLabel="Close ask"
-        />
-      </Animated.View>
+      {/* Dims the feed behind an open panel and stops it being scrolled by
+          accident. It no longer closes on a tap: there is one close control
+          and it is the cross on the prompt row. */}
+      <Animated.View style={[styles.scrim, scrimStyle]} pointerEvents={open ? 'auto' : 'none'} />
 
       <Animated.View
-        style={[styles.panel, { maxHeight }, panelStyle]}
-        // A shut panel is parked off-screen above, where it is invisible but
-        // would still take a Tab press or a screen-reader swipe. Neither should
-        // land in a prompt nobody has opened.
-        pointerEvents={open ? 'auto' : 'none'}
-        accessibilityElementsHidden={!open}
-        importantForAccessibility={open ? 'auto' : 'no-hide-descendants'}
-        onLayout={(event) => {
-          // Remeasured as answers arrive, which is what makes the panel grow
-          // downward into its content rather than scrolling inside a fixed box.
-          const measured = event.nativeEvent.layout.height;
-          if (measured > 0) height.value = measured;
-        }}
+        style={[styles.bubble, bubbleStyle]}
+        pointerEvents={open ? 'auto' : 'box-none'}
+        accessibilityElementsHidden={false}
       >
-        <View style={[styles.prompt, { paddingTop: topInset + SPACING.screenMargin }]}>
-          <TextInput
-            ref={input}
-            style={styles.input}
-            value={draft}
-            onChangeText={setDraft}
-            onSubmitEditing={submit}
-            placeholder={
-              turns.length === 0
-                ? 'Ask for anything — “quiet mechanical keyboard under $80”'
-                : 'Cheaper? In white? Ask a follow-up'
-            }
-            placeholderTextColor={COLORS.textSecondary}
-            returnKeyType="search"
-            editable={!asking}
-            accessibilityLabel="Ask the shopping assistant"
-            multiline={false}
-          />
-          <Pressable
-            onPress={asking ? close : submit}
-            disabled={!asking && draft.trim() === ''}
-            style={styles.submit}
-            hitSlop={8}
+        {/* What the box looks like while it is still small. It is the button:
+            pressing anywhere on the shut bubble opens it. */}
+        {!open ? (
+          <PressScale
+            onPress={openPanel}
             accessibilityRole="button"
-            accessibilityLabel={asking ? 'Cancel' : 'Ask'}
+            accessibilityLabel="Ask the shopping assistant"
+            style={styles.pillPress}
+            contentStyle={styles.pillContent}
           >
-            {asking ? (
-              <ActivityIndicator color={COLORS.textSecondary} />
-            ) : (
-              <Icon
-                name="check"
-                size={ICON.glyph}
-                color={draft.trim() === '' ? COLORS.textSecondary : COLORS.textPrimary}
-              />
-            )}
-          </Pressable>
-        </View>
-
-        {turns.length > 0 || error !== null || asking ? (
-          <ScrollView
-            ref={transcript}
-            style={styles.answer}
-            contentContainerStyle={styles.answerContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-            // The newest turn is the one being read, and it is at the bottom.
-            onContentSizeChange={() => transcript.current?.scrollToEnd({ animated: !reducedMotion })}
-          >
-            {turns.map((turn, index) =>
-              turn.role === 'user' ? (
-                <Text key={`u${index}`} style={styles.said} accessibilityLabel={`You asked: ${turn.text}`}>
-                  {turn.text}
-                </Text>
-              ) : (
-                <AnswerTurn
-                  key={`a${index}`}
-                  reply={turn.reply as ChatResponse}
-                  onOpenPick={openPick}
-                />
-              ),
-            )}
-
-            {asking ? <Text style={styles.thinking}>Searching Amazon and eBay…</Text> : null}
-            {error !== null ? <Text style={styles.error}>{error}</Text> : null}
-          </ScrollView>
+            <Animated.View style={[styles.askPillInner, pillStyle]}>
+              <Icon name="search" size={16} color={COLORS.textSecondaryLight} />
+              <Text style={styles.askPillText} numberOfLines={1}>
+                Ask for anything
+              </Text>
+            </Animated.View>
+          </PressScale>
         ) : null}
 
-        {/* The panel's own bottom edge: drag it back up, or tap to close. */}
-        <GestureDetector gesture={pullShut}>
-          <View style={styles.footer}>
-            <View style={styles.handle} />
-            {turns.length > 0 ? (
-              <Pressable
+        {/* The panel's contents. Measured here rather than on the box above,
+            whose height is animated — a box cannot both be driven to a height
+            and report the height it would naturally take. */}
+        <Animated.View
+          // Absolute and at the panel's final width, both deliberately. Laid
+          // out inside the box it would be as short as the box currently is —
+          // and the box's height comes from this measurement, so the two would
+          // agree on 34 px forever. At a fixed width it also means the text is
+          // never reflowed by the growth, only revealed by it.
+          style={[styles.content, { width: viewportWidth }, contentStyle]}
+          pointerEvents={open ? 'auto' : 'none'}
+          accessibilityElementsHidden={!open}
+          importantForAccessibility={open ? 'auto' : 'no-hide-descendants'}
+          onLayout={(event) => {
+            const measured = event.nativeEvent.layout.height;
+            if (measured > 0) height.value = measured;
+          }}
+        >
+          <View style={[styles.prompt, { paddingTop: topInset + SPACING.screenMargin }]}>
+            <TextInput
+              ref={input}
+              style={styles.input}
+              value={draft}
+              onChangeText={setDraft}
+              onSubmitEditing={submit}
+              placeholder={
+                turns.length === 0
+                  ? 'Ask for anything — “quiet mechanical keyboard under $80”'
+                  : 'Cheaper? In white? Ask a follow-up'
+              }
+              placeholderTextColor={COLORS.textSecondary}
+              returnKeyType="search"
+              editable={!asking}
+              accessibilityLabel="Ask the shopping assistant"
+              multiline={false}
+            />
+            <PressScale
+              onPress={asking ? close : submit}
+              disabled={!asking && draft.trim() === ''}
+              style={styles.submit}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={asking ? 'Cancel' : 'Ask'}
+            >
+              {asking ? (
+                <ActivityIndicator color={COLORS.textSecondary} />
+              ) : (
+                <Icon
+                  name="check"
+                  size={ICON.glyph}
+                  color={draft.trim() === '' ? COLORS.textSecondary : COLORS.textPrimary}
+                />
+              )}
+            </PressScale>
+
+            {/* The one way out. On the right of the row that opened, where the
+                thing being closed is, rather than at the foot of a panel whose
+                length depends on how long the conversation ran. */}
+            <PressScale
+              onPress={close}
+              style={styles.close}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="Close ask"
+            >
+              <Icon name="close" size={ICON.glyph} color={COLORS.textSecondary} />
+            </PressScale>
+          </View>
+
+          {turns.length > 0 || error !== null || asking ? (
+            <ScrollView
+              ref={transcript}
+              style={styles.answer}
+              contentContainerStyle={styles.answerContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              onContentSizeChange={() =>
+                transcript.current?.scrollToEnd({ animated: !reducedMotion })
+              }
+            >
+              {turns.map((turn, index) =>
+                turn.role === 'user' ? (
+                  <Text
+                    key={`u${index}`}
+                    style={styles.said}
+                    accessibilityLabel={`You asked: ${turn.text}`}
+                  >
+                    {turn.text}
+                  </Text>
+                ) : (
+                  <AnswerTurn
+                    key={`a${index}`}
+                    reply={turn.reply as ChatResponse}
+                    onOpenPick={openPick}
+                  />
+                ),
+              )}
+
+              {asking ? <Text style={styles.thinking}>Searching Amazon and eBay…</Text> : null}
+              {error !== null ? <Text style={styles.error}>{error}</Text> : null}
+            </ScrollView>
+          ) : null}
+
+          {/* Starting over is not closing, so it keeps its own place. The
+              handle that used to drag the panel shut is gone with the pull. */}
+          {turns.length > 0 ? (
+            <View style={styles.footer}>
+              <PressScale
                 onPress={reset}
                 hitSlop={8}
                 style={styles.restart}
@@ -420,63 +454,11 @@ export function AskPanel({
                 accessibilityLabel="Start a new conversation"
               >
                 <Text style={styles.restartLabel}>New</Text>
-              </Pressable>
-            ) : null}
-            <Pressable
-              onPress={close}
-              hitSlop={8}
-              style={styles.collapse}
-              accessibilityRole="button"
-              accessibilityLabel="Close ask"
-            >
-              <Icon name="close" size={ICON.glyph} color={COLORS.textSecondary} />
-            </Pressable>
-          </View>
-        </GestureDetector>
+              </PressScale>
+            </View>
+          ) : null}
+        </Animated.View>
       </Animated.View>
-
-      {/* The pull zone. It stays mounted at the top edge whatever the panel is
-          doing, because when the panel is shut it is entirely off-screen and
-          this strip is the only thing left to grab. Rendered last so it is not
-          buried, and inset so the back button in Single mode still gets its
-          corner. */}
-      <GestureDetector gesture={pullOpen}>
-        <View
-          style={[styles.grabStrip, { top: topInset }]}
-          // Rendered last so a shut panel cannot bury it — which means that
-          // once the panel is open this strip lies directly over the prompt.
-          // It stands down there: the footer handle, the scrim and Escape are
-          // how an open panel closes.
-          pointerEvents={open ? 'none' : 'auto'}
-          accessible
-          accessibilityRole="button"
-          accessibilityLabel="Ask the shopping assistant"
-          accessibilityHint="Pull down, or activate, to open the prompt"
-          onAccessibilityTap={openPanel}
-        >
-          {/* A `Pressable` rather than a composed `Gesture.Tap`: a tap gesture
-              alongside a pan does not recognise on the web — the pan holds the
-              touch and the tap's `onEnd` never arrives. The pan only activates
-              past 8 px, so a click that does not move reaches this untouched. */}
-          <Pressable
-            onPress={openPanel}
-            accessibilityRole="button"
-            accessibilityLabel="Ask the shopping assistant"
-            style={styles.askPill}
-            hitSlop={8}
-          >
-            {/* The same control everywhere. The hairline it replaces was a
-                touch idiom that only worked if you already knew the top edge
-                was draggable — which is no more true with a thumb than with a
-                pointer. The pull still works for anyone who does know; this is
-                what tells everyone else there is something here. */}
-            <Animated.View style={[styles.askPillInner, handleStyle]}>
-              <Icon name="search" size={16} color={COLORS.textSecondaryLight} />
-              <Text style={styles.askPillText}>Ask for anything</Text>
-            </Animated.View>
-          </Pressable>
-        </View>
-      </GestureDetector>
     </View>
   );
 }
@@ -598,15 +580,24 @@ const styles = StyleSheet.create({
     zIndex: 90,
   },
   scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000000' },
-  scrimPress: { flex: 1 },
-  panel: {
+  /**
+   * The box that grows. Its geometry is entirely animated, so nothing here
+   * sets a size — and it clips, because the contents inside are laid out at
+   * full width the whole time and would otherwise spill out of a pill.
+   */
+  bubble: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
     backgroundColor: COLORS.sheet,
-    // Sharp edges read as glass, same as the sheet.
     overflow: 'hidden',
+  },
+  pillPress: { ...StyleSheet.absoluteFillObject },
+  pillContent: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  content: { position: 'absolute', top: 0, left: 0 },
+  close: {
+    width: ICON.minTarget,
+    height: ICON.minTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   prompt: {
     flexDirection: 'row',
@@ -706,28 +697,14 @@ const styles = StyleSheet.create({
     lineHeight: TYPE.lineHeights.small,
     marginTop: 4,
   },
-  grabStrip: {
-    position: 'absolute',
-    top: 0,
-    left: GRAB_STRIP_INSET,
-    right: GRAB_STRIP_INSET,
-    height: GRAB_STRIP_HEIGHT,
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: ASK_PILL_TOP,
-  },
+  // Holds only "New" now. The handle that dragged the panel shut went with
+  // the pull, and the cross moved up to the prompt row.
   footer: {
-    height: GRAB_STRIP_HEIGHT,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.hairline,
-  },
-  /** Still used by the open panel's own footer, which drags it shut. */
-  handle: {
-    width: 36,
-    height: 3,
-    backgroundColor: COLORS.hairline,
   },
   askPill: {
     minHeight: ICON.minTarget,
@@ -755,7 +732,8 @@ const styles = StyleSheet.create({
   },
   restart: {
     position: 'absolute',
-    right: ICON.minTarget + 4,
+    // Was inset to clear the close control that used to sit beside it here.
+    right: SPACING.screenMargin,
     height: ICON.minTarget,
     paddingHorizontal: 8,
     alignItems: 'center',
@@ -766,13 +744,5 @@ const styles = StyleSheet.create({
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
     fontWeight: TYPE.weights.semibold,
-  },
-  collapse: {
-    position: 'absolute',
-    right: 4,
-    width: ICON.minTarget,
-    height: ICON.minTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 });
