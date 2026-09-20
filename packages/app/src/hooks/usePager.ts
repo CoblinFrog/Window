@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { ViewStyle } from 'react-native';
 import { Gesture } from 'react-native-gesture-handler';
 import {
@@ -40,6 +40,9 @@ import { MOTION, SCROLL } from '@window/shared';
 
 const EASING = Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number]));
 
+/** How long after a drag a click is still assumed to be that drag's ghost. */
+const DRAG_CLICK_WINDOW_MS = 280;
+
 export interface PagerOptions {
   /** Index of the page in view. */
   index: number;
@@ -57,6 +60,15 @@ export interface PagerOptions {
 export interface Pager {
   /** Attach to a `GestureDetector` around the surface, or compose it. */
   pan: ReturnType<typeof Gesture.Pan>;
+  /**
+   * True if a drag finished within the last a few hundred milliseconds.
+   *
+   * On the web a drag whose start and end land on the same element still emits
+   * a click when the finger lifts, and a full-screen surface makes that the
+   * common case rather than the edge one. Anything that handles taps on top of
+   * this pager has to ask.
+   */
+  justDragged(): boolean;
   /** Apply to the surface holding the pages. */
   surfaceStyle: ReturnType<typeof useAnimatedStyle<ViewStyle>>;
   /** Indices to keep mounted, ascending. */
@@ -104,6 +116,13 @@ export function usePager({
     [onPage],
   );
 
+  // When a drag last ended, on the JS side, for `justDragged` below.
+  const draggedAt = useRef(0);
+  const markDragged = useCallback(() => {
+    draggedAt.current = Date.now();
+  }, []);
+  const justDragged = useCallback(() => Date.now() - draggedAt.current < DRAG_CLICK_WINDOW_MS, []);
+
   const pan = useMemo(
     () =>
       Gesture.Pan()
@@ -130,6 +149,9 @@ export function usePager({
 
           // Negative means the surface moved forward, towards the next page.
           const travelled = dragOrigin.value - scrollY.value;
+          // A drag that actually went somewhere is about to produce a stray
+          // click; anything handling taps above this needs to know.
+          if (Math.abs(travelled) > SCROLL.activationSlop) runOnJS(markDragged)();
           const flick =
             Math.abs(event.velocityY) > SCROLL.flickVelocity &&
             Math.abs(travelled) > SCROLL.flickMinTravel;
@@ -152,7 +174,7 @@ export function usePager({
             },
           );
         }),
-    [commit, current, dragOrigin, dragging, height, last, scrollY],
+    [commit, current, dragOrigin, dragging, height, last, markDragged, scrollY],
   );
 
   const surfaceStyle = useAnimatedStyle<ViewStyle>(() => ({
@@ -173,5 +195,5 @@ export function usePager({
   const topOf = useCallback((page: number) => page * height, [height]);
   const offsetOf = useCallback((page: number) => (page - current) * height, [current, height]);
 
-  return { pan, surfaceStyle, pages, topOf, offsetOf };
+  return { pan, justDragged, surfaceStyle, pages, topOf, offsetOf };
 }

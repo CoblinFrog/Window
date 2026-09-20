@@ -8,6 +8,7 @@ import Animated from 'react-native-reanimated';
 import {
   COLORS,
   PANE_SIZE,
+  SCROLL,
   SPACING,
   TYPE,
   paneToRender,
@@ -232,15 +233,28 @@ export default function FeedScreen(): React.ReactElement {
     [feed, zoom],
   );
 
-  const next = useCallback(() => {
-    flushDwell();
-    feed.dispatch({ kind: 'scroll_next' });
-  }, [feed, flushDwell]);
+  // One page per settle, whatever asked for it.
+  //
+  // A drag is self-pacing — it commits only once the surface has arrived — but
+  // the wheel and a held arrow key are not, and two requests landing inside one
+  // settle move the cursor twice while the surface animates straight past the
+  // page in between. The feed then reads as having skipped something, which
+  // for a ranked list it has.
+  const lastStepAt = useRef(0);
+  const step = useCallback(
+    (action: 'scroll_next' | 'scroll_prev') => {
+      const now = Date.now();
+      if (now - lastStepAt.current < SCROLL.settleMs) return;
+      lastStepAt.current = now;
+      flushDwell();
+      feed.dispatch({ kind: action });
+    },
+    [feed, flushDwell],
+  );
 
-  const prev = useCallback(() => {
-    flushDwell();
-    feed.dispatch({ kind: 'scroll_prev' });
-  }, [feed, flushDwell]);
+  const next = useCallback(() => step('scroll_next'), [step]);
+
+  const prev = useCallback(() => step('scroll_prev'), [step]);
 
   // ---- Gestures ----------------------------------------------------------
   // Owned by the two layouts. See the note at the top of this file.

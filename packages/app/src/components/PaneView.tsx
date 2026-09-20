@@ -40,6 +40,12 @@ import { Scrim } from './Scrim.js';
 /** Inset either side of the glass, so it reads as a panel laid on the black. */
 const GLASS_MARGIN = 12;
 
+/**
+ * The fraction of the frame, from the left edge, where a tap means "the
+ * photograph before this one".
+ */
+const GALLERY_BACK_ZONE = 0.3;
+
 const CONDITION_LABELS: Record<string, string> = {
   new: 'New',
   like_new: 'Like new',
@@ -76,6 +82,18 @@ export interface PaneViewProps {
    * scrolls the feed, and only the deck can see both.
    */
   galleryIndex?: number;
+  /**
+   * The story-style tap zones over the photograph: a strip down the left edge
+   * steps back through the gallery, the rest of the frame steps on.
+   *
+   * They are `Pressable`s rather than gesture-handler taps because a
+   * `Gesture.Tap` composed alongside the deck's pan never recognises — see the
+   * note in PaneDeck, which also guards them against a drag's stray click.
+   */
+  onStepBack?: (() => void) | undefined;
+  onStepForward?: (() => void) | undefined;
+  onDoubleTap?: (() => void) | undefined;
+  onLongPress?: (() => void) | undefined;
   /** Back to wherever this pane was opened from — always the window screen. */
   onBack(): void;
   /** The merchant line is the seller sheet's entry point. */
@@ -96,6 +114,10 @@ export function PaneView({
   width,
   height,
   galleryIndex = 0,
+  onStepBack,
+  onStepForward,
+  onDoubleTap,
+  onLongPress,
   onBack,
   onSeller,
   onSimilar,
@@ -158,6 +180,32 @@ export function PaneView({
             cachePolicy="memory-disk"
           />
         </View>
+
+        {/* The tap zones sit above the photograph and below every control, so
+            the back chevron and the rail keep their own presses. */}
+        {onStepForward ? (
+          <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+            <Pressable
+              style={[styles.tapZone, styles.tapZoneBack]}
+              onPress={onStepBack}
+              onLongPress={onLongPress}
+              delayLongPress={380}
+              accessibilityRole="button"
+              accessibilityLabel="Previous photo"
+              disabled={!onStepBack || galleryIndex === 0}
+            />
+            <Pressable
+              style={[styles.tapZone, styles.tapZoneForward]}
+              onPress={onStepForward}
+              onLongPress={onLongPress}
+              delayLongPress={380}
+              accessibilityRole="button"
+              accessibilityLabel={
+                total > 1 ? `Next photo, ${galleryIndex + 1} of ${total}` : 'Product detail'
+              }
+            />
+          </View>
+        ) : null}
 
         <Scrim top right bottom={total > 1} />
 
@@ -328,6 +376,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#111111',
   },
+  // Story-style: the narrower strip goes back, because going forward is what
+  // almost every tap means and the rest of the frame should not need aiming.
+  tapZone: { position: 'absolute', top: 0, bottom: 0 },
+  tapZoneBack: { left: 0, width: `${GALLERY_BACK_ZONE * 100}%` },
+  tapZoneForward: { left: `${GALLERY_BACK_ZONE * 100}%`, right: 0 },
   back: {
     position: 'absolute',
     top: 10,

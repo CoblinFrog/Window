@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS } from 'react-native-reanimated';
-import { COLORS, SCROLL, type ProductCard } from '@window/shared';
+import { COLORS, type ProductCard } from '@window/shared';
 import { usePager } from '../hooks/usePager.js';
 import { PaneView, galleryLength } from './PaneView.js';
 
@@ -25,11 +25,11 @@ import { PaneView, galleryLength } from './PaneView.js';
  * has to be arbitrated against the drag that scrolls the feed, and only the
  * component that owns both can do that.
  *
- * The two axes carry different journeys: vertical moves between products,
- * horizontal moves through one product's photographs. Going back to the window
- * screen is the chevron and Escape rather than a rightward swipe, because a
- * swipe cannot mean "previous photograph" and "leave" at the same time without
- * one of them surprising someone.
+ * The gallery is tapped through rather than swiped, the way a story is: the
+ * left edge steps back, the rest of the frame steps on. That leaves the
+ * horizontal drag free to mean one thing — a rightward swipe goes back to the
+ * window screen — instead of having to mean "previous photograph" and "leave"
+ * at once, which is a choice no gesture can make without surprising someone.
  *
  * Only the card in view takes touches. A neighbour half on screen mid-drag is
  * scenery: tapping it would advance a gallery nobody is looking at, and its
@@ -70,7 +70,7 @@ export function PaneDeck({
   onSimilar,
   onGalleryAdvance,
   onGalleryEnd,
-  onDoubleTap,
+  onDoubleTap: onDoubleTapProp,
   onLongPress,
   dataSaver = false,
   reducedMotion = false,
@@ -115,74 +115,50 @@ export function PaneDeck({
     [card, galleryIndex, loaded, total, onGalleryAdvance, onGalleryEnd],
   );
 
-  const advanceGallery = useCallback(() => stepGallery(1), [stepGallery]);
-
-  // Horizontal is the gallery. Left goes forward through the photographs,
-  // right goes back — the direction the pictures themselves appear to travel.
-  const galleryPan = useMemo(
+  const swipeBack = useMemo(
     () =>
       Gesture.Pan()
-        .activeOffsetX([-24, 24])
+        // Rightward only. A single positive value means "activate once
+        // translationX passes this"; the two-element form would also activate
+        // on the way back from zero, which is every touch.
+        .activeOffsetX(24)
         .failOffsetY([-16, 16])
         .onEnd((event) => {
-          const far = Math.abs(event.translationX) > 40;
-          const flick =
-            Math.abs(event.velocityX) > SCROLL.flickVelocity &&
-            Math.abs(event.translationX) > SCROLL.flickMinTravel;
-          if (!far && !flick) return;
-          // Direction from displacement, not from the velocity's sign, which on
-          // the web does not agree with `translationX`.
-          runOnJS(stepGallery)(event.translationX < 0 ? 1 : -1);
+          if (event.translationX > 40) runOnJS(onBack)();
         }),
-    [stepGallery],
+    [onBack],
   );
 
-  const doubleTap = useMemo(
-    () =>
-      Gesture.Tap()
-        .numberOfTaps(2)
-        .maxDistance(12)
-        .onEnd((_event, success) => {
-          if (success && card) runOnJS(onDoubleTap)(card);
-        }),
-    [card, onDoubleTap],
-  );
-
-  const singleTap = useMemo(
-    () =>
-      Gesture.Tap()
-        // A tap is a tap, not the end of a drag: past this it is a scroll.
-        .maxDistance(12)
-        .onEnd((_event, success) => {
-          if (success) runOnJS(advanceGallery)();
-        }),
-    [advanceGallery],
-  );
-
-  const longPress = useMemo(
-    () =>
-      Gesture.LongPress()
-        .minDuration(380)
-        .maxDistance(12)
-        .onStart(() => {
-          if (card) runOnJS(onLongPress)(card);
-        }),
-    [card, onLongPress],
-  );
-
-  // A race at the top level, with only the two taps disambiguated by priority
-  // inside it.
+  // The taps are `Pressable`s inside the pane view rather than gesture-handler
+  // taps. A `Gesture.Tap` composed alongside the pan never recognises here —
+  // the pan holds the touch and the tap's `onEnd` simply never arrives — and a
+  // gallery you cannot advance is worse than one whose taps need guarding.
   //
-  // The drags and the taps are already mutually exclusive by configuration —
-  // the pan needs 12px of movement to activate and the taps allow at most 12px
-  // — so they do not need `Exclusive` to keep them apart. Putting the pan
-  // inside one actively harms it: the pan has to wait on the other gestures
-  // resolving before it finalises, and its `onEnd` never arrives, which leaves
-  // a drag tracking the finger perfectly and then never settling onto a page.
-  const taps = useMemo(() => Gesture.Exclusive(doubleTap, singleTap), [doubleTap, singleTap]);
+  // What they need guarding against is the stray click a drag leaves behind:
+  // on the web, a drag that starts and ends on the same element still emits
+  // one when the finger lifts, and here that element is the whole frame. The
+  // pager knows when it last moved, so the zones ask before acting.
+  const onEdgeTap = useCallback(
+    (direction: 1 | -1) => {
+      if (pager.justDragged()) return;
+      stepGallery(direction);
+    },
+    [pager, stepGallery],
+  );
+
+  const onDoubleTap = useCallback(() => {
+    if (!card || pager.justDragged()) return;
+    onDoubleTapProp(card);
+  }, [card, onDoubleTapProp, pager]);
+
+  const onCardLongPress = useCallback(() => {
+    if (!card) return;
+    onLongPress(card);
+  }, [card, onLongPress]);
+
   const gesture = useMemo(
-    () => Gesture.Race(pager.pan, galleryPan, taps, longPress),
-    [pager.pan, galleryPan, taps, longPress],
+    () => Gesture.Race(pager.pan, swipeBack),
+    [pager.pan, swipeBack],
   );
 
   return (
@@ -209,6 +185,12 @@ export function PaneDeck({
                   // neighbours get none: it is a live control, and a stack of
                   // them in a deck is one too many.
                   rail={isCurrent ? renderRail(page) : null}
+                  // Story-style: a strip down the left edge steps back through
+                  // the photographs, the rest of the frame steps on.
+                  onStepBack={() => onEdgeTap(-1)}
+                  onStepForward={() => onEdgeTap(1)}
+                  onDoubleTap={onDoubleTap}
+                  onLongPress={onCardLongPress}
                   onBack={onBack}
                   onSeller={() => onSeller(page)}
                   onSimilar={onSimilar ? () => onSimilar(page) : undefined}
