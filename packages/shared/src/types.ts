@@ -269,7 +269,14 @@ export interface ClusterDoc<Id = string> {
   embedding: number[];
   reviews: {
     count: number;
-    meanRating: number;
+    /**
+     * Mean over the reviews that carry a score, on a 5-point scale. `null` when
+     * none of them do — most Amazon reviews are text without a star, and
+     * reporting those as 0 would read as a one-star product.
+     */
+    meanRating: number | null;
+    /** How many of `count` carried a score and so fed `meanRating`. */
+    ratedCount: number;
     perSource: Array<{ domain: string; count: number; meanRating: number }>;
     summary: { text: string; generatedAt: Date; modelVersion: string } | null;
     themes: ReviewTheme[];

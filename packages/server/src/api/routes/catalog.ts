@@ -135,7 +135,10 @@ export function catalogRoutes(ctx: AppContext): Router {
           gallery: product.media.gallery,
           video: product.media.video,
         },
-        reviews: { count: cluster?.reviews.count ?? 0, meanRating: cluster?.reviews.meanRating ?? null },
+        reviews: {
+          count: cluster?.reviews.count ?? 0,
+          meanRating: (cluster?.reviews.ratedCount ?? 0) > 0 ? cluster?.reviews.meanRating ?? null : null,
+        },
         upvotes: cluster?.engagement.upvotes ?? 0,
         otherOffers: null,
         auction: product.auction ? {
@@ -231,7 +234,7 @@ export function catalogRoutes(ctx: AppContext): Router {
         offers,
         reviews: {
           count: cluster.reviews.count,
-          meanRating: cluster.reviews.count > 0 ? cluster.reviews.meanRating : null,
+          meanRating: cluster.reviews.ratedCount > 0 ? cluster.reviews.meanRating : null,
           perSource: cluster.reviews.perSource,
           summary: cluster.reviews.summary
             ? {

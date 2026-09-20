@@ -29,6 +29,15 @@ const log = logger.child('feed');
 
 export type Degradation = FeedPageResponse['degraded'];
 
+/**
+ * How many seen ids travel into a degraded query's exclusion list.
+ *
+ * Every id is rendered into the PostgREST url, so the list is bounded to keep
+ * the request well inside the server's header limit. The client already sends
+ * only its most recent ids, and those are the ones a repeat would be noticed in.
+ */
+const SEEN_EXCLUSION_CAP = 200;
+
 export interface FeedDeps {
   collections: CollectionSet;
   ranking: RankingService;
@@ -615,12 +624,31 @@ export class FeedService {
     let level: Degradation = 'cache';
     let docs: VectorCandidate[] = [];
 
+    // A degraded page is still a page of the feed, and the feed does not repeat
+    // itself. Without this the popularity rungs re-served the same top-N on
+    // every request: a session that degraded once saw those products and
+    // nothing else for as long as it kept scrolling.
+    const alreadySeen = [
+      ...new Set([...request.seenIds, ...user.suppressions.products]),
+    ].slice(-SEEN_EXCLUSION_CAP);
+
+    const popularity = {
+      limit,
+      orderBy: [
+        { column: 'engagement.ctrSmoothed', ascending: false },
+        { column: 'quality.score', ascending: false },
+      ],
+    };
+
     if (cachedIds.length > 0) {
-      docs = (await find(
-        collections.products,
-        { id: { $in: cachedIds }, status: 'active', 'stock.inStock': true },
-        { limit },
-      )) as unknown as VectorCandidate[];
+      const unseenCached = cachedIds.filter((id) => !alreadySeen.includes(id));
+      if (unseenCached.length > 0) {
+        docs = (await find(
+          collections.products,
+          { id: { $in: unseenCached }, status: 'active', 'stock.inStock': true },
+          { limit },
+        )) as unknown as VectorCandidate[];
+      }
     }
 
     if (docs.length < limit) {
@@ -634,8 +662,9 @@ export class FeedService {
             status: 'active',
             'stock.inStock': true,
             'risk.tier': { $in: ['clear', 'watch'] },
+            id: { $nin: alreadySeen },
           },
-          { limit, orderBy: [{ column: 'engagement.ctrSmoothed', ascending: false }, { column: 'quality.score', ascending: false }] },
+          popularity,
         )) as unknown as VectorCandidate[];
       }
     }
@@ -648,8 +677,9 @@ export class FeedService {
           status: 'active',
           'stock.inStock': true,
           'risk.tier': { $in: ['clear', 'watch'] },
+          id: { $nin: alreadySeen },
         },
-        { limit, orderBy: [{ column: 'engagement.ctrSmoothed', ascending: false }, { column: 'quality.score', ascending: false }] },
+        popularity,
       )) as unknown as VectorCandidate[];
     }
 

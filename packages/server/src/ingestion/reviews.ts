@@ -179,9 +179,19 @@ export interface PerSourceRating {
  * show it. Averaging the averages would let a source with nine reviews cancel
  * out one with nine hundred.
  */
+/**
+ * Combines a review corpus into one score.
+ *
+ * `count` is every review, because that is what "38 reviews" means to a reader.
+ * `meanRating` averages only the ones that actually carry a score: a review
+ * whose source shows text without a star is evidence of interest, not a vote,
+ * and dividing the rated total by the full count dragged every product toward
+ * zero — a 4.6 over 9 scored reviews out of 40 was reported as 1.03.
+ */
 export function combineRatings(reviews: readonly AggregatedReview[]): {
   count: number;
-  meanRating: number;
+  meanRating: number | null;
+  ratedCount: number;
   perSource: PerSourceRating[];
 } {
   const bySource = new Map<string, { total: number; count: number }>();
@@ -202,14 +212,15 @@ export function combineRatings(reviews: readonly AggregatedReview[]): {
     .sort((a, b) => b.count - a.count);
 
   const count = reviews.length;
+  const ratedCount = perSource.reduce((sum, p) => sum + p.count, 0);
   const meanRating =
-    count === 0
-      ? 0
+    ratedCount === 0
+      ? null
       : Math.round(
-          (perSource.reduce((s, p) => s + p.meanRating * p.count, 0) / count) * 100,
+          (perSource.reduce((s, p) => s + p.meanRating * p.count, 0) / ratedCount) * 100,
         ) / 100;
 
-  return { count, meanRating, perSource };
+  return { count, meanRating, ratedCount, perSource };
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +237,8 @@ export interface ReviewSummarizer {
   readonly modelVersion: string;
   summarize(input: {
     themes: readonly ReviewTheme[];
-    meanRating: number;
+    /** `null` when the corpus is text without scores. */
+    meanRating: number | null;
     count: number;
     productTitle: string;
   }): Promise<string>;
@@ -320,13 +332,18 @@ export class ExtractiveReviewSummarizer implements ReviewSummarizer {
  * more than 0.3. Anything more eager spends money restating the same sentence.
  */
 export function shouldRegenerateSummary(
-  previous: { count: number; meanRating: number } | null,
-  current: { count: number; meanRating: number },
+  previous: { count: number; meanRating: number | null } | null,
+  current: { count: number; meanRating: number | null },
 ): boolean {
   if (!previous) return current.count > 0;
   if (previous.count === 0) return current.count > 0;
   const growth = (current.count - previous.count) / previous.count;
   if (growth >= REVIEWS_CONFIG.regenerateOnCountGrowth) return true;
+  // A corpus that has gained or lost its scores entirely is a shift worth
+  // regenerating on; one that never had any cannot shift.
+  if (previous.meanRating === null || current.meanRating === null) {
+    return previous.meanRating !== current.meanRating;
+  }
   return Math.abs(current.meanRating - previous.meanRating) > REVIEWS_CONFIG.regenerateOnRatingShift;
 }
 

@@ -110,14 +110,18 @@ export const useFeed = create<FeedState>((set, get) => ({
     const state = get();
     // The cursor is bounded by what is loaded; the refill below covers the gap.
     const next = cursorReducer(state, action, Math.max(0, state.buffer.length - 1));
-    if (
-      next.mode === state.mode &&
-      next.cursor === state.cursor &&
-      next.lastPane === state.lastPane
-    ) {
-      return;
-    }
-    set(next);
+    const moved =
+      next.mode !== state.mode ||
+      next.cursor !== state.cursor ||
+      next.lastPane !== state.lastPane;
+
+    if (moved) set(next);
+
+    // Refill and rotation are driven by every scroll, not only by ones that
+    // moved the cursor. A scroll that changed nothing means the cursor is
+    // pinned to the end of the buffer, which is the strongest signal there is
+    // that more is needed — returning early there left the feed stuck at the
+    // last card with nothing fetching and nothing restocking.
     void get().ensureBuffer(next.mode);
 
     // Scrolling past the threshold is what ages the catalog: the listings
@@ -281,3 +285,4 @@ export const useFeed = create<FeedState>((set, get) => ({
 export function hasCard(state: FeedState): boolean {
   return state.buffer.length > 0 && state.cursor < state.buffer.length;
 }
+

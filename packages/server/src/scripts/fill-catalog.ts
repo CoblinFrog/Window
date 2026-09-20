@@ -1,7 +1,7 @@
 /**
  * Fills the catalog with real listings, up to a target size.
  *
- *   npm run fill -w @window/server                       # top up to 20
+ *   npm run fill -w @window/server                       # top up to CATALOG_WINDOW.size
  *   npm run fill -w @window/server -- --target 30
  *   npm run fill -w @window/server -- --topic "running shoes" --topic "espresso"
  *
@@ -10,6 +10,7 @@
  * contains and what the window adds later come from one code path.
  */
 
+import { CATALOG_WINDOW } from '@window/shared';
 import { connectDatabase } from '../db/supabase-client.js';
 import { count } from '../db/supabase-helpers.js';
 import { DEFAULT_WINDOW_TOPICS, fillCatalog } from '../ingestion/catalog-window.js';
@@ -21,7 +22,9 @@ const log = logger.child('fill-catalog');
 function parseArgs(): { target: number; topics: string[] } {
   const args = process.argv.slice(2);
   const topics: string[] = [];
-  let target = 20;
+  // Defaults to the window the feed actually rotates, so filling by hand and
+  // filling from a rotation cannot disagree about how big the catalog is.
+  let target: number = CATALOG_WINDOW.size;
 
   for (let i = 0; i < args.length; i++) {
     const value = args[i + 1];
