@@ -175,15 +175,21 @@ export const STRETCH = {
    * page reaches out quickly and then hangs, which is the part that reads as
    * weight.
    */
-  upMs: 320,
+  upMs: 270,
   /**
    * The return is a spring, so the page overshoots and settles rather than
-   * stopping dead. Damping ratio near 0.47, softened to match the slower reach
-   * above: a snappier return after a drawn-out stretch reads as two unrelated
-   * movements rather than one.
+   * stopping dead. Damping ratio near 0.47, matched to the reach above: a
+   * snappier return after a drawn-out stretch reads as two unrelated movements
+   * rather than one.
+   *
+   * Stiffness and damping move together when this is retuned. Raising
+   * stiffness alone shortens the settle but also raises the damping ratio,
+   * which is the thing that decides how much of a bounce there is — so the
+   * page would arrive sooner and bounce less, which is a different animation
+   * rather than the same one played faster.
    */
-  settleDamping: 10,
-  settleStiffness: 160,
+  settleDamping: 11.8,
+  settleStiffness: 225,
   settleMass: 0.7,
 } as const;
 
