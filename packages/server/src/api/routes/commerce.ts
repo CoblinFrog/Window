@@ -119,6 +119,13 @@ export function commerceRoutes(ctx: AppContext): Router {
     const source = await ctx.repository.getSource(order.merchantDomain);
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
+    // The hero images, fetched in one batched read the way `/orders` does.
+    // An order line stores a title and a price but not the photograph, because
+    // the photograph belongs to the product and can be re-derived; checkout
+    // needs it on screen, so it is joined here rather than copied at add time.
+    const products = await ctx.repository.getProducts(order.items.map((i) => i.productId));
+    const heroById = new Map(products.map((p) => [p.id, p.media.hero]));
+
     return {
       // The order id, always.
       //
@@ -158,6 +165,7 @@ export function commerceRoutes(ctx: AppContext): Router {
         title: item.title,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
+        hero: heroById.get(item.productId) ?? null,
       })),
       protocol: order.payment?.protocol ?? null,
       needsInput: ctx.checkout.pendingPrompt(order.id),
