@@ -20,7 +20,8 @@ import type { ReviewSample } from './quality.js';
 
 export interface AggregatedReview {
   source: { domain: string; url: string };
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   excerpt: string;
   authorHandle: string | null;
@@ -85,8 +86,8 @@ export function themesInText(text: string): string[] {
  * reviewer's own explicit verdict; the lexicon only adjusts it, which stops a
  * five-star review that mentions one flaw from being read as negative.
  */
-export function reviewSentiment(rating: number, ratingScale: number, text: string): number {
-  const fromRating = clamp((rating / ratingScale - 0.2) / 0.8, 0, 1);
+export function reviewSentiment(rating: number | null, ratingScale: number, text: string): number {
+  const fromRating = rating === null ? 0.5 : clamp((rating / ratingScale - 0.2) / 0.8, 0, 1);
   const words = text.toLowerCase().match(/[a-z]{3,}/g) ?? [];
   let positive = 0;
   let negative = 0;
@@ -128,7 +129,8 @@ export function bucketReviews(
     }
   };
 
-  const normalised = (r: AggregatedReview) => r.rating / r.ratingScale;
+  // Unrated excerpts sort mid — never "most critical" nor "most positive".
+  const normalised = (r: AggregatedReview) => (r.rating === null ? 0.5 : r.rating / r.ratingScale);
 
   // Helpful first: a review that is both helpful and recent is more useful
   // filed as helpful, because recency is visible on every review anyway.
@@ -177,13 +179,24 @@ export interface PerSourceRating {
  * show it. Averaging the averages would let a source with nine reviews cancel
  * out one with nine hundred.
  */
+/**
+ * Combines a review corpus into one score.
+ *
+ * `count` is every review, because that is what "38 reviews" means to a reader.
+ * `meanRating` averages only the ones that actually carry a score: a review
+ * whose source shows text without a star is evidence of interest, not a vote,
+ * and dividing the rated total by the full count dragged every product toward
+ * zero — a 4.6 over 9 scored reviews out of 40 was reported as 1.03.
+ */
 export function combineRatings(reviews: readonly AggregatedReview[]): {
   count: number;
-  meanRating: number;
+  meanRating: number | null;
+  ratedCount: number;
   perSource: PerSourceRating[];
 } {
   const bySource = new Map<string, { total: number; count: number }>();
   for (const review of reviews) {
+    if (review.rating === null) continue; // unrated content carries no vote
     const entry = bySource.get(review.source.domain) ?? { total: 0, count: 0 };
     entry.total += (review.rating / review.ratingScale) * 5;
     entry.count += 1;
@@ -199,14 +212,15 @@ export function combineRatings(reviews: readonly AggregatedReview[]): {
     .sort((a, b) => b.count - a.count);
 
   const count = reviews.length;
+  const ratedCount = perSource.reduce((sum, p) => sum + p.count, 0);
   const meanRating =
-    count === 0
-      ? 0
+    ratedCount === 0
+      ? null
       : Math.round(
-          (perSource.reduce((s, p) => s + p.meanRating * p.count, 0) / count) * 100,
+          (perSource.reduce((s, p) => s + p.meanRating * p.count, 0) / ratedCount) * 100,
         ) / 100;
 
-  return { count, meanRating, perSource };
+  return { count, meanRating, ratedCount, perSource };
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +237,8 @@ export interface ReviewSummarizer {
   readonly modelVersion: string;
   summarize(input: {
     themes: readonly ReviewTheme[];
-    meanRating: number;
+    /** `null` when the corpus is text without scores. */
+    meanRating: number | null;
     count: number;
     productTitle: string;
   }): Promise<string>;
@@ -317,13 +332,18 @@ export class ExtractiveReviewSummarizer implements ReviewSummarizer {
  * more than 0.3. Anything more eager spends money restating the same sentence.
  */
 export function shouldRegenerateSummary(
-  previous: { count: number; meanRating: number } | null,
-  current: { count: number; meanRating: number },
+  previous: { count: number; meanRating: number | null } | null,
+  current: { count: number; meanRating: number | null },
 ): boolean {
   if (!previous) return current.count > 0;
   if (previous.count === 0) return current.count > 0;
   const growth = (current.count - previous.count) / previous.count;
   if (growth >= REVIEWS_CONFIG.regenerateOnCountGrowth) return true;
+  // A corpus that has gained or lost its scores entirely is a shift worth
+  // regenerating on; one that never had any cannot shift.
+  if (previous.meanRating === null || current.meanRating === null) {
+    return previous.meanRating !== current.meanRating;
+  }
   return Math.abs(current.meanRating - previous.meanRating) > REVIEWS_CONFIG.regenerateOnRatingShift;
 }
 

@@ -2,37 +2,30 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Linking from 'expo-linking';
-import { Redirect, useRouter } from 'expo-router';
-import {
-  Gesture,
-  GestureDetector,
-  GestureHandlerRootView,
-} from 'react-native-gesture-handler';
-import Animated, {
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-} from 'react-native-reanimated';
+import { Redirect } from 'expo-router';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated from 'react-native-reanimated';
 import {
   COLORS,
-  MOTION,
   PANE_SIZE,
+  SCROLL,
   SPACING,
   TYPE,
   paneToRender,
   type ProductCard,
   type UpvoteReason,
 } from '@window/shared';
-import { ActionRail } from '../src/components/ActionRail.js';
+import { api } from '../src/api/client.js';
+import { ActionBar } from '../src/components/ActionBar.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
 import { ReasonPicker } from '../src/components/ReasonPicker.js';
 import { ReviewsSheet } from '../src/components/ReviewsSheet.js';
 import { SellerSheet } from '../src/components/SellerSheet.js';
-import { SingleCard } from '../src/components/SingleCard.js';
-import { WindowGrid } from '../src/components/WindowGrid.js';
+import { PaneDeck } from '../src/components/PaneDeck.js';
+import { WindowScreen } from '../src/components/WindowScreen.js';
 import { useLayout, useReducedMotion } from '../src/hooks/useLayout.js';
+import { useZoom, type TileRect } from '../src/hooks/useZoom.js';
 import { useKeyboardControls, useSnappedWheel } from '../src/hooks/useKeyboard.js';
 import { useCart } from '../src/store/cart.js';
 import { emit, emitDwell } from '../src/store/events.js';
@@ -42,13 +35,16 @@ import { useSession } from '../src/store/session.js';
 /**
  * The feed.
  *
- * One ranked list rendered through two layouts. A horizontal swipe switches
- * layout; it never fetches a different list. Everything on this screen exists
- * to keep that invariant true, because it is what makes tap-to-promote feel
- * instant rather than like a navigation.
+ * One ranked list rendered through two layouts — the window screen, four
+ * products at a time, and the pane view, one product stepped up close. A tap
+ * promotes a tile into the pane; back returns to the pane of the window it came
+ * from. Neither transition fetches a different list.
+ *
+ * Both layouts are scrolling surfaces that track the finger and own their own
+ * gestures, so there is no stage-level gesture out here: one would only be
+ * competing with them for the same drag.
  */
 export default function FeedScreen(): React.ReactElement {
-  const router = useRouter();
   const layout = useLayout();
   const reducedMotion = useReducedMotion();
 
@@ -199,73 +195,68 @@ export default function FeedScreen(): React.ReactElement {
   }, []);
 
   // ---- Mode switching and promote ---------------------------------------
-  // The cross-fade is a shared-element transition: the tapped tile becomes the
-  // card. Under reduced motion it is a cut, which loses nothing because the
-  // animation only ever answered "where did that go?".
-  const promote = useSharedValue(1);
-  const promoteStyle = useAnimatedStyle(() => ({ opacity: promote.value }));
-
-  const runPromote = useCallback(
-    (after: () => void) => {
-      if (reducedMotion) {
-        after();
-        return;
-      }
-      promote.value = withTiming(0, { duration: MOTION.promoteMs / 2 }, (finished) => {
-        if (!finished) return;
-        runOnJS(after)();
-        promote.value = withTiming(1, { duration: MOTION.promoteMs / 2 });
-      });
-    },
-    [promote, reducedMotion],
-  );
+  // Tapping a tile zooms into it: the pane grows out of that tile's rectangle
+  // while the grid leans on it and fades. Going back puts the product down
+  // where it was picked up. Under reduced motion both are cuts, which lose
+  // nothing — the animation only ever answered "where did that go?", and the
+  // remembered pane answers it on arrival anyway.
+  const zoom = useZoom(layout.columnWidth, layout.columnHeight, reducedMotion);
 
   const switchMode = useCallback(
     (direction: 'left' | 'right') => {
       setShowSwipeHint(false);
-      runPromote(() =>
-        feed.dispatch({ kind: direction === 'left' ? 'swipe_left' : 'swipe_right' }),
-      );
+      const commit = (): void =>
+        feed.dispatch({ kind: direction === 'left' ? 'swipe_left' : 'swipe_right' });
+
+      // Leaving the pane view is the zoom running backwards. Entering it by a
+      // swipe is not a zoom at all: no tile was touched, so there is nothing to
+      // grow out of.
+      if (direction === 'left' && feed.mode === 'single') zoom.zoomOut(commit);
+      else commit();
     },
-    [feed, runPromote],
+    [feed, zoom],
   );
 
   const tapTile = useCallback(
-    (index: number) => {
-      runPromote(() => feed.dispatch({ kind: 'tap_tile', index }));
+    (index: number, card: ProductCard, rect: TileRect | null) => {
+      zoom.zoomIn(rect, () => feed.dispatch({ kind: 'tap_tile', index }));
+      // A tap is also the moment to ask the source for the freshest copy of
+      // this listing; the refreshed detail patches the card in place when it
+      // lands. It is deliberately not awaited — the zoom has already started
+      // and must not wait on the network to finish.
+      void api
+        .product(card.productId, { live: true })
+        .then((detail) => feed.patchCard(detail))
+        .catch(() => undefined);
     },
-    [feed, runPromote],
+    [feed, zoom],
   );
 
-  const next = useCallback(() => {
-    flushDwell();
-    feed.dispatch({ kind: 'scroll_next' });
-  }, [feed, flushDwell]);
+  // One page per settle, whatever asked for it.
+  //
+  // A drag is self-pacing — it commits only once the surface has arrived — but
+  // the wheel and a held arrow key are not, and two requests landing inside one
+  // settle move the cursor twice while the surface animates straight past the
+  // page in between. The feed then reads as having skipped something, which
+  // for a ranked list it has.
+  const lastStepAt = useRef(0);
+  const step = useCallback(
+    (action: 'scroll_next' | 'scroll_prev') => {
+      const now = Date.now();
+      if (now - lastStepAt.current < SCROLL.settleMs) return;
+      lastStepAt.current = now;
+      flushDwell();
+      feed.dispatch({ kind: action });
+    },
+    [feed, flushDwell],
+  );
 
-  const prev = useCallback(() => {
-    flushDwell();
-    feed.dispatch({ kind: 'scroll_prev' });
-  }, [feed, flushDwell]);
+  const next = useCallback(() => step('scroll_next'), [step]);
+
+  const prev = useCallback(() => step('scroll_prev'), [step]);
 
   // ---- Gestures ----------------------------------------------------------
-  // The pan runs on the UI thread and only crosses to JS when a swipe resolves;
-  // mode switching and promote must never depend on a JS round trip.
-  const pan = useMemo(
-    () =>
-      Gesture.Pan()
-        .minDistance(18)
-        .onEnd((event) => {
-          const horizontal = Math.abs(event.translationX) > Math.abs(event.translationY);
-          if (horizontal) {
-            if (event.translationX < -40) runOnJS(switchMode)('left');
-            else if (event.translationX > 40) runOnJS(switchMode)('right');
-            return;
-          }
-          if (event.translationY < -40) runOnJS(next)();
-          else if (event.translationY > 40) runOnJS(prev)();
-        }),
-    [next, prev, switchMode],
-  );
+  // Owned by the two layouts. See the note at the top of this file.
 
   const sheetOpen = reviewsFor !== null || sellerFor !== null || menuFor !== null || reasonFor !== null;
 
@@ -340,108 +331,97 @@ export default function FeedScreen(): React.ReactElement {
             the stage is the whole window and the rail sits *outside* the
             column — anchored to the stage it lands off the right edge. */}
         <View style={{ width, height }}>
-        <GestureDetector gesture={pan}>
-          <Animated.View style={[{ width, height }, promoteStyle]}>
-            {feed.mode === 'single' && card ? (
-              <SingleCard
-                card={card}
+          {/* Both layouts stay mounted for the length of a zoom: the grid has
+              to be visible leaning about the tile, and the pane has to be
+              painting the product the whole way out of it. The window screen is
+              drawn first so the pane arrives on top of it. */}
+          {feed.mode === 'window' || zoom.active ? (
+            <Animated.View style={[styles.layer, { width, height }, zoom.gridStyle]}>
+              <WindowScreen
+                buffer={feed.buffer}
+                paneStart={paneStartIndex}
+                width={width}
+                height={height}
+                highlightIndex={feed.cursor}
+                reducedMotion={reducedMotion}
+                dataSaver={session.session?.user.settings.dataSaver ?? false}
+                onTap={tapTile}
+                onLongPress={(_index, tile) => setMenuFor(tile)}
+                onScroll={(direction) => (direction === 'next' ? next() : prev())}
+              />
+            </Animated.View>
+          ) : null}
+
+          {feed.mode === 'single' && card ? (
+            <Animated.View style={[styles.layer, { width, height }, zoom.paneStyle]}>
+              <PaneDeck
+                buffer={feed.buffer}
+                cursor={feed.cursor}
                 width={width}
                 height={height}
                 dataSaver={session.session?.user.settings.dataSaver ?? false}
-                showRailScrim={!layout.railOutside}
-                fullWidthMetadata={layout.railOutside}
-                onGalleryAdvance={() =>
+                reducedMotion={reducedMotion}
+                onScroll={(direction) => (direction === 'next' ? next() : prev())}
+                // Back returns to the remembered pane rather than to wherever
+                // scrolling has since carried the cursor.
+                onBack={() => switchMode('left')}
+                // The controls belong to the card, not to the stage: anchored
+                // to the stage they land off the right edge on desktop, where
+                // the column is narrower than the window.
+                renderActions={(target: ProductCard) => (
+                  <ActionBar
+                    card={target}
+                    upvoted={upvoted.has(target.productId)}
+                    inCart={cart.contains(target.productId)}
+                    onUpvote={() => toggleUpvote(target)}
+                    onUpvoteLongPress={() => setReasonFor(target)}
+                    onReviews={() => openReviews(target, false)}
+                    onReviewsLongPress={() => openReviews(target, true)}
+                    onCart={() => addToCart(target)}
+                    onCartLongPress={() => addToCart(target)}
+                    onShare={() => share(target)}
+                    onShareLongPress={() => share(target)}
+                  />
+                )}
+                onSeller={openSeller}
+                onGalleryAdvance={(target) =>
                   emit('gallery_advance', {
-                    productId: card.productId,
+                    productId: target.productId,
                     position: feed.cursor,
                     mode: feed.mode,
                   })
                 }
-                onGalleryEnd={() =>
-                  router.push({
-                    pathname: '/p/[clusterId]',
-                    params: { clusterId: card.clusterId ?? card.productId },
-                  })
-                }
-                onDoubleTap={() => toggleUpvote(card)}
-                onLongPress={() => setMenuFor(card)}
+                onDoubleTap={toggleUpvote}
+                onLongPress={setMenuFor}
               />
-            ) : null}
+            </Animated.View>
+          ) : null}
 
-            {feed.mode === 'window' ? (
-              <WindowGrid
-                tiles={pane}
-                width={width}
-                height={height}
-                startIndex={paneStartIndex}
-                highlightIndex={feed.cursor}
-                dataSaver={session.session?.user.settings.dataSaver ?? false}
-                onTap={tapTile}
-                onLongPress={(_index, tile) => setMenuFor(tile)}
-              />
-            ) : null}
-          </Animated.View>
-        </GestureDetector>
+          {/* Offline: the buffer keeps serving cached products behind a
+              persistent pill. Checkout is blocked, and this says why.
 
-        {/* The rail is the only standing furniture, and it is hidden entirely
-            in Window mode: you do not interact with a shop window. */}
-        {feed.mode === 'single' && card ? (
-          <ActionRail
-            card={card}
-            upvoted={upvoted.has(card.productId)}
-            inCart={cart.contains(card.productId)}
-            withLabels={layout.railOutside}
-            onSeller={() => openSeller(card)}
-            onSellerLongPress={() => setMenuFor(card)}
-            onUpvote={() => toggleUpvote(card)}
-            onUpvoteLongPress={() => setReasonFor(card)}
-            onReviews={() => openReviews(card, false)}
-            onReviewsLongPress={() => openReviews(card, true)}
-            onCart={() => addToCart(card)}
-            onCartLongPress={() => addToCart(card)}
-            onShare={() => share(card)}
-            onShareLongPress={() => share(card)}
-          />
-        ) : null}
+              A degraded page gets no banner. The ranking ladder falling back to
+              popularity changes which products are shown, not whether they can
+              be trusted or bought, so announcing it reports on the backend
+              rather than telling anyone something they can use. */}
+          {feed.offline ? (
+            <View style={styles.staleBar} pointerEvents="none">
+              <Text style={styles.staleText}>Offline — prices may be stale</Text>
+            </View>
+          ) : null}
 
-        {/* Offline: the buffer keeps serving cached products behind a
-            persistent bar. Checkout is blocked; the bar says why. */}
-        {feed.offline || feed.degraded ? (
-          <View style={styles.staleBar} pointerEvents="none">
-            <Text style={styles.staleText}>
-              {feed.offline
-                ? 'Offline — prices may be stale'
-                : 'Showing popular items while the feed catches up'}
-            </Text>
-          </View>
-        ) : null}
-
-        {/* The single coach mark in the product: a 2-second swipe hint,
-            dismissed on first swipe and never shown again. */}
-        {showSwipeHint && feed.mode === 'window' && card ? (
-          <SwipeHint onDone={() => setShowSwipeHint(false)} />
-        ) : null}
-
-        {/* The only way out of the enlarged view. The grid is where the user
-            came from, so this reads as "back", not as a mode switch — and it
-            returns to the remembered pane rather than to wherever scrolling
-            has since carried the cursor. */}
-        {feed.mode === 'single' ? (
-          <Pressable
-            onPress={() => switchMode('left')}
-            accessibilityRole="button"
-            accessibilityLabel="Back to the grid"
-            style={styles.back}
-            hitSlop={8}
-          >
-            <Icon name="back" size={22} />
-          </Pressable>
-        ) : null}
+          {/* The single coach mark in the product: a 2-second hint, dismissed
+              on first interaction and never shown again. */}
+          {showSwipeHint && feed.mode === 'window' && card ? (
+            <SwipeHint onDone={() => setShowSwipeHint(false)} />
+          ) : null}
         </View>
       </View>
 
       {layout.showKeyboardHints ? (
-        <Text style={styles.hints}>↑↓ scroll · tap to enlarge · Esc back · L upvote · C reviews · B cart</Text>
+        <Text style={styles.hints}>
+          ↑↓ scroll · tap to step closer · Esc back · L upvote · C reviews · B cart
+        </Text>
       ) : null}
 
       {reviewsFor?.card.clusterId ? (
@@ -530,6 +510,8 @@ function SwipeHint({ onDone }: { onDone(): void }): React.ReactElement {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.backdrop },
+  // The two layouts occupy the same rectangle so a zoom can hold both.
+  layer: { ...StyleSheet.absoluteFillObject },
   stage: { flex: 1, backgroundColor: COLORS.surface },
   stageCentred: { alignItems: 'center', justifyContent: 'center' },
   centre: {
@@ -541,16 +523,20 @@ const styles = StyleSheet.create({
   },
   plain: { color: COLORS.textPrimary, fontSize: TYPE.sizes.body },
   action: { color: COLORS.accent, fontSize: TYPE.sizes.body, fontWeight: TYPE.weights.semibold },
+  // A floating pill in the top right. Every other corner is spoken for: the
+  // back control has the top left, the price and similar-products link have the
+  // bottom, and the middle is the photograph.
   staleBar: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    paddingVertical: 8,
-    paddingHorizontal: SPACING.screenMargin,
-    backgroundColor: 'rgba(0,0,0,0.72)',
+    top: 14,
+    right: 14,
+    maxWidth: '62%',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.78)',
   },
-  staleText: { color: COLORS.textSecondary, fontSize: TYPE.sizes.small },
+  staleText: { color: COLORS.textSecondary, fontSize: TYPE.sizes.small, textAlign: 'right' },
   hint: {
     position: 'absolute',
     bottom: '42%',
@@ -560,15 +546,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
   },
   hintText: { color: COLORS.textPrimary, fontSize: TYPE.sizes.small },
-  back: {
-    position: 'absolute',
-    top: 12,
-    left: 8,
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   hints: {
     position: 'absolute',
     bottom: 12,

@@ -18,8 +18,6 @@ export interface LayoutInfo {
   /** Width of the feed column itself. */
   columnWidth: number;
   columnHeight: number;
-  /** True when the rail sits outside the column, with labels. */
-  railOutside: boolean;
   /** True when the feed is a centred column on a dimmed backdrop. */
   centred: boolean;
   showKeyboardHints: boolean;
@@ -43,7 +41,6 @@ export function useLayout(): LayoutInfo {
       breakpoint,
       columnWidth: width,
       columnHeight: height,
-      railOutside: false,
       centred: false,
       showKeyboardHints: false,
       isWeb: Platform.OS === 'web',
@@ -62,9 +59,6 @@ export function useLayout(): LayoutInfo {
     breakpoint,
     columnWidth,
     columnHeight,
-    // Below 1024 px the rail stays overlaid inside the column; above it, the
-    // rail moves out beside the column and gains labels.
-    railOutside: breakpoint === 'desktop' || breakpoint === 'wide',
     centred: true,
     showKeyboardHints: breakpoint === 'desktop' || breakpoint === 'wide',
     isWeb: Platform.OS === 'web',

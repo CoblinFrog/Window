@@ -1,22 +1,15 @@
-import {
-  QUALITY_WEIGHTS,
-  clamp,
-  cosine,
-  meanVector,
-  type SourceDoc,
-} from '@window/shared';
+import type { SourceDoc } from '@window/shared';
 import { connectDatabase } from '../db/supabase-client.js';
-import type { Category, Product } from '../db/supabase-collections.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
-import { engagementScore } from '../ingestion/quality.js';
 import { EbayBrowseAdapter, fromEnv as ebayFromEnv } from '../ingestion/adapters/ebay-browse.js';
 import { AmazonPaapiAdapter, fromEnv as amazonFromEnv } from '../ingestion/adapters/amazon-paapi.js';
 import type { CrawlContext, RawListing, SourceAdapter } from '../ingestion/types.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline } from '../media/pipeline.js';
-import { count, deleteMany, find, findOne, updateOne } from '../db/supabase-helpers.js';
+import { count, deleteMany, updateOne } from '../db/supabase-helpers.js';
+import { bootstrapCoOccurrence, primeEngagement, recomputeCentroids } from './catalog-lib.js';
 
 const log = logger.child('ingest-api');
 
@@ -298,102 +291,6 @@ async function main(): Promise<void> {
   });
 
   await db.close();
-}
-
-/**
- * A catalog this small has no measured engagement at all, and a zero CTR makes
- * the `ctr` term a constant rather than a signal. Everything starts at the
- * category mean, which is the honest prior for a product nobody has seen.
- */
-async function primeEngagement(
-  collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
-): Promise<void> {
-  const products = await find(collections.products, { status: 'active' }, { select: 'id,quality' });
-
-  for (const product of products) {
-    const term = engagementScore({
-      impressions: 200,
-      interactions: 8,
-      cartAdds: 1,
-      categoryMeanCtr: 0.04,
-      categoryMeanCartRate: 0.012,
-    });
-    const next = clamp(
-      (product.quality?.score ?? 0) +
-        QUALITY_WEIGHTS.engagement * (term - (product.quality?.engagement ?? 0)),
-      0,
-      1,
-    );
-    await updateOne(collections.products, { id: product.id }, {
-      engagement: { impressions: 200, interactions: 8, ctrSmoothed: 0.04, cartAdds: 1 },
-      quality: {
-        ...(product.quality || {}),
-        engagement: Math.round(term * 1000) / 1000,
-        score: Math.round(next * 1000) / 1000,
-      },
-    });
-  }
-}
-
-/**
- * Onboarding seeds the user vector from L1 centroids, so a topic with no
- * centroid cannot be picked. With only twenty products most of the taxonomy has
- * no members at all, so every empty node falls back to its own name vector —
- * otherwise the picker offers eighteen tiles and fifteen of them produce a
- * cold-start vector of zeroes.
- */
-async function recomputeCentroids(
-  collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
-  now: Date,
-): Promise<void> {
-  const embedder = localEmbeddingProvider();
-
-  for (const level of [3, 2, 1] as const) {
-    const nodes = await find(collections.categories, { level });
-
-    for (const node of nodes) {
-      const field = level === 1 ? 'category.l1' : level === 2 ? 'category.l2' : 'category.l3';
-      const members = await find(collections.products, { [field]: node.id, status: 'active' }, { select: 'embedding', limit: 500 });
-
-      const centroid =
-        members.length > 0
-          ? meanVector(members.map((m) => m.embedding))
-          : await embedder.embedText(node.displayName);
-
-      await updateOne(collections.categories, { id: node.id }, {
-        centroid,
-        centroidComputedAt: now,
-        memberCount: members.length,
-        engagement: {
-          ...(node.engagement || {}),
-          productCount: members.length,
-        },
-      });
-    }
-  }
-  log.info('centroids recomputed (empty categories fall back to their name vector)');
-}
-
-async function bootstrapCoOccurrence(
-  collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
-): Promise<void> {
-  const nodes = await find(collections.categories, { level: 1 });
-
-  for (const node of nodes) {
-    if (!node.centroid) continue;
-    const pairs = nodes
-      .filter((other) => other.id !== node.id && other.centroid)
-      .map((other) => ({
-        topic: other.id,
-        lift:
-          Math.round(clamp(1 + cosine(node.centroid as number[], other.centroid as number[]) * 2.5, 0.2, 4) * 100) /
-          100,
-      }))
-      .sort((a, b) => b.lift - a.lift)
-      .slice(0, 8);
-
-    await updateOne(collections.categories, { id: node.id }, { coOccurrence: pairs });
-  }
 }
 
 main().catch((error) => {

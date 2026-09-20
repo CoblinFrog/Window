@@ -6,4 +6,5 @@ export * from './api.js';
 export * from './errors.js';
 export * from './vector.js';
 export * from './cursor.js';
+export * from './pane.js';
 export * from './util.js';

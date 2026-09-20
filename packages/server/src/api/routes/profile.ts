@@ -25,7 +25,7 @@ import {
 import { issueEmailChallenge, normalizeEmail, verifyEmailChallenge } from '../claims.js';
 import { objectIdSchema, opaqueSecretSchema } from '../validation.js';
 import {
-  count as countRows,
+  count,
   deleteMany,
   deleteOne,
   find,
@@ -239,14 +239,16 @@ export function profileRoutes(ctx: AppContext): Router {
       const parsed = settingsSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid settings patch.');
 
-      if (Object.keys(parsed.data).length === 0) {
-        throw ApiError.validation('No settings supplied.');
-      }
+      const settingsPatch = Object.fromEntries(
+        Object.entries(parsed.data).filter(([, value]) => value !== undefined),
+      );
+      if (Object.keys(settingsPatch).length === 0) throw ApiError.validation('No settings supplied.');
 
-      await updateOne<User>(collections.users, { id: user.id }, {
-        settings: { ...user.settings, ...parsed.data },
-        updatedAt: new Date(),
-      } as Partial<User>);
+      await updateOne(
+        collections.users,
+        { id: user.id },
+        { settings: { ...user.settings, ...settingsPatch }, updatedAt: new Date() },
+      );
       res.status(204).end();
     } catch (error) {
       next(error);
@@ -566,17 +568,17 @@ export function profileRoutes(ctx: AppContext): Router {
         });
       }
 
-      const count = await countRows(collections.reports, { productId, status: 'open' });
+      const reportCount = await count(collections.reports, { productId, status: 'open' });
       
       // Update product risk reports count
-      const updatedProduct = { ...product, risk: { ...product.risk, reports: { count, upheld: product.risk.reports.upheld } } };
+      const updatedProduct = { ...product, risk: { ...product.risk, reports: { count: reportCount, upheld: product.risk.reports.upheld } } };
       await updateOne(
         collections.products,
         { id: productId },
         { risk: updatedProduct.risk },
       );
 
-      if (count >= 3 && product.risk.tier !== 'high' && product.risk.tier !== 'blocked') {
+      if (reportCount >= 3 && product.risk.tier !== 'high' && product.risk.tier !== 'blocked') {
         await updateOne(
           collections.products,
           { id: productId },
@@ -584,7 +586,7 @@ export function profileRoutes(ctx: AppContext): Router {
         );
       }
 
-      res.status(202).json({ reports: count });
+      res.status(202).json({ reports: reportCount });
     } catch (error) {
       next(error);
     }

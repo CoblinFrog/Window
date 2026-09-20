@@ -20,7 +20,9 @@ export type RejectReason =
   | 'title_too_short'
   | 'classification_confidence'
   | 'blocked_domain'
-  | 'scam_heuristic';
+  | 'scam_heuristic'
+  /** The same product is already stocked from this same storefront. */
+  | 'duplicate_listing';
 
 export interface GateInput {
   title: string;

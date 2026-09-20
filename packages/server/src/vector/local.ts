@@ -144,7 +144,8 @@ export class LocalVectorIndex implements VectorSearch {
       if (query.filter.inStock && this.inStock[row] === 0) continue;
       if (query.filter.priceMax && this.price[row] > query.filter.priceMax) continue;
       if (query.filter.priceMin && this.price[row] < query.filter.priceMin) continue;
-      if (query.filter.excludeBrands && this.brand[row] && query.filter.excludeBrands.includes(this.brand[row].toLowerCase())) continue;
+      const brand = this.brand[row];
+      if (query.filter.excludeBrands && brand && query.filter.excludeBrands.includes(brand.toLowerCase())) continue;
       if (query.filter.excludeSellerIds && this.sellerId[row] && query.filter.excludeSellerIds.includes(this.sellerId[row])) continue;
 
       let dot = 0;

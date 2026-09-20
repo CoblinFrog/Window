@@ -133,7 +133,8 @@ export interface ClusterResponse {
 
 export interface ReviewItem {
   id: string;
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   excerpt: string;
   authorHandle: string | null;

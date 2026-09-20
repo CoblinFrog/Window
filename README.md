@@ -21,36 +21,91 @@ client and server share them rather than agreeing to keep two copies aligned.
 
 ## Running it
 
-Prerequisites: Node 20+ and a MongoDB reachable at `MONGO_URL`.
+Prerequisites: Node 20+, a Supabase project, and npm. The current server uses
+Supabase/Postgres as its primary database. Copy the server environment template
+and set the Supabase credentials before starting the API:
 
 ```bash
+cd Window
+cp packages/server/.env.example packages/server/.env
+# Edit packages/server/.env and set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY
 npm install
 npm run build -w @window/shared
-
-# MongoDB, if you don't already have one running
-.data/tmp/mongodb-macos-aarch64-8.0.4/bin/mongod \
-  --dbpath .data/mongo --port 27017 --bind_ip 127.0.0.1 \
-  --logpath .data/logs/mongod.log --fork
-
-npm run seed          # ~12k synthetic products through the real pipeline, ~6 min
-npm run ingest -w @window/server   # ~2k REAL listings from public Shopify stores
-npm run dev:server    # http://127.0.0.1:4000
-npm run dev:web       # http://localhost:8081
 ```
+
+Start the API and web client in separate terminals:
+
+```bash
+# Terminal 1 — API at http://127.0.0.1:4000
+npm run dev:server
+
+# Terminal 2 — Expo web at http://localhost:8081
+npm run dev:web
+```
+
+Wait for `window api listening` before opening the web app. Verify the API with:
+
+```bash
+curl -s http://127.0.0.1:4000/health
+```
+
+The health response should include `"ok":true`. Do not use the root `npm run
+dev` command for the current Supabase setup: it runs the legacy seed process
+first, and that process may fail on Supabase's protected delete operations.
 
 `ingest` checks each store's robots.txt, reads the public `/products.json`
 feed at 0.5 req/s, fetches each image once and stores it on our own origin.
 `--store <domain>`, `--pages N` and `--fresh` narrow or reset it.
 
+For a physical device, start Expo from `packages/app` and use the Metro host
+address rather than `localhost`:
+
+```bash
+cd packages/app
+npx expo start --clear
+```
+
+The client derives the development machine's address from Expo unless
+`EXPO_PUBLIC_API_URL` is explicitly set.
+
 Verify:
 
 ```bash
-npm test                              # 154 unit tests, 34 of them security
-npm run smoke -w @window/server       # 62 end-to-end assertions, needs a running server
-curl -s localhost:4000/health
+npm test                              # server unit tests, including the security suite
+npm run smoke -w @window/server       # needs a running server
+curl -s http://127.0.0.1:4000/health
 ```
 
-`npm run seed -- --count 2000` for a faster catalog.
+## Development fixture products
+
+To populate the configured Supabase project with four deterministic products,
+run the idempotent fixture script from the server package:
+
+```bash
+cd Window/packages/server
+npx tsx --env-file-if-exists=.env insert-dummy-products.ts
+```
+
+The script creates or updates one demo seller and these active products:
+
+- Wireless Bluetooth Headphones
+- USB-C Charging Cable (2m, Braided)
+- Portable Power Bank 10000mAh
+- Adjustable Aluminium Phone Stand
+
+It generates media through the local media pipeline and creates 1024-dimensional
+embeddings, so the products can be returned by the feed and displayed by the
+web app. Re-running the command is safe.
+
+If onboarding has already completed in a browser, reset its development device
+identity in the browser console:
+
+```js
+localStorage.removeItem('window.deviceUserId')
+location.reload()
+```
+
+On native development builds, clear app storage or reinstall the app.
 
 ## How the pieces fit
 
@@ -88,17 +143,28 @@ the control list, and the honest inventory of what is still open.
 
 ## Configuration
 
+Set these in `packages/server/.env` unless noted otherwise:
+
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `MONGO_URL` | `mongodb://127.0.0.1:27017` | Point at Atlas to use real `$vectorSearch` |
-| `ATLAS_VECTOR_SEARCH` | `0` | `1` enables the Atlas retrieval path |
+| `SUPABASE_URL` | project URL | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | unset | Required by the server and fixture script; keep it private |
+| `PUBLIC_URL` | `http://127.0.0.1:4000` | Origin used in generated media URLs |
+| `PORT` | `4000` | API port |
 | `REDIS_URL` | unset | Falls back to an in-process cache |
+| `EXPO_PUBLIC_API_URL` | auto-detected | Client API base; set explicitly for a deployed or device-accessible API |
+| `ATLAS_VECTOR_SEARCH` | `0` | Legacy/optional Atlas retrieval flag; local development uses the in-process vector index |
 | `REAP_API_KEY` / `REAP_BASE_URL` | unset | Without these, checkout uses the simulated rail |
 | `EXPO_PUBLIC_API_URL` | `http://127.0.0.1:4000` | API base for the client |
 | `AUTH_SECRET` | ephemeral | Signs session tokens. **Required in production**; the server refuses to boot without it |
 | `INTERNAL_TOKEN` | ephemeral | Guards `/internal`. **Required in production** |
 | `CORS_ORIGINS` | Expo dev origins | Browser origins allowed to call the API. Empty by default in production |
 | `TRUST_PROXY_HOPS` | `0` | Reverse-proxy hops to trust for `X-Forwarded-For`. Must match the deployment |
+| `CHECKOUT_AGENT` | `simulated` | `browser` drives the merchant's own checkout with Playwright |
+| `SHOPIFY_CHECKOUT_DOMAINS` | unset | Stores whose robots.txt permits `/checkouts/` |
+
+The application embedding contract is currently **1024 dimensions**. Product
+rows with another vector length are not compatible with local ranking.
 
 ## What is real, and what is a seam
 
@@ -120,10 +186,10 @@ surface with RFC 9457 problems, per-principal rate limits and SSE.
 
 | Seam | Local | Real |
 | --- | --- | --- |
-| Vector search | Exhaustive in-process index, same filters and same scalar quantization | `$vectorSearch` on Atlas — already written, enabled by config |
+| Vector search | Exhaustive in-process index, same filters and same scalar quantization | `$vectorSearch` on Atlas — available behind config |
 | Embeddings | Deterministic 1024-d random-projection feature embedder | Any hosted multimodal provider behind `EmbeddingProvider` |
 | Media | Real source images fetched once and served from our origin; synthetic ones generated | A libvips-backed transcoder emitting AVIF/WebP at three widths |
-| eBay / Amazon | Official-API adapters that refuse without credentials | Set `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` or `AMAZON_ACCESS_KEY`/`AMAZON_SECRET_KEY`/`AMAZON_PARTNER_TAG` |
+| eBay / Amazon | Web adapters (`AmazonWebAdapter`, `EbayWebAdapter`) reading the storefronts through a primed browser-fingerprint fetch; `npm run ingest:web` crawls them with an agent driven by the `claude` CLI | Official-API adapters still take over when `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` or `AMAZON_ACCESS_KEY`/`AMAZON_SECRET_KEY`/`AMAZON_PARTNER_TAG` are set |
 | Cache | In-process TTL map | Redis, via `REDIS_URL` |
 | Review summary | Extractive, composed from measured theme statistics, labelled as generated | A hosted model behind `ReviewSummarizer` |
 | Checkout | `SimulatedMerchantAgent`, which injects the PRD's failure modes | A Playwright-backed `CheckoutBrowser`, or a protocol client |
@@ -137,11 +203,16 @@ thing this codebase could contain.
 
 **Real supply.** Shopify storefronts are ingested for real over their public
 `/products.json` — robots-checked, rate-limited, images fetched once and
-re-served from our origin rather than hotlinked. eBay and Amazon are reached
-through their official APIs (Browse and PA-API 5.0, the latter with a
-hand-rolled SigV4 signer verified against the published AWS test vectors); both
-refuse loudly without credentials and neither is ever scraped, because both
-sites' robots.txt disallow their item and search paths.
+re-served from our origin rather than hotlinked. eBay and Amazon are also read
+live: web adapters fetch the storefront HTML through a browser-impersonating
+helper that primes session cookies first, the browse agent (`claude -p` under
+the user's subscription) chooses which pages and items are worth opening, and
+eBay discovery additionally walks the BROWSE sitemap index its robots.txt
+advertises. `GET /v1/products/:id?live=1` re-fetches a card's source URL on
+tap, and the cart's just-in-time check verifies live price and stock. The
+official-API adapters (Browse and PA-API 5.0, the latter with a hand-rolled
+SigV4 signer verified against the published AWS test vectors) remain the
+preferred path whenever credentials exist.
 
 **Not implemented.** Tier-3 crawling needs a browser driver. Protocol-native
 checkout (ACP/MPP/TAP) is a defined interface with no client. OAuth token

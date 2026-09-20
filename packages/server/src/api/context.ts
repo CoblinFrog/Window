@@ -16,6 +16,8 @@ import type { EmbeddingProvider } from '../embedding/provider.js';
 import { EventCollector } from '../events/collector.js';
 import { FeedService } from '../feed/service.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
+import { AdapterVerifier, refreshProduct, type RefreshOutcome } from '../ingestion/live.js';
+import { IngestionPipeline } from '../ingestion/pipeline.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline, type MediaPipeline } from '../media/pipeline.js';
 import { RankingService } from '../ranking/service.js';
@@ -31,6 +33,9 @@ export interface AppContext {
   media: MediaPipeline;
   ranking: RankingService;
   feed: FeedService;
+  ingest: IngestionPipeline;
+  /** Re-fetch a product's listing from its source URL and upsert the result. */
+  refreshProduct(product: import('../db/supabase-collections.js').Product): Promise<RefreshOutcome>;
   cart: CartService;
   /** The checkout data boundary; swapping it swaps the backing store. */
   repository: CheckoutRepository;
@@ -68,9 +73,34 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
 
   const ranking = new RankingService({ collections: db.collections, vectors, config });
   const feed = new FeedService({ collections: db.collections, ranking, vectors, cache });
+  // Supabase has no `distinct`, so the brand dictionary is deduplicated here.
+  // The pipeline only needs the set of known brands, not their counts.
+  const { data: brandRows } = await db.collections.products.select('brand');
+  const brandDictionary = [
+    ...new Set(
+      ((brandRows ?? []) as Array<{ brand?: unknown }>)
+        .map((row) => row.brand)
+        .filter((brand): brand is string => typeof brand === 'string' && brand !== ''),
+    ),
+  ];
+  const ingest = new IngestionPipeline({
+    collections: db.collections,
+    embedder,
+    classifier,
+    media: mediaPipeline(),
+    brandDictionary,
+    onProductUpserted: (product) => vectors.onProductUpserted?.(product),
+  });
+  const refreshDeps = { collections: db.collections, pipeline: ingest };
+
   const repository = new SupabaseCheckoutRepository(db.client);
-  const cart = new CartService({ repository });
+  // The live verifier re-checks price and stock against the merchant at the
+  // moment the cart is opened, which is the freshness guarantee the cart
+  // actually promises. It satisfies the same `StockVerifier` seam the stored
+  // reader did, so the cart's own logic is unchanged.
+  const cart = new CartService({ repository, verifier: new AdapterVerifier(refreshDeps) });
   const coupons = new CouponStore(repository);
+
   // The browser fleet is only constructed when it is actually going to run.
   // Launching Chromium for a deployment using the simulated rail would be a
   // hundred megabytes of process for nothing.
@@ -115,6 +145,8 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     media: mediaPipeline(),
     ranking,
     feed,
+    ingest,
+    refreshProduct: (product) => refreshProduct(refreshDeps, product),
     cart,
     repository,
     checkout,

@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { env } from '../config/env.js';
 import { connectDatabase } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { find } from '../db/supabase-helpers.js';
+import type { Product } from '../db/supabase-collections.js';
 
 const log = logger.child('prune-media');
 
@@ -47,12 +49,12 @@ async function main(): Promise<void> {
 
   // Every image any live product can still request: heroes and galleries alike.
   const reachable = new Set<string>();
-  const cursor = db.collections.products.find(
-    {},
-    { projection: { 'media.hero.avif': 1, 'media.gallery.avif': 1 } },
-  );
+  const products = await find<Product>(db.collections.products, {}, {
+    select: 'media',
+    limit: 10000,
+  });
 
-  for await (const product of cursor) {
+  for (const product of products) {
     for (const url of product.media?.hero?.avif ?? []) {
       const key = keyFromUrl(url);
       if (key) reachable.add(key);

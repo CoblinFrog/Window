@@ -483,8 +483,35 @@ describe('review buckets and ratings', () => {
       ...Array.from({ length: 9 }, () => review({ rating: 1, source: { domain: 'small.example', url: 'u' } })),
     ];
     const combined = combineRatings(reviews);
-    assert.ok(combined.meanRating > 4.9, `mean was ${combined.meanRating}`);
+    // Every review here carries a score, so the mean is not the nullable case;
+    // saying so first is what lets the comparison below be a comparison.
+    assert.notEqual(combined.meanRating, null, 'nine hundred scores must produce a mean');
+    assert.ok((combined.meanRating ?? 0) > 4.9, `mean was ${combined.meanRating}`);
     assert.equal(combined.perSource.length, 2, 'the breakdown stays visible');
+  });
+
+  it('averages over the reviews that carry a score, not over all of them', () => {
+    // Most Amazon reviews are text with no star. Dividing the rated total by
+    // the full count dragged a 4.5-star product down to roughly 1.0.
+    const reviews = [
+      ...Array.from({ length: 9 }, () => review({ rating: 4.5 })),
+      ...Array.from({ length: 31 }, () => review({ rating: null })),
+    ];
+    const combined = combineRatings(reviews);
+
+    assert.equal(combined.count, 40, 'every review still counts toward the total');
+    assert.equal(combined.ratedCount, 9);
+    assert.equal(combined.meanRating, 4.5, `mean was ${combined.meanRating}`);
+  });
+
+  it('reports no mean at all when nothing carries a score', () => {
+    // Zero would render as a one-star product; the absence of a score is not
+    // the same as a bad one.
+    const combined = combineRatings(Array.from({ length: 12 }, () => review({ rating: null })));
+
+    assert.equal(combined.count, 12);
+    assert.equal(combined.ratedCount, 0);
+    assert.equal(combined.meanRating, null);
   });
 
   it('lets the star rating dominate sentiment over a stray negative word', () => {
@@ -627,7 +654,7 @@ describe('quad coherence', () => {
 
   const tile = (id: string, l2: string, price: number) =>
     ({
-      _id: { toHexString: () => id, equals: (other: { toHexString(): string }) => other.toHexString() === id },
+      id,
       category: { l1: 'tech', l2, l3: 'x' },
       price: { amount: price, currency: 'USD' },
     }) as never;
@@ -764,7 +791,7 @@ describe('coupon outcomes', () => {
 
 describe('tier-1 API adapter routing', () => {
   const sourceFor = (domain: string) => {
-    const source = SOURCE_REGISTRY.find((candidate) => candidate._id === domain);
+    const source = SOURCE_REGISTRY.find((candidate) => candidate.id === domain);
     assert.ok(source !== undefined, `${domain} must be in the registry`);
     return source;
   };

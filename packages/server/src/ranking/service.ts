@@ -220,7 +220,7 @@ export class RankingService {
       categoryMeanCtr: new Map(
         [...categories.values()]
           .filter((c) => c.level === 2)
-          .map((c) => [c._id, c.engagement.medianCtr]),
+          .map((c) => [c.id, c.engagement.medianCtr]),
       ),
       now,
     };

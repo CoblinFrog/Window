@@ -1,3 +1,5 @@
+import type { MediaImage } from './types.js';
+
 import type { Money } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -168,4 +170,20 @@ export function daysBetween(a: Date, b: Date): number {
 
 export function isoDay(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/**
+ * The url a client should load for an image.
+ *
+ * The source's own copy is preferred when we have it: it is already on the
+ * origin's CDN, close to the viewer, and costs us no bandwidth. Our transcoded
+ * derivatives remain the fallback — synthetic imagery has no origin, and older
+ * rows were stored before the source url was recorded.
+ *
+ * `dataSaver` picks the narrowest derivative. It cannot narrow an origin url,
+ * whose dimensions are the source's to choose, so the derivative wins there.
+ */
+export function imageUri(image: MediaImage, dataSaver = false): string | undefined {
+  if (dataSaver) return image.avif[0] ?? image.webp[0] ?? image.sourceUrl ?? undefined;
+  return image.sourceUrl ?? image.avif[1] ?? image.avif[0] ?? image.webp[0] ?? undefined;
 }

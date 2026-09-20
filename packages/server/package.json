@@ -14,7 +14,10 @@
     "smoke": "tsx --env-file-if-exists=.env src/scripts/smoke.ts",
     "ingest": "tsx --env-file-if-exists=.env src/scripts/ingest.ts",
     "ingest:api": "tsx --env-file-if-exists=.env src/scripts/ingest-api.ts",
-    "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts"
+    "ingest:web": "tsx --env-file-if-exists=.env src/scripts/ingest-web.ts",
+    "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts",
+    "ingest:listings": "tsx --env-file-if-exists=.env src/scripts/ingest-listings.ts",
+    "fill": "tsx --env-file-if-exists=.env src/scripts/fill-catalog.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",

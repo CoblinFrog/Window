@@ -117,6 +117,13 @@ export interface MediaImage {
   width: number;
   height: number;
   blurhash: string;
+  /**
+   * The image as the source publishes it, kept so clients can load it straight
+   * from the origin CDN instead of through our own media route. `null` for
+   * synthetic imagery, which has no remote original — those still render from
+   * the urls above.
+   */
+  sourceUrl?: string | null;
 }
 
 export interface MediaVideo {
@@ -262,7 +269,14 @@ export interface ClusterDoc<Id = string> {
   embedding: number[];
   reviews: {
     count: number;
-    meanRating: number;
+    /**
+     * Mean over the reviews that carry a score, on a 5-point scale. `null` when
+     * none of them do — most Amazon reviews are text without a star, and
+     * reporting those as 0 would read as a one-star product.
+     */
+    meanRating: number | null;
+    /** How many of `count` carried a score and so fed `meanRating`. */
+    ratedCount: number;
     perSource: Array<{ domain: string; count: number; meanRating: number }>;
     summary: { text: string; generatedAt: Date; modelVersion: string } | null;
     themes: ReviewTheme[];
@@ -445,7 +459,8 @@ export interface ReviewDoc<Id = string> {
   id: Id;
   clusterId: Id;
   source: { domain: string; url: string };
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   /** <= 400 chars, never the full text. */
   excerpt: string;
@@ -682,6 +697,8 @@ export interface ProductCard {
     rating: number | null;
   };
   category: CategoryRef;
+  /** The listing this card came from, for linking back to the storefront. */
+  sourceUrl: string | null;
   badges: CardBadges;
   media: {
     hero: MediaImage;
