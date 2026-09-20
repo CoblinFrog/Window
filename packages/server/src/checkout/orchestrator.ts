@@ -17,13 +17,17 @@ import { cacheKeys, type KeyValueCache } from '../cache/index.js';
 import { checkoutInterstitial } from '../ingestion/risk.js';
 import {
   AgentAbort,
+  BrowserCheckoutAgent,
   SimulatedMerchantAgent,
   type AgentPrompt,
   type AgentSession,
   type AgentToolCall,
   type CheckoutAgent,
+  type CheckoutBrowser,
   type CheckoutLineItem,
+  type FieldMap,
 } from './agent.js';
+import type { VaultHandle } from './vault.js';
 import { CouponStore, bestCouponOutcome, stackableSubset } from './coupons.js';
 import {
   DEFAULT_SPEND_RULES,
@@ -49,6 +53,14 @@ export interface OrchestratorDeps {
    * the simulator is what runs when neither is configured.
    */
   agentFor?: (merchantDomain: string) => Promise<CheckoutAgent>;
+  /** The browser fleet, when `CHECKOUT_AGENT=browser`. */
+  browser?: CheckoutBrowser | null;
+  /** Per-merchant selector maps. No map means hand off rather than guess. */
+  fieldMapFor?: (merchantDomain: string) => FieldMap | null;
+  /** The user's delivery details, encrypted for the life of the job. */
+  vaultFor?: () => VaultHandle | null;
+  /** Origin override, so a test can point a merchant at a local fixture. */
+  originFor?: (merchantDomain: string) => string;
 }
 
 interface PendingPrompt {
@@ -694,6 +706,18 @@ export class CheckoutOrchestrator {
     // runs — and it is named a simulator precisely so that nobody mistakes a
     // green checkout here for a real one.
     const source = await this.deps.repository.getSource(merchantDomain);
+
+    if (env.checkoutAgent === 'browser') {
+      // A field map is required: without one we do not know this merchant's
+      // form, and guessing selectors on a live checkout fills the wrong field.
+      // `BrowserCheckoutAgent` aborts to a deep-link handoff in that case.
+      return new BrowserCheckoutAgent(this.deps.browser ?? null, {
+        fieldMapFor: (domain) => this.deps.fieldMapFor?.(domain) ?? null,
+        vault: this.deps.vaultFor?.() ?? null,
+        ...(this.deps.originFor ? { originFor: this.deps.originFor } : {}),
+      });
+    }
+
     return new SimulatedMerchantAgent({
       stepDelayMs: env.agentStepDelayMs,
       automaticPromotionPct: source?.checkout.stackableCoupons ? 5 : 0,

@@ -98,6 +98,18 @@ export const env = {
    */
   trustProxyHops: int('TRUST_PROXY_HOPS', 0),
 
+  /**
+   * Which checkout agent runs.
+   *
+   * `simulated` is the default and is named as a simulator so nobody mistakes a
+   * green checkout for a real one. `browser` drives the merchant's own checkout
+   * with Playwright — only meaningful where a field map exists for the merchant
+   * and its robots.txt permits the path.
+   */
+  checkoutAgent: str('CHECKOUT_AGENT', 'simulated') as 'simulated' | 'browser',
+  /** Headful, for watching a checkout run during development. */
+  checkoutHeadful: bool('CHECKOUT_HEADFUL', false),
+
   /** Simulated merchant latency for the checkout agent, in milliseconds. */
   agentStepDelayMs: int('AGENT_STEP_DELAY_MS', 120),
 

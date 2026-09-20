@@ -1,9 +1,13 @@
 import { DEFAULT_RANKING_CONFIG, type RankingConfig } from '@window/shared';
+import { env } from '../config/env.js';
 import { createCache, type KeyValueCache } from '../cache/index.js';
 import { CartService } from '../cart/service.js';
 import { CheckoutOrchestrator } from '../checkout/orchestrator.js';
 import { CouponStore } from '../checkout/coupons.js';
 import { SupabaseCheckoutRepository } from '../checkout/repository.supabase.js';
+import { PlaywrightCheckoutBrowser } from '../checkout/browser.js';
+import { fieldMapFor } from '../checkout/field-maps.js';
+import { VaultHandle, type ShippingDetails } from '../checkout/vault.js';
 import type { CheckoutRepository } from '../checkout/repository.js';
 import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
 import { connectDatabase, type DatabaseHandle } from '../db/index.js';
@@ -67,7 +71,29 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
   const repository = new SupabaseCheckoutRepository(db.client);
   const cart = new CartService({ repository });
   const coupons = new CouponStore(repository);
-  const checkout = new CheckoutOrchestrator({ repository, cache, coupons });
+  // The browser fleet is only constructed when it is actually going to run.
+  // Launching Chromium for a deployment using the simulated rail would be a
+  // hundred megabytes of process for nothing.
+  const browser =
+    env.checkoutAgent === 'browser'
+      ? new PlaywrightCheckoutBrowser({ headless: !env.checkoutHeadful })
+      : null;
+
+  const checkout = new CheckoutOrchestrator({
+    repository,
+    cache,
+    coupons,
+    browser,
+    fieldMapFor,
+    // Delivery details, held encrypted for the life of the job.
+    //
+    // A real deployment loads these from the user's saved address at job
+    // creation. That profile field does not exist yet, so development reads
+    // them from DEMO_SHIPPING — which is why it is named for what it is. With
+    // neither, there is no vault and the agent refuses rather than typing
+    // unresolved references into a merchant's form.
+    vaultFor: demoVaultFactory(),
+  });
   const events = new EventCollector({ collections: db.collections, cache, config });
   const mailer = createMailer();
   const oidc = createOidcVerifier();
@@ -101,4 +127,30 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
       await db.close();
     },
   };
+}
+
+/**
+ * Development-only delivery details, from `DEMO_SHIPPING` as JSON.
+ *
+ * Deliberately not a fallback to invented values: an agent that types a made-up
+ * address because none was configured would ship a real order to a real
+ * stranger. No configuration means no vault means the job refuses.
+ */
+function demoVaultFactory(): () => VaultHandle | null {
+  const raw = process.env.DEMO_SHIPPING;
+  if (!raw) return () => null;
+
+  let details: ShippingDetails;
+  try {
+    details = JSON.parse(raw) as ShippingDetails;
+  } catch {
+    logger.warn('DEMO_SHIPPING is not valid JSON; checkout will run without a vault');
+    return () => null;
+  }
+
+  logger.warn('using DEMO_SHIPPING for checkout delivery details', {
+    note: 'Development only. A deployment loads these from the user profile.',
+  });
+  // A fresh handle per job, so one job disposing it cannot blank another.
+  return () => new VaultHandle(details);
 }
