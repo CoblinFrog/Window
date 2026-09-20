@@ -120,7 +120,14 @@ export function commerceRoutes(ctx: AppContext): Router {
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
-      jobId: order.agentRun?.jobId ?? order.id,
+      // The order id, always.
+      //
+      // `agentRun.jobId` is an internal audit identifier minted when quoting
+      // starts, so returning it here meant a job's public id *changed* the
+      // moment it began working. The client keys its job map by this field:
+      // every later update landed under a new key and the card the user was
+      // watching sat at "Not started" forever while the job completed.
+      jobId: order.id,
       orderId: order.id,
       merchantDomain: order.merchantDomain,
       merchantName: source?.displayName ?? order.merchantDomain,

@@ -11,6 +11,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { goBackOrFeed } from '../src/navigation.js';
 import {
   COLORS,
   RADIUS,
@@ -436,7 +437,7 @@ export default function CheckoutScreen(): React.ReactElement {
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Control label="Back to cart" onPress={() => router.back()} style={styles.headerButton}>
+        <Control label="Back to cart" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
         </Control>
         <Text style={styles.headerTitle}>Checkout</Text>

@@ -28,6 +28,7 @@ import {
   type CartDiff,
 } from '../src/store/cart.js';
 import { useSession } from '../src/store/session.js';
+import { goBackOrFeed } from '../src/navigation.js';
 
 /**
  * The cart.
@@ -147,7 +148,7 @@ export default function CartScreen(): React.ReactElement {
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Control label="Back" onPress={() => router.back()} style={styles.headerButton}>
+        <Control label="Back" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
         </Control>
         <Text style={styles.headerTitle}>Cart</Text>
