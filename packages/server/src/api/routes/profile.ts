@@ -36,6 +36,15 @@ import {
 } from '../../db/supabase-helpers.js';
 import type { Category, Product, ReportDoc, User } from '../../db/supabase-collections.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
+import { logger } from '../../lib/logger.js';
+
+const log = logger.child('api.profile');
+
+/** What an L1 topic means, for embedding when no centroid has been computed. */
+function describeTopic(topic: string): string {
+  const node = getCategory(topic);
+  return node ? `${node.displayName}. ${topic.replace(/[._-]/g, ' ')}` : topic;
+}
 
 export function profileRoutes(ctx: AppContext): Router {
   const router = Router();
@@ -112,18 +121,42 @@ export function profileRoutes(ctx: AppContext): Router {
         throw ApiError.validation('Topics must be distinct.');
       }
 
+      // `$in`, not `in`: the Supabase helpers speak the Mongo filter dialect,
+      // and an unrecognised operator object is stringified into the query as
+      // "[object Object]" — a 500 rather than a no-match.
+      //
+      // The lookup is also allowed to fail outright. Taxonomy ids are slugs
+      // ("tech"), and `categories.id` is currently a uuid column, so Postgres
+      // refuses the comparison rather than returning nothing. Onboarding is the
+      // first thing a new user does; it must not be the thing a schema mismatch
+      // in an unrelated table takes down.
       const categories = await find<Category>(collections.categories, {
-        id: { in: topics },
+        id: { $in: topics },
         level: 1,
+      }).catch((error: unknown) => {
+        log.warn('category lookup failed; falling back to embedded topics', {
+          error: (error as Error).message,
+        });
+        return [] as Category[];
       });
-      const centroids = categories
+
+      let centroids = categories
         .map((c) => c.centroid)
         .filter((c): c is number[] => Array.isArray(c) && c.length > 0);
 
       if (centroids.length === 0) {
-        throw ApiError.internal(
-          'Category centroids have not been computed. Run the seeder or the nightly centroid job.',
+        // The nightly job computes each centroid as the mean of its best
+        // members' embeddings, which is sharper. But a catalog loaded without
+        // that job leaves onboarding impossible, and refusing to let anyone
+        // into the app is a worse failure than a slightly blunter seed vector.
+        // Embedding the topic's own description is what the taxonomy affords.
+        centroids = await Promise.all(
+          topics.map((topic) => ctx.embedder.embedText(describeTopic(topic))),
         );
+        log.warn('seeding the user vector from topic descriptions', {
+          reason: 'no category centroids are stored; run the seeder for sharper vectors',
+          topics,
+        });
       }
 
       const now = new Date();
