@@ -2,7 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { COLORS, SPACING, TYPE } from '@window/shared';
-import { api, setAuthToken } from '../src/api/client.js';
+import { api } from '../src/api/client.js';
 import { useSession } from '../src/store/session.js';
 
 /**
@@ -48,9 +48,10 @@ export default function ClaimScreen(): React.ReactElement {
     try {
       const { token } = await api.claimWithEmailCode(email.trim(), code.trim());
       // The claim regenerates the session, so the token minted before it is
-      // already revoked. Adopting the new one immediately keeps the next
-      // request from 401-ing on a credential that was valid a second ago.
-      setAuthToken(token);
+      // already revoked. This adopts the new one *and* clears the anonymous
+      // flag — the flag is what checkout reads, and leaving it set sends the
+      // user straight back to this screen.
+      session.markClaimed(token);
       setStage('done');
       await session.refreshSession().catch(() => undefined);
       router.back();

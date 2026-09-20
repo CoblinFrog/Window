@@ -81,6 +81,16 @@ export interface SessionState {
   error: string | null;
   boot(): Promise<void>;
   markOnboarded(): void;
+  /**
+   * Adopts the token a successful claim returned and drops the anonymous flag.
+   *
+   * The claim regenerates the session server-side, so the old token is already
+   * revoked — and `isAnonymous` is what every gate in the app reads. Refreshing
+   * the feed session is not enough: it refetches a ranked buffer and leaves the
+   * privilege flag exactly as it was, so checkout keeps asking for an email the
+   * user has just confirmed.
+   */
+  markClaimed(token: string): void;
   refreshSession(): Promise<void>;
 }
 
@@ -129,6 +139,11 @@ export const useSession = create<SessionState>((set, get) => ({
     } catch (error) {
       set({ status: 'error', error: (error as Error).message });
     }
+  },
+
+  markClaimed(token: string) {
+    setAuthToken(token);
+    set({ isAnonymous: false });
   },
 
   markOnboarded() {
