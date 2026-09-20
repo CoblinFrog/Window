@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   BUFFER_CONFIG,
+  CATALOG_WINDOW,
   INITIAL_CURSOR_STATE,
   PANE_SIZE,
   cursorReducer,
@@ -54,6 +55,36 @@ type FeedPageDegradation = 'cache' | 'topic_popularity' | 'global_popularity' | 
 let sessionId = `s_${Date.now().toString(36)}`;
 let inFlight: Promise<void> | null = null;
 
+/**
+ * When this session last asked the server to rotate the catalog window.
+ *
+ * Module state rather than store state: it is bookkeeping about a request, not
+ * something any view renders, and keeping it out of the store means a rotation
+ * never triggers a re-render of the feed.
+ */
+let lastRotationAt = 0;
+
+/**
+ * Advances the rolling catalog window once the cursor passes the threshold.
+ *
+ * Fire-and-forget by design. The rotation refills the catalog for later
+ * scrolling, so nothing on screen waits for it, and a failure is invisible.
+ * The cooldown is what makes scrolling back and forth across the threshold
+ * cost one crawl rather than one per crossing.
+ */
+function maybeRotateCatalog(cursor: number): void {
+  if (cursor < CATALOG_WINDOW.threshold) return;
+  const now = Date.now();
+  if (now - lastRotationAt < CATALOG_WINDOW.cooldownMs) return;
+  lastRotationAt = now;
+  void api.rotateCatalog({ add: CATALOG_WINDOW.add, drop: CATALOG_WINDOW.drop });
+}
+
+/** Test seam: forget that a rotation ever happened. */
+export function resetCatalogRotation(): void {
+  lastRotationAt = 0;
+}
+
 export function setFeedSessionId(id: string): void {
   sessionId = id;
 }
@@ -88,6 +119,10 @@ export const useFeed = create<FeedState>((set, get) => ({
     }
     set(next);
     void get().ensureBuffer(next.mode);
+
+    // Scrolling past the threshold is what ages the catalog: the listings
+    // behind the cursor have been seen and the ones ahead need restocking.
+    maybeRotateCatalog(next.cursor);
   },
 
   /**

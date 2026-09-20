@@ -33,7 +33,11 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 IMPERSONATE = ["chrome131", "chrome124", "safari180"]
-BLOCKED_STATUSES = {401, 403, 405, 429}
+# Kept in step with BLOCKED_STATUSES / CHALLENGE_MARKERS in primed-fetch.ts.
+# 503 is Amazon's automated-access refusal; "bm-verify" is Akamai Bot Manager's
+# interstitial, which arrives as a 200 and would otherwise be reported as a
+# clean page and parsed into listings.
+BLOCKED_STATUSES = {401, 403, 405, 429, 503}
 CHALLENGE_MARKERS = [
     "Just a moment",
     "cf_chl_opt",
@@ -43,6 +47,8 @@ CHALLENGE_MARKERS = [
     "validateCaptcha",
     "Enter the characters",
     "Enable JavaScript and cookies to continue",
+    "bm-verify",
+    "To discuss automated access to Amazon data",
 ]
 TIMEOUT = 30
 MAX_BODY_BYTES = 4 * 1024 * 1024

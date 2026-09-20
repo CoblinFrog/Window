@@ -173,7 +173,7 @@ export class IngestionPipeline {
     });
 
     if (!gate.passed) {
-      await this.recordRejection(raw, gate.reason as RejectReason, gate.detail, now);
+      await this.recordRejection(raw, gate.reason as RejectReason, gate.detail, now, seller.id);
       log.debug('listing rejected by the quality gate', {
         domain: raw.sourceDomain,
         sourceId: raw.sourceId,
@@ -195,7 +195,7 @@ export class IngestionPipeline {
     // as null, and a listing without a hero is not showable — so it is rejected
     // for the real reason rather than asserted away with a cast.
     if (!hero) {
-      await this.recordRejection(raw, 'no_acceptable_image', 'image could not be stored', now);
+      await this.recordRejection(raw, 'no_acceptable_image', 'image could not be stored', now, seller.id);
       return {
         status: 'rejected',
         productId: null,
@@ -207,15 +207,26 @@ export class IngestionPipeline {
     const heroImage: MediaImage = hero;
 
     // ---- Reviews ----------------------------------------------------------
-    const clusterId = match.cluster?.id ?? crypto.randomUUID();
-    const storedReviews = await this.storeReviews(raw, clusterId, now);
-
-    // ---- Quality ----------------------------------------------------------
-    const priors = this.deps.categoryPriors?.get(classification.l3) ?? DEFAULT_PRIORS;
     const existing = await findOne(collections.products, {
       'source.domain': raw.sourceDomain,
       'source.sourceId': raw.sourceId,
     });
+
+    // A listing we already store keeps the cluster it is already in. Matching
+    // is evidence-based and a product with no identifiers routinely matches
+    // nothing, so re-ingesting one minted a fresh cluster every time, repointed
+    // the product at it and left the previous cluster orphaned — one leaked row
+    // and its reviews per refresh.
+    const reusableClusterId = match.cluster?.id ?? existing?.clusterId ?? null;
+    const clusterId = reusableClusterId ?? crypto.randomUUID();
+    const clusterExists = reusableClusterId !== null;
+
+    // The corpus is resolved now because the quality score reads it, but it is
+    // written after the cluster row exists; see `persistReviews`.
+    const storedReviews = await this.computeReviews(raw, clusterId, now);
+
+    // ---- Quality ----------------------------------------------------------
+    const priors = this.deps.categoryPriors?.get(classification.l3) ?? DEFAULT_PRIORS;
 
     const completeness: ListingCompletenessInput = {
       heroShortEdge: Math.min(heroImage.width, heroImage.height),
@@ -305,8 +316,13 @@ export class IngestionPipeline {
     const status: ProductDoc['status'] = risk.tier === 'blocked' ? 'rejected' : 'active';
 
     // ---- Upsert -----------------------------------------------------------
+    // `products.cluster_id` and `product_clusters.canonical_product_id` point at
+    // each other, and neither column is deferrable, so a brand-new pair cannot
+    // be written in one order or the other. The product goes in first without a
+    // cluster, the cluster is created naming it as canonical, and the product is
+    // pointed at the cluster immediately below.
     const product: Omit<Product, 'id'> = {
-      clusterId,
+      clusterId: clusterExists ? clusterId : null,
       source: {
         domain: raw.sourceDomain,
         sourceId: raw.sourceId,
@@ -383,6 +399,34 @@ export class IngestionPipeline {
     const stored = upserted as Product | null;
     if (!stored) throw new Error('Product upsert returned no document.');
 
+    if (!clusterExists) {
+      await insert(collections.clusters, {
+        id: clusterId,
+        canonicalProductId: stored.id,
+        title,
+        brand,
+        category: { ...classification },
+        identifiers: raw.identifiers,
+        offerCount: 0,
+        priceRange: {
+          min: (price as { amount: number }).amount,
+          max: (price as { amount: number }).amount,
+          median: (price as { amount: number }).amount,
+          currency: (price as { currency: string }).currency,
+        },
+        sourceTypes: [raw.sourceType],
+        embedding,
+        reviews: { count: 0, meanRating: null, perSource: [], summary: null, themes: [], asOf: null },
+        engagement: { impressions: 0, ctrSmoothed: 0, upvotes: 0 },
+        updatedAt: now,
+      });
+      await updateOne(collections.products, { id: stored.id }, { clusterId });
+      stored.clusterId = clusterId;
+    }
+
+    // Both the reviews and the cluster's own figures depend on the cluster row,
+    // so neither can run before the block above.
+    await this.persistReviews(clusterId, storedReviews);
     await this.recomputeCluster(clusterId, classification, title, brand, raw, now);
     this.deps.onProductUpserted?.(stored);
 
@@ -402,25 +446,34 @@ export class IngestionPipeline {
     gallery: MediaImage[];
     bestShortEdge: number | null;
   }> {
+    // The declared order is only a hint for which image to try first. The web
+    // adapters parse markup that states no dimensions at all and so report
+    // zeroes, and a source's own claim about its images is not evidence anyway:
+    // the fetching pipeline measures the bytes and refuses anything under the
+    // eligibility floor, so `bestShortEdge` is taken from what was actually
+    // stored. Reading it from the declared values instead made every web
+    // listing look like a 0px image and rejected the entire crawl as
+    // `no_acceptable_image`.
     const sorted = [...raw.images].sort(
       (a, b) => Math.min(b.width, b.height) - Math.min(a.width, a.height),
     );
-    const bestShortEdge =
-      sorted.length > 0 ? Math.min((sorted[0] as { width: number; height: number }).width, (sorted[0] as { height: number }).height) : null;
 
-    let hero: MediaImage | null = null;
-    const gallery: MediaImage[] = [];
-
+    const stored: MediaImage[] = [];
     for (const image of sorted) {
       const ingested = await this.deps.media.ingestImage({
         sourceUrl: image.url,
         width: image.width,
         height: image.height,
       });
-      if (!ingested) continue;
-      if (!hero) hero = ingested;
-      else if (gallery.length < QUALITY_GATE.maxGalleryImages) gallery.push(ingested);
+      if (ingested) stored.push(ingested);
     }
+
+    const shortEdgeOf = (image: MediaImage): number => Math.min(image.width, image.height);
+    stored.sort((a, b) => shortEdgeOf(b) - shortEdgeOf(a));
+
+    const hero = stored[0] ?? null;
+    const gallery = stored.slice(1, 1 + QUALITY_GATE.maxGalleryImages);
+    const bestShortEdge = hero ? shortEdgeOf(hero) : null;
 
     return { hero, gallery, bestShortEdge };
   }
@@ -571,7 +624,16 @@ export class IngestionPipeline {
     return { cluster: null, strength: 'none' };
   }
 
-  private async storeReviews(raw: RawListing, clusterId: string, now: Date) {
+  /**
+   * Resolves the cluster's review corpus without writing it.
+   *
+   * `reviews.cluster_id` is a foreign key onto `product_clusters`, and a
+   * cluster cannot exist until one of its products does, so the rows cannot be
+   * inserted at the point the quality score needs to read them. Computing here
+   * and persisting in `persistReviews` once the cluster row exists keeps both
+   * constraints satisfiable.
+   */
+  private async computeReviews(raw: RawListing, clusterId: string, now: Date) {
     const { collections } = this.deps;
     if (raw.reviews.length === 0) {
       const stored = await find(collections.reviews, { clusterId }, { limit: REVIEW_FETCH_CAP });
@@ -611,18 +673,43 @@ export class IngestionPipeline {
       ...incoming,
     ];
 
-    const bucketed = bucketReviews(merged);
+    return bucketReviews(merged);
+  }
 
-    // The stored set is rewritten wholesale rather than diffed: bucket
-    // membership is a property of the corpus, not of a review, so one new
-    // critical review can move several others between buckets.
+  /**
+   * The stored set is rewritten wholesale rather than diffed: bucket
+   * membership is a property of the corpus, not of a review, so one new
+   * critical review can move several others between buckets.
+   */
+  private async persistReviews(
+    clusterId: string,
+    bucketed: Awaited<ReturnType<IngestionPipeline['computeReviews']>>,
+  ): Promise<void> {
+    const { collections } = this.deps;
     await deleteMany(collections.reviews, { clusterId });
-    if (bucketed.length > 0) {
-      await insertMany(collections.reviews,
-        bucketed.map((r) => ({ id: randomUUID(), clusterId, ...r })),
-      );
+    if (bucketed.length === 0) return;
+
+    const rows = bucketed.map((r) => ({ id: randomUUID(), clusterId, ...r }));
+    try {
+      await insertMany(collections.reviews, rows);
+    } catch (error) {
+      // `reviews.rating` is still `NOT NULL` in the deployed schema while the
+      // type has been nullable since review text without a star became a
+      // supported case — Amazon returns it on most reviews. Until
+      // 20260920000001_nullable_review_rating.sql is applied, dropping the
+      // unrated rows keeps the product whole; failing here instead aborted the
+      // ingest after the product and cluster were already written, leaving a
+      // half-built listing in the catalog. The retry is a no-op once migrated.
+      const rated = rows.filter((r) => r.rating != null);
+      if (!/rating/.test((error as Error).message) || rated.length === rows.length) throw error;
+
+      log.warn('storing only rated reviews; apply the nullable-rating migration', {
+        clusterId,
+        stored: rated.length,
+        dropped: rows.length - rated.length,
+      });
+      if (rated.length > 0) await insertMany(collections.reviews, rated);
     }
-    return bucketed;
   }
 
   private async findDuplicateImageSellers(
@@ -768,11 +855,19 @@ export class IngestionPipeline {
     await updateOne(collections.clusters, { id: clusterId }, update);
   }
 
+  /**
+   * `sellerId` is required because `products.seller_id` is `UUID NOT NULL`. The
+   * tombstone row is written after the seller has already been upserted, so the
+   * real id is always available — the placeholder empty string this used to
+   * write was not a uuid and failed the insert, which turned every ordinary
+   * rejection into a pipeline error and aborted the listing.
+   */
   private async recordRejection(
     raw: RawListing,
     reason: RejectReason,
     detail: string | null,
     now: Date,
+    sellerId: string,
   ): Promise<void> {
     const existing = await findOne(this.deps.collections.products, {
       'source.domain': raw.sourceDomain,
@@ -817,7 +912,13 @@ export class IngestionPipeline {
         auction: null,
         specs: [],
         media: { hero: null as any, gallery: [], video: null },
-        sellerId: '',
+        // `seller_id` is a uuid column in Postgres, where the empty string this
+        // carried under Mongo is not a value: it failed the whole write with
+        // "invalid input syntax for type uuid", so a rejected listing took the
+        // run down instead of being recorded as rejected. `embedding_version`
+        // stays an empty string — it is `TEXT NOT NULL`, and "" is the sentinel
+        // meaning the listing never reached the embedder.
+        sellerId,
         embedding: [],
         embeddingVersion: '',
         quality: { score: 0, cautions: [] },

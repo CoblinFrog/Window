@@ -52,7 +52,14 @@ function itemIdFrom(url: string): string | null {
 
 function elementText(html: string, element: HtmlElement): string {
   const raw = html.slice(element.contentStart, Math.max(element.contentStart, element.contentEnd));
-  return decodeEntities(raw.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  // Script and style bodies are not text. Stripping only the tags left their
+  // contents behind, so Amazon's `#availability` — which carries an inline
+  // `a-state` script beside the words — read as `In Stock {"isInternal":...}`
+  // and matched no stock token, marking every live listing out of stock.
+  const withoutCode = raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ' ');
+  return decodeEntities(withoutCode.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 
 function inside(elements: HtmlElement[], root: HtmlElement): HtmlElement[] {

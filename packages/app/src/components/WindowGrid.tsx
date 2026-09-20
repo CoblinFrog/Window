@@ -7,6 +7,7 @@ import {
   SPACING,
   TYPE,
   formatMoney,
+  imageUri,
   type ProductCard,
 } from '@window/shared';
 
@@ -60,7 +61,7 @@ export function WindowGrid({
         const index = startIndex + offset;
         const highlighted = index === highlightIndex;
         const hero = card.media.hero;
-        const uri = dataSaver ? (hero.avif[0] ?? hero.webp[0]) : (hero.avif[1] ?? hero.avif[0]);
+        const uri = imageUri(hero, dataSaver);
 
         return (
           <Pressable

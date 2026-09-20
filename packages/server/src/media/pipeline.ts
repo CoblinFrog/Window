@@ -111,6 +111,8 @@ export class GeneratedMediaPipeline implements MediaPipeline {
       width: largest,
       height: Math.round(largest / aspect),
       blurhash,
+      // Synthetic imagery is generated here; there is no origin to point at.
+      sourceUrl: null,
     };
   }
 

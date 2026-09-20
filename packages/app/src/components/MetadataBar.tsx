@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   COLORS,
   SPACING,
@@ -94,13 +94,27 @@ export function MetadataBar({ card, fullWidth = false }: MetadataBarProps): Reac
         ) : null}
       </View>
 
-      {/* Line 2: title, truncated to two lines, expandable on tap. */}
+      {/* Line 2: the title, which opens the listing it came from.
+          Expanding the truncation moves to a long press so the tap can carry
+          the link; a card with no source url keeps the old tap-to-expand. */}
       <Pressable
-        onPress={() => setExpanded((value) => !value)}
-        accessibilityRole="button"
-        accessibilityLabel={expanded ? 'Collapse title' : 'Expand title'}
+        onPress={() => {
+          if (card.sourceUrl) void Linking.openURL(card.sourceUrl);
+          else setExpanded((value) => !value);
+        }}
+        onLongPress={() => setExpanded((value) => !value)}
+        accessibilityRole={card.sourceUrl ? 'link' : 'button'}
+        accessibilityLabel={
+          card.sourceUrl
+            ? `${card.title}. Opens the listing on ${card.merchant.displayName}.`
+            : expanded ? 'Collapse title' : 'Expand title'
+        }
+        accessibilityHint={card.sourceUrl ? 'Long press to expand the full title' : undefined}
       >
-        <Text style={styles.title} numberOfLines={expanded ? undefined : 2}>
+        <Text
+          style={[styles.title, card.sourceUrl ? styles.titleLink : null]}
+          numberOfLines={expanded ? undefined : 2}
+        >
           {card.title}
         </Text>
       </Pressable>
@@ -191,6 +205,11 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: TYPE.sizes.body,
     lineHeight: TYPE.lineHeights.body,
+  },
+  // The only cue that the title leaves the app. Underline rather than a colour
+  // shift, which would not survive being drawn over arbitrary photography.
+  titleLink: {
+    textDecorationLine: 'underline',
   },
   price: {
     color: COLORS.textPrimary,

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { Image } from 'expo-image';
-import { COLORS, RADIUS, type ProductCard } from '@window/shared';
+import { COLORS, RADIUS, imageUri, type ProductCard } from '@window/shared';
 import { MetadataBar } from './MetadataBar.js';
 import { Scrim } from './Scrim.js';
 
@@ -69,7 +69,7 @@ export function SingleCard({
 
   // Data saver serves 480 px images; everything else takes the 1080 px variant,
   // which is under the 120 KB per-card budget at typical compression.
-  const sourceUri = dataSaver ? (image.avif[0] ?? image.webp[0]) : (image.avif[1] ?? image.avif[0]);
+  const sourceUri = imageUri(image, dataSaver);
 
   const handleTap = (): void => {
     const now = Date.now();

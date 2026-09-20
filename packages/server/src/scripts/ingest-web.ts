@@ -18,7 +18,7 @@ import type { SourceDoc } from '@window/shared';
 import { BrowseAgent } from '../agent/browse-agent.js';
 import { claudeCli } from '../agent/llm.js';
 import { connectDatabase } from '../db/supabase-client.js';
-import { deleteMany, updateOne } from '../db/supabase-helpers.js';
+import { count, deleteMany, findOne, insert, updateOne } from '../db/supabase-helpers.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import {
   AMAZON_WEB_DEFAULT_TERMS,
@@ -31,6 +31,7 @@ import {
 import { primedFetch } from '../ingestion/adapters/primed-fetch.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
+import { persistWebListings } from '../ingestion/web-persistence.js';
 import type {
   CrawlContext,
   RawListing,
@@ -201,7 +202,13 @@ async function main(): Promise<void> {
     const doc = target.domain === 'amazon.com'
       ? sourceDoc('amazon.com', 'Amazon', 'new')
       : sourceDoc('ebay.com', 'eBay', 'secondhand');
-    await updateOne(collections.sources, { id: target.domain }, doc);
+    // A web ingest must work on a fresh Supabase catalog as well as one seeded
+    // by the normal source-registry job. `updateOne` is intentionally update-only
+    // in the Supabase compatibility layer, so create the registry row when it is
+    // missing instead of failing before the first product reaches the pipeline.
+    const existing = await findOne(collections.sources, { id: target.domain });
+    if (existing) await updateOne(collections.sources, { id: target.domain }, doc);
+    else await insert(collections.sources, doc);
   }
 
   const embedder = localEmbeddingProvider();
@@ -219,32 +226,29 @@ async function main(): Promise<void> {
     blockedDomains: new Set(),
   });
 
-  let ingested = 0;
-  const reasons = new Map<string, number>();
-  for (const listing of collected) {
-    if (ingested >= options.count) break;
-    try {
-      const result = await pipeline.ingest(listing, now);
-      if (result.status === 'ingested') ingested += 1;
-      else {
-        const reason = result.rejectReason ?? 'unchanged';
-        reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
-      }
-    } catch (error) {
-      reasons.set('pipeline_error', (reasons.get('pipeline_error') ?? 0) + 1);
-      log.warn('ingest failed', { sourceId: listing.sourceId, error: (error as Error).message });
-    }
-  }
+  const persisted = await persistWebListings(
+    pipeline,
+    collected,
+    options.count,
+    now,
+    (listing, error) => log.warn('ingest failed', {
+      sourceId: listing.sourceId,
+      error: (error as Error).message,
+    }),
+  );
 
-  log.info('ingestion complete', { ingested, rejected: Object.fromEntries(reasons) });
+  log.info('ingestion complete', { ...persisted });
 
   await primeEngagement(collections);
   await recomputeCentroids(collections, now);
   await bootstrapCoOccurrence(collections);
 
   log.info('done', {
-    activeProducts: await collections.products.countDocuments({ status: 'active' }),
-    clusters: await collections.clusters.countDocuments({}),
+    // `collections.*` are PostgREST query builders, not Mongo collections;
+    // `countDocuments` does not exist on them and threw a TypeError here, after
+    // every product had already been written but before the run reported it.
+    activeProducts: await count(collections.products, { status: 'active' }),
+    clusters: await count(collections.clusters, {}),
     seconds: Math.round((Date.now() - started) / 1000),
   });
 

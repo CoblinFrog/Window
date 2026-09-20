@@ -50,7 +50,14 @@ const ASIN_PATTERN = /^[A-Z0-9]{10}$/;
 
 function elementText(html: string, element: HtmlElement): string {
   const raw = html.slice(element.contentStart, Math.max(element.contentStart, element.contentEnd));
-  return decodeEntities(raw.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  // Script and style bodies are not text. Stripping only the tags left their
+  // contents behind, so Amazon's `#availability` — which carries an inline
+  // `a-state` script beside the words — read as `In Stock {"isInternal":...}`
+  // and matched no stock token, marking every live listing out of stock.
+  const withoutCode = raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ' ');
+  return decodeEntities(withoutCode.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 
 /** Elements inside `root`, in document order. The scan is document-sorted. */
@@ -188,6 +195,23 @@ export function parseAmazonDetail(html: string, pageUrl: string): ParsedProduct 
     if (left?.[1]) out.quantity = Number.parseInt(left[1], 10);
   }
 
+/**
+ * Strips Amazon's size modifiers from an image url.
+ *
+ * Amazon encodes the rendition in the filename — `61thTSgqWOL._AC_SY355_.jpg`
+ * is the 355px thumbnail the gallery widget happens to have requested, and it
+ * is what the markup carries. Every listing therefore arrived with images below
+ * the 800px eligibility floor and was rejected as `no_acceptable_image`.
+ * Removing the modifier segment asks for the original, which for that same
+ * asset is 2000x2000.
+ */
+function originalAmazonImage(url: string): string {
+  return url.replace(
+    /(\/images\/[A-Z]\/[^/.]+)\.[^/]*?(\.(?:jpg|jpeg|png|gif|webp))$/i,
+    '$1$2',
+  );
+}
+
   // Gallery URLs are the keys of the data-a-dynamic-image map: {url: [w,h]}.
   const seenImages = new Set<string>();
   for (const el of elements) {
@@ -196,13 +220,24 @@ export function parseAmazonDetail(html: string, pageUrl: string): ParsedProduct 
     try {
       const map = JSON.parse(dynamic) as Record<string, [number, number]>;
       for (const [rawUrl, dims] of Object.entries(map)) {
-        const url = resolveUrl(rawUrl, pageUrl);
-        if (url === null || seenImages.has(url)) continue;
+        const resolved = resolveUrl(rawUrl, pageUrl);
+        if (resolved === null) continue;
+        const url = originalAmazonImage(resolved);
+        if (seenImages.has(url)) continue;
         seenImages.add(url);
-        out.images.push({ url, width: dims[0] ?? 0, height: dims[1] ?? 0 });
+        // The declared dimensions describe the thumbnail that was named, not
+        // the original now being requested; the media pipeline measures the
+        // bytes anyway, so they are reported as unknown rather than wrong.
+        const rewritten = url !== resolved;
+        out.images.push({
+          url,
+          width: rewritten ? 0 : dims[0] ?? 0,
+          height: rewritten ? 0 : dims[1] ?? 0,
+        });
       }
     } catch {
-      const url = resolveUrl(el.attrs['src'] ?? el.attrs['data-old-hires'], pageUrl);
+      const fallback = resolveUrl(el.attrs['src'] ?? el.attrs['data-old-hires'], pageUrl);
+      const url = fallback === null ? null : originalAmazonImage(fallback);
       if (url !== null && !seenImages.has(url)) {
         seenImages.add(url);
         out.images.push({ url, width: 0, height: 0 });

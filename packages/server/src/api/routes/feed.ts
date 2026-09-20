@@ -10,8 +10,10 @@ import {
 import type { AppContext } from '../context.js';
 import { bloomAdd, deserializeBloom, serializeBloom } from '../../lib/bloom.js';
 import { discardBuffer } from '../../feed/service.js';
+import { DEFAULT_WINDOW_TOPICS, rotateCatalog } from '../../ingestion/catalog-window.js';
 import { rateLimit } from '../middleware.js';
 import { findOne, updateOne } from '../../db/supabase-helpers.js';
+import { logger } from '../../lib/logger.js';
 
 const pageSchema = z.object({
   mode: z.enum(['single', 'window']),
@@ -78,6 +80,60 @@ export function feedRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
       await discardBuffer(ctx.cache, user.id);
       res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const rotateSchema = z.object({
+    add: z.number().int().min(1).max(20).default(8),
+    drop: z.number().int().min(0).max(20).default(8),
+  });
+
+  /**
+   * Advances the rolling catalog window: fetch fresh listings, retire the
+   * oldest. The client calls this once its cursor passes the threshold.
+   *
+   * One rotation runs at a time, process-wide. A storefront round trip takes
+   * tens of seconds, and several sessions crossing the threshold together would
+   * otherwise each start their own crawl and race each other's deletes. Callers
+   * that arrive mid-rotation are told so and simply keep scrolling.
+   */
+  let rotating: Promise<unknown> | null = null;
+
+  router.post('/rotate', rateLimit(ctx.cache, 'feed'), async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+      const body = rotateSchema.parse(req.body ?? {});
+
+      if (rotating !== null) {
+        res.status(202).json({ status: 'already_running', added: 0, removed: 0 });
+        return;
+      }
+
+      // The user's own interests steer what gets fetched; a cold account falls
+      // back to the window's default seeds.
+      const topics = user.interestSet.map((entry) => entry.topic);
+
+      // The response does not wait on the crawl. Rotation exists to keep the
+      // buffer stocked for later scrolling, and blocking the request that
+      // triggered it would stall the very feed it is refilling.
+      rotating = rotateCatalog(ctx.db.collections, {
+        count: body.add,
+        drop: body.drop,
+        topics: topics.length > 0 ? topics : DEFAULT_WINDOW_TOPICS,
+      })
+        .catch((error) => {
+          logger.child('feed').warn('catalog rotation failed', {
+            error: (error as Error).message,
+          });
+        })
+        .finally(() => {
+          rotating = null;
+        });
+
+      res.status(202).json({ status: 'started', add: body.add, drop: body.drop });
     } catch (error) {
       next(error);
     }

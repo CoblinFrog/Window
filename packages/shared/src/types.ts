@@ -117,6 +117,13 @@ export interface MediaImage {
   width: number;
   height: number;
   blurhash: string;
+  /**
+   * The image as the source publishes it, kept so clients can load it straight
+   * from the origin CDN instead of through our own media route. `null` for
+   * synthetic imagery, which has no remote original — those still render from
+   * the urls above.
+   */
+  sourceUrl?: string | null;
 }
 
 export interface MediaVideo {
@@ -645,6 +652,8 @@ export interface ProductCard {
     rating: number | null;
   };
   category: CategoryRef;
+  /** The listing this card came from, for linking back to the storefront. */
+  sourceUrl: string | null;
   badges: CardBadges;
   media: {
     hero: MediaImage;

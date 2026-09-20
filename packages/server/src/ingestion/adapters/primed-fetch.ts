@@ -23,7 +23,11 @@ import type { FetchLike } from './tier2-structured.js';
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-const BLOCKED_STATUSES = new Set([401, 403, 405, 429]);
+// 503 belongs here: Amazon's bot manager answers automated reads with a 503
+// "Sorry! Something went wrong!" page rather than a 403, so leaving it out meant
+// the plain attempt's refusal was treated as a successful fetch and never
+// escalated to the impersonating helper.
+const BLOCKED_STATUSES = new Set([401, 403, 405, 429, 503]);
 const CHALLENGE_MARKERS = [
   'Just a moment',
   'cf_chl_opt',
@@ -33,6 +37,13 @@ const CHALLENGE_MARKERS = [
   'validateCaptcha',
   'Enter the characters',
   'Enable JavaScript and cookies to continue',
+  // Akamai Bot Manager serves its interstitial with HTTP 200 and a meta-refresh
+  // carrying a `bm-verify` token. Without this marker the challenge page is
+  // handed to the adapters, which parse it into zero listings and report the
+  // source as simply empty.
+  'bm-verify',
+  // Amazon's automated-access notice, which accompanies the 503 above.
+  'To discuss automated access to Amazon data',
 ];
 
 const escalatedDomains = new Set<string>();

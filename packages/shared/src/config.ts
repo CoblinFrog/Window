@@ -277,6 +277,26 @@ export const RETURNING_USER = {
 // Buffer and prefetch (client)
 // ---------------------------------------------------------------------------
 
+/**
+ * The rolling catalog window.
+ *
+ * The stored catalog is kept small and fresh rather than large and stale: once
+ * a session scrolls past `threshold`, the server fetches `add` new listings and
+ * retires the `drop` oldest, so the catalog stays around `size`.
+ */
+export const CATALOG_WINDOW = {
+  size: 20,
+  /** Cursor index that triggers a rotation, counted from zero. */
+  threshold: 10,
+  add: 8,
+  drop: 8,
+  /**
+   * Floor between two rotations from one client. Crossing the threshold, going
+   * back and crossing it again must not start a second crawl.
+   */
+  cooldownMs: 60_000,
+} as const;
+
 export const BUFFER_CONFIG = {
   /** Rolling buffer of 40: 10 behind the cursor, 30 ahead. */
   size: 40,

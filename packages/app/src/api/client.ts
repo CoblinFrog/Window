@@ -163,6 +163,22 @@ export const api = {
     return request<void>('/v1/feed/refresh', { method: 'POST' });
   },
 
+  /**
+   * Asks the server to advance the rolling catalog window. Like `feedPage`,
+   * this never surfaces an error: rotation is background housekeeping and a
+   * failed one only means the catalog is refreshed a little later.
+   */
+  async rotateCatalog(body: { add: number; drop: number }): Promise<void> {
+    if (!authToken) return;
+    try {
+      await request<{ status: string }>('/v1/feed/rotate', { method: 'POST', body });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[Window] catalog rotation request failed', error);
+      }
+    }
+  },
+
   // ---- Catalog -----------------------------------------------------------
   /**
    * `live` asks the server to re-fetch the listing at its source URL before

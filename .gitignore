@@ -14,11 +14,17 @@ web-build/
 
 # Deliberately NOT ignored, so a clone is runnable as-is:
 #   .env, packages/*/.env  — Supabase credentials and the local API origin
-#   .data/                 — generated media derivatives the feed serves
 # This only holds while the repository stays private: packages/server/.env and
 # packages/server/src/config/supabase.ts both carry the Supabase service-role
 # key, which bypasses row-level security. Rotate it before making the
 # repository public or adding collaborators.
+
+# Fetched product imagery. Every file here is re-downloadable from the source
+# on demand — the media route regenerates a derivative on first request — so
+# carrying tens of megabytes of third-party product photos in git history buys
+# nothing a clone cannot get for itself. The handful of generated placeholders
+# committed earlier stay tracked; only the fetched originals are ignored.
+**/.data/media/f_*/
 
 # Cookie jars the marketplace fetchers prime before a crawl. These hold live
 # session tokens for amazon.com and ebay.com, they are re-minted on demand, and
