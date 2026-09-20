@@ -8,6 +8,7 @@ import {
   type ProductCard,
   type RankingConfig,
 } from '@window/shared';
+import { demoStore } from '../config/demo-store.js';
 import type { CollectionSet, User } from '../db/supabase-collections.js';
 import { count, find, findOne, updateOne } from '../db/supabase-helpers.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
@@ -23,6 +24,7 @@ import { bloomHas, deserializeBloom } from '../lib/bloom.js';
 import type { VectorCandidate, VectorSearch } from '../vector/types.js';
 import { buildCardContext, toProductCard } from './cards.js';
 import { isColdStart, planColdStart, planReentry } from './coldstart.js';
+import { mergePinned, pinnedCandidates } from './pinned.js';
 import { assembleQuad, chooseQuadSeeds, quadIndexes } from './quads.js';
 
 const log = logger.child('feed');
@@ -136,12 +138,26 @@ export class FeedService {
     now: Date,
   ): Promise<FeedPageResult> {
     const candidates = await this.composeCandidates(user, request, limit, now);
-    const cards = await this.project(candidates.items, true, candidates.explorationProductId, candidates.explorationTopic, now);
+
+    // Pinned products are placed mid-page. The exploration marks are
+    // re-derived from ids rather than carried across, because the merge moves
+    // cards: an index computed against the pre-merge list would flag whatever
+    // happened to land in that slot afterwards.
+    const explorationIds = candidates.explorationIndexes
+      .map((index) => candidates.items[index]?.id)
+      .filter((id): id is string => id !== undefined);
+    const pinned = await pinnedCandidates(this.deps.collections, user, now);
+    const items = mergePinned(pinned, candidates.items, limit, demoStore()?.pinOffset ?? 0);
+    const explorationIndexes = explorationIds
+      .map((id) => items.findIndex((candidate) => candidate.id === id))
+      .filter((index) => index >= 0);
+
+    const cards = await this.project(items, true, candidates.explorationProductId, candidates.explorationTopic, now);
 
     return {
       items: cards,
       quads: null,
-      explorationIndexes: candidates.explorationIndexes,
+      explorationIndexes,
       rankingConfigVersion: candidates.rankingConfigVersion,
       nextCursorHint: request.cursor + cards.length,
       ttlMs: this.config.cache.bufferTtlMs,
@@ -683,7 +699,16 @@ export class FeedService {
       )) as unknown as VectorCandidate[];
     }
 
-    const withScores = docs.map((doc) => ({ ...doc, vectorScore: 0.5 }));
+    // A degraded page is still a page, and the pin is about being reachable on
+    // every one of them — a demo that disappears the moment ranking has a bad
+    // minute is the case it most needs to survive.
+    const pinned = await pinnedCandidates(collections, user, now);
+    const withScores = mergePinned(
+      pinned,
+      docs.map((doc) => ({ ...doc, vectorScore: 0.5 })),
+      limit,
+      demoStore()?.pinOffset ?? 0,
+    );
     const cards = await this.project(withScores, request.mode === 'single', null, null, now);
 
     return {

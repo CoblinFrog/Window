@@ -9,6 +9,7 @@ import {
   type OrderStatus,
   type Quote,
 } from '@window/shared';
+import type { ProductIdentifiers } from '@window/shared';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import type { User } from '../db/supabase-collections.js';
@@ -136,6 +137,18 @@ export function redactToolCall(call: AgentToolCall): Record<string, unknown> {
     // The result can echo page content back, which is merchant-controlled text.
     result: call.result.slice(0, 256),
   };
+}
+
+/**
+ * The merchant's own id for the exact variant being bought.
+ *
+ * Written by ingestion into `identifiers`. It is what lets a merchant build a
+ * cart from a URL — see `shopifyCartPath` — and its absence is normal for a
+ * listing scraped from a search page, so every caller treats it as optional.
+ */
+function variantIdOf(product: { identifiers?: ProductIdentifiers } | undefined): string | null {
+  const raw = product?.identifiers?.variantId;
+  return typeof raw === 'string' && /^\d+$/.test(raw) ? raw : null;
 }
 
 export class CheckoutConflict extends Error {
@@ -276,7 +289,14 @@ export class CheckoutOrchestrator {
           productId: item.productId,
           title: item.title,
           url: product?.source.url ?? `https://${order.merchantDomain}`,
-          variant: item.variant,
+          // The shopper's chosen options, plus the listing's own variant id.
+          // That id is a fact about the listing rather than about the choice,
+          // so it lives on the product and is merged in here instead of being
+          // asked of the client, which has no reason to know it.
+          variant: {
+            ...item.variant,
+            ...(variantIdOf(product) !== null ? { variantId: variantIdOf(product) as string } : {}),
+          },
           quantity: item.quantity,
           expectedUnitPrice: item.unitPrice,
           currency: product?.price.currency ?? 'USD',
@@ -511,9 +531,31 @@ export class CheckoutOrchestrator {
 
     try {
       const agent = await this.resolveAgent(order.merchantDomain);
+      // The cart does not survive into the placement context — it is a fresh
+      // browser with no storage — so the lines are rebuilt from the order,
+      // which is also the record of what was actually authorized.
+      const placementProducts = await repository.getProducts(order.items.map((i) => i.productId));
+      const placementById = new Map(placementProducts.map((p) => [p.id, p]));
+      const placementItems: CheckoutLineItem[] = order.items.map((item) => {
+        const product = placementById.get(item.productId);
+        return {
+          productId: item.productId,
+          title: item.title,
+          url: product?.source.url ?? `https://${order.merchantDomain}`,
+          variant: {
+            ...item.variant,
+            ...(variantIdOf(product) !== null ? { variantId: variantIdOf(product) as string } : {}),
+          },
+          quantity: item.quantity,
+          expectedUnitPrice: item.unitPrice,
+          currency: product?.price.currency ?? order.quote?.currency ?? 'USD',
+        };
+      });
+
       const placement = await agent.place({
         session: runtime.session,
         merchantDomain: order.merchantDomain,
+        items: placementItems,
         quote: {
           subtotal: order.quote?.subtotal ?? 0,
           shipping: order.quote?.shipping ?? 0,

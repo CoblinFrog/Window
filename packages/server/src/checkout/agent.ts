@@ -126,6 +126,8 @@ export interface CheckoutAgent {
   place(input: {
     session: AgentSession;
     merchantDomain: string;
+    /** The same lines that were quoted; the cart is rebuilt from them. */
+    items: CheckoutLineItem[];
     quote: AgentQuote;
     /** Opaque payment handle. The raw token never enters the agent's context. */
     paymentHandle: string;
@@ -211,6 +213,23 @@ export interface FieldMap {
   origin?: string;
   /** Where the checkout form lives, relative to the merchant origin. */
   checkoutPath: string;
+  /**
+   * Builds the cart before the checkout is opened.
+   *
+   * A checkout page is a view of a cart that already exists. Opening one
+   * against an empty cart does not show an empty order — the merchant
+   * redirects away, the form is not on the page, and every selector in this
+   * map misses. So a merchant that can be sent a cart in a URL says how here,
+   * and the agent navigates it first.
+   *
+   * Returns null when these lines cannot be expressed as a link — a line with
+   * no variant id, typically — and the agent then opens the checkout directly
+   * and fails honestly against the real page rather than guessing at an
+   * add-to-cart button.
+   *
+   * A merchant without this keeps the old behaviour exactly.
+   */
+  cartPath?: (items: readonly CheckoutLineItem[]) => string | null;
   /** Vault field → CSS selector for a text input on the merchant's form. */
   fields: Partial<Record<VaultField, string>>;
   /**
@@ -317,6 +336,7 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
       input.signal?.throwIfAborted();
       const origin = this.originOf(input.merchantDomain);
       await this.passStorefrontGate(page, map, origin, input.onStep);
+      await this.openCart(page, map, origin, input.items, input.onStep);
       await page.navigate(`${origin}${map.checkoutPath}`);
       input.onStep?.('navigate: checkout opened');
 
@@ -429,6 +449,10 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
       input.signal?.throwIfAborted();
       const origin = this.originOf(input.merchantDomain);
       await this.passStorefrontGate(page, map, origin, input.onStep);
+      // A fresh browser context inherits no storage, so the cart built during
+      // the quote is not here. Rebuilding it from the same line items is also
+      // what keeps the thing being paid for identical to the thing priced.
+      await this.openCart(page, map, origin, input.items, input.onStep);
       await page.navigate(`${origin}${map.checkoutPath}`);
 
       const held = new Set(this.config.vault?.availableFields() ?? []);
@@ -466,6 +490,26 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
     } finally {
       await page.close();
     }
+  }
+
+  /**
+   * Opens the merchant's cart, when it can be built from a link.
+   *
+   * Before the checkout, always: a checkout page is a view of a cart, so the
+   * order of these two navigations is the difference between a form to fill
+   * and a redirect to an empty basket.
+   */
+  private async openCart(
+    page: CheckoutPage,
+    map: FieldMap,
+    origin: string,
+    items: readonly CheckoutLineItem[],
+    onStep?: (step: string) => void,
+  ): Promise<void> {
+    const path = map.cartPath?.(items) ?? null;
+    if (path === null) return;
+    await page.navigate(`${origin}${path}`);
+    onStep?.(`navigate: cart built with ${items.length} line(s)`);
   }
 
 /**

@@ -152,6 +152,12 @@ export interface ProductMedia {
 // ---------------------------------------------------------------------------
 
 export interface ProductIdentifiers {
+  /**
+   * The merchant's id for the exact variant, when the source publishes one.
+   * It is what lets a checkout be reached by URL rather than by clicking an
+   * add-to-cart button that every theme renders differently.
+   */
+  variantId?: string | null;
   gtin?: string | null;
   upc?: string | null;
   ean?: string | null;

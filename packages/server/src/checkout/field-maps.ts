@@ -1,4 +1,5 @@
-import type { FieldMap } from './agent.js';
+import { demoStore } from '../config/demo-store.js';
+import type { CheckoutLineItem, FieldMap } from './agent.js';
 
 /**
  * Per-merchant checkout selector maps.
@@ -59,7 +60,12 @@ const MAPS: Record<string, FieldMap> = {
    * something the map can assume on the store's behalf.
    */
   'shopify.checkout': {
-    checkoutPath: '/checkouts',
+    // Singular. `/checkouts/` is the prefix Shopify puts the *session* under
+    // once one exists (`/checkouts/c/<token>`); navigating to it directly is
+    // a 404. `/checkout` is the entry point that turns the current cart into
+    // a session and redirects there.
+    checkoutPath: '/checkout',
+    cartPath: shopifyCartPath,
     fields: {
       'contact.email': 'input[name="email"]',
       'ship.firstName': 'input[name="firstName"]',
@@ -86,6 +92,35 @@ const MAPS: Record<string, FieldMap> = {
     placeOrder: '#checkout-pay-button',
   },
 };
+
+/**
+ * Shopify's cart permalink: `/cart/<variantId>:<qty>,<variantId>:<qty>`.
+ *
+ * Shopify builds the cart server-side from this URL and redirects, which is
+ * why the agent needs no product page and no add-to-cart button — the two
+ * things on a storefront most likely to be themed into something a selector
+ * map cannot find.
+ *
+ * The variant id is the numeric id of the *variant*, not the product; a
+ * product with one option still has one. It rides on the cart line's
+ * `variant` record, so a line added without it cannot be expressed as a link
+ * and the whole permalink is abandoned rather than built with a hole in it —
+ * a cart missing a line prices wrongly, and pricing wrongly is worse than
+ * failing on the checkout page.
+ */
+function shopifyCartPath(items: readonly CheckoutLineItem[]): string | null {
+  if (items.length === 0) return null;
+
+  const parts: string[] = [];
+  for (const item of items) {
+    const variantId = item.variant['variantId'] ?? item.variant['variant_id'] ?? '';
+    // Digits only: this is interpolated into a URL the agent then navigates.
+    if (!/^\d+$/.test(variantId)) return null;
+    const quantity = Math.max(1, Math.floor(item.quantity));
+    parts.push(`${variantId}:${quantity}`);
+  }
+  return `/cart/${parts.join(',')}`;
+}
 
 /**
  * Stores that run Shopify's checkout, pointed at the shared map.
@@ -117,6 +152,34 @@ function storefrontGate(): FieldMap['storefront'] {
     secretEnv: 'SHOPIFY_STOREFRONT_PASSWORD',
   };
 }
+
+/**
+ * The demo storefront, when one is configured.
+ *
+ * It runs Shopify's checkout but is presented to shoppers under its own
+ * domain, so it takes the shared Shopify selectors with an explicit `origin` —
+ * the same shape `northwind.test` uses above, and the reason `origin` is on
+ * the map at all. Registering it here rather than in `SHOPIFY_STORES` is what
+ * lets the identity the card carries differ from the host the driver dials.
+ *
+ * Registration is not permission. `robotsAllows` is checked independently by
+ * the driver against the real origin, and a store whose robots.txt disallows
+ * `/checkouts/` is refused no matter what this map says — which is correct,
+ * and which a Shopify store disallows by default until its owner changes it.
+ */
+function registerDemoStore(): void {
+  const store = demoStore();
+  if (!store) return;
+  const base = MAPS['shopify.checkout'];
+  if (!base) return;
+  const gate = storefrontGate();
+  MAPS[store.domain] = {
+    ...base,
+    origin: store.origin,
+    ...(gate ? { storefront: gate } : {}),
+  };
+}
+registerDemoStore();
 
 export function fieldMapFor(merchantDomain: string): FieldMap | null {
   const direct = MAPS[merchantDomain];

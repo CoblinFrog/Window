@@ -100,8 +100,33 @@ export function createMailer(): Mailer {
   return new LoggingMailer();
 }
 
+/**
+ * The development code, when one is set.
+ *
+ * With no mail transport there is no inbox to read a code out of, and reading
+ * it back out of the log or the dev outbox on every claim is friction with no
+ * safety in it. So outside production the code can be pinned to a known value.
+ *
+ * Where this is allowed to apply is the whole of its safety. It is minting
+ * only — `verifyEmailChallenge` is untouched, and still hashes, compares in
+ * constant time, counts attempts and spends the code on use. There is no
+ * branch anywhere that accepts a code without checking it, which is the
+ * property this file is built around: a backdoor in the verifier would be a
+ * backdoor in production too. This cannot reach production, because
+ * `secretsAreProduction` gates it and `createMailer` throws there regardless —
+ * the fixed code exists exactly where the logging transport exists.
+ *
+ * Set `DEV_EMAIL_CODE` to another six-digit string to change it, or to
+ * anything else (`random`, `off`, an empty value) to mint from the CSPRNG.
+ */
+const DEFAULT_DEV_CODE = '111111';
+
 /** A six-digit code from the CSPRNG. `Math.random` is a sequence, not a secret. */
 function mintCode(): string {
+  if (!secretsAreProduction) {
+    const configured = process.env.DEV_EMAIL_CODE ?? DEFAULT_DEV_CODE;
+    if (/^\d{6}$/.test(configured)) return configured;
+  }
   return String(randomInt(0, 1_000_000)).padStart(6, '0');
 }
 

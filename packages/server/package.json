@@ -18,6 +18,7 @@
     "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts",
     "reset:onboarding": "tsx --env-file-if-exists=.env src/scripts/reset-onboarding.ts",
     "ingest:listings": "tsx --env-file-if-exists=.env src/scripts/ingest-listings.ts",
+    "seed:demo-store": "tsx --env-file-if-exists=.env src/scripts/seed-demo-store.ts",
     "fill": "tsx --env-file-if-exists=.env src/scripts/fill-catalog.ts",
     "demo:chat": "node --import tsx --env-file-if-exists=.env scripts/demo-chat.ts"
   },
