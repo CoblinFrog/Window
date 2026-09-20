@@ -483,7 +483,10 @@ describe('review buckets and ratings', () => {
       ...Array.from({ length: 9 }, () => review({ rating: 1, source: { domain: 'small.example', url: 'u' } })),
     ];
     const combined = combineRatings(reviews);
-    assert.ok(combined.meanRating > 4.9, `mean was ${combined.meanRating}`);
+    // Every review here carries a score, so the mean is not the nullable case;
+    // saying so first is what lets the comparison below be a comparison.
+    assert.notEqual(combined.meanRating, null, 'nine hundred scores must produce a mean');
+    assert.ok((combined.meanRating ?? 0) > 4.9, `mean was ${combined.meanRating}`);
     assert.equal(combined.perSource.length, 2, 'the breakdown stays visible');
   });
 
