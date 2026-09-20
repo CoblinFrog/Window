@@ -10,7 +10,8 @@
     "backgroundColor": "#000000",
     "splash": {
       "backgroundColor": "#000000",
-      "resizeMode": "contain"
+      "resizeMode": "contain",
+      "image": "./assets/icon.png"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -18,36 +19,18 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.window.client",
-      "associatedDomains": [
-        "applinks:window.app"
-      ],
       "infoPlist": {
         "UIViewControllerBasedStatusBarAppearance": false,
         "ITSAppUsesNonExemptEncryption": false
-      }
+      },
+      "icon": "./assets/icon.png"
     },
     "android": {
       "package": "app.window.client",
       "adaptiveIcon": {
-        "backgroundColor": "#000000"
-      },
-      "intentFilters": [
-        {
-          "action": "VIEW",
-          "autoVerify": true,
-          "data": [
-            {
-              "scheme": "https",
-              "host": "window.app",
-              "pathPrefix": "/p"
-            }
-          ],
-          "category": [
-            "BROWSABLE",
-            "DEFAULT"
-          ]
-        }
-      ]
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/icon.png"
+      }
     },
     "web": {
       "bundler": "metro",
@@ -61,6 +44,7 @@
     ],
     "experiments": {
       "typedRoutes": false
-    }
+    },
+    "icon": "./assets/icon.png"
   }
 }
