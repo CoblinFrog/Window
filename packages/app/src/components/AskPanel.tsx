@@ -21,7 +21,7 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
-import { COLORS, ICON, MOTION, SPACING, TYPE, type ChatResponse } from '@window/shared';
+import { BREAKPOINTS, COLORS, ICON, MOTION, RADIUS, SPACING, TYPE, type ChatResponse } from '@window/shared';
 import { Icon } from './Icon.js';
 
 /**
@@ -106,7 +106,16 @@ export function AskPanel({
   onOpenChange,
   reducedMotion = false,
 }: AskPanelProps): React.ReactElement {
-  const { height: viewportHeight } = useWindowDimensions();
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
+  /**
+   * A pull is a touch idiom. On a pointer there is nothing to pull with and
+   * nothing that says the top edge is draggable, so the strip's 3 px hairline
+   * — which is right above a thumb — was simply an invisible band at the top
+   * of a desktop window. Wide viewports get a labelled control instead, and
+   * every viewport gets a click that opens the panel, since a hairline nobody
+   * can see is not improved by being draggable.
+   */
+  const pointerAffordance = viewportWidth >= BREAKPOINTS.phone;
   const insets = useSafeAreaInsets();
   const maxHeight = Math.round(viewportHeight * MAX_HEIGHT_FRACTION);
   // The panel is the one surface pinned to the top edge, so it is the one that
@@ -444,7 +453,26 @@ export function AskPanel({
           accessibilityHint="Pull down, or activate, to open the prompt"
           onAccessibilityTap={openPanel}
         >
-          <Animated.View style={[styles.handle, handleStyle]} />
+          {/* A `Pressable` rather than a composed `Gesture.Tap`: a tap gesture
+              alongside a pan does not recognise on the web — the pan holds the
+              touch and the tap's `onEnd` never arrives. The pan only activates
+              past 8 px, so a click that does not move reaches this untouched. */}
+          <Pressable
+            onPress={openPanel}
+            accessibilityRole="button"
+            accessibilityLabel="Ask the shopping assistant"
+            style={pointerAffordance ? styles.askPill : styles.handleTarget}
+            hitSlop={8}
+          >
+            {pointerAffordance ? (
+              <Animated.View style={[styles.askPillInner, handleStyle]}>
+                <Icon name="search" size={16} color={COLORS.textSecondary} />
+                <Text style={styles.askPillText}>Ask for anything</Text>
+              </Animated.View>
+            ) : (
+              <Animated.View style={[styles.handle, handleStyle]} />
+            )}
+          </Pressable>
         </View>
       </GestureDetector>
     </View>
@@ -697,6 +725,30 @@ const styles = StyleSheet.create({
     width: 36,
     height: 3,
     backgroundColor: COLORS.hairline,
+  },
+  /** The touch target around the hairline, which is far too small to hit. */
+  handleTarget: {
+    minHeight: ICON.minTarget,
+    minWidth: 72,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+  },
+  askPill: { alignItems: 'center', justifyContent: 'flex-start' },
+  askPillInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    height: 34,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.tile,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.hairline,
+    backgroundColor: COLORS.card,
+  },
+  askPillText: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
   },
   restart: {
     position: 'absolute',

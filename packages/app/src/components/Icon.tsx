@@ -24,6 +24,7 @@ export type IconName =
   | 'grid'
   | 'single'
   | 'warning'
+  | 'search'
   | 'link';
 
 export interface IconProps {
@@ -180,6 +181,17 @@ function renderGlyph(
           <Path d="M12 3 2 20h20L12 3Z" {...common} fill="none" />
           <Path d="M12 9v5" stroke={stroke} strokeWidth={2} strokeLinecap="round" />
           <Circle cx={12} cy={17} r={1} fill={stroke} />
+        </>
+      );
+
+    // The assistant's affordance. A magnifier rather than a chat bubble: what
+    // it opens is a way to ask for a thing, and "reviews" already owns the
+    // bubble in this set.
+    case 'search':
+      return (
+        <>
+          <Circle cx={10.5} cy={10.5} r={6.5} {...common} fill="none" />
+          <Path d="M15.4 15.4 20.5 20.5" {...common} fill="none" />
         </>
       );
 
