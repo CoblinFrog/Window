@@ -561,7 +561,7 @@ function mapReview(node: Json, pageUrl: string): RawReview | null {
   const ratingRecord = asRecord(record['reviewRating']) ?? asRecord(record['rating']);
   const rating = ratingRecord ? asFiniteNumber(ratingRecord['ratingValue']) : null;
   return {
-    rating: rating ?? 0,
+    rating,
     ratingScale: (ratingRecord ? asFiniteNumber(ratingRecord['bestRating']) : null) ?? 5,
     text,
     authorHandle: asText(record['author']),

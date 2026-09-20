@@ -20,7 +20,8 @@ import type { ReviewSample } from './quality.js';
 
 export interface AggregatedReview {
   source: { domain: string; url: string };
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   excerpt: string;
   authorHandle: string | null;
@@ -85,8 +86,8 @@ export function themesInText(text: string): string[] {
  * reviewer's own explicit verdict; the lexicon only adjusts it, which stops a
  * five-star review that mentions one flaw from being read as negative.
  */
-export function reviewSentiment(rating: number, ratingScale: number, text: string): number {
-  const fromRating = clamp((rating / ratingScale - 0.2) / 0.8, 0, 1);
+export function reviewSentiment(rating: number | null, ratingScale: number, text: string): number {
+  const fromRating = rating === null ? 0.5 : clamp((rating / ratingScale - 0.2) / 0.8, 0, 1);
   const words = text.toLowerCase().match(/[a-z]{3,}/g) ?? [];
   let positive = 0;
   let negative = 0;
@@ -128,7 +129,8 @@ export function bucketReviews(
     }
   };
 
-  const normalised = (r: AggregatedReview) => r.rating / r.ratingScale;
+  // Unrated excerpts sort mid — never "most critical" nor "most positive".
+  const normalised = (r: AggregatedReview) => (r.rating === null ? 0.5 : r.rating / r.ratingScale);
 
   // Helpful first: a review that is both helpful and recent is more useful
   // filed as helpful, because recency is visible on every review anyway.
@@ -184,6 +186,7 @@ export function combineRatings(reviews: readonly AggregatedReview[]): {
 } {
   const bySource = new Map<string, { total: number; count: number }>();
   for (const review of reviews) {
+    if (review.rating === null) continue; // unrated content carries no vote
     const entry = bySource.get(review.source.domain) ?? { total: 0, count: 0 };
     entry.total += (review.rating / review.ratingScale) * 5;
     entry.count += 1;

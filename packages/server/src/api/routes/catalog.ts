@@ -14,6 +14,7 @@ import {
   type UpvoteReason,
 } from '@window/shared';
 import type { AppContext } from '../context.js';
+import { logger } from '../../lib/logger.js';
 import { buildCardContext, toProductCard } from '../../feed/cards.js';
 import { cautionText } from '../../ingestion/quality.js';
 import { riskFlagText } from '../../ingestion/risk.js';
@@ -33,12 +34,46 @@ export function catalogRoutes(ctx: AppContext): Router {
     return new Map(sources.map((s) => [s._id, s.displayName]));
   }
 
-  /** Full product detail. Unlike the card, this carries specs and the source URL. */
+  /**
+   * Full product detail. Unlike the card, this carries specs and the source URL.
+   *
+   * `?live=1` re-fetches the listing at its source URL — but a tap cannot wait
+   * on a marketplace round-trip, so the refresh races a deadline. Sources that
+   * answer fast land in the response; slow ones keep refreshing in the
+   * background and the stored row answers now. Either way the next read is
+   * current, because a completed refresh upserts the stored document.
+   */
+  const LIVE_REFRESH_DEADLINE_MS = 800;
+
   router.get('/products/:id', async (req, res, next) => {
     try {
       const id = objectId(req.params.id, 'Product id');
-      const product = await collections.products.findOne({ _id: id });
+      let product = await collections.products.findOne({ _id: id });
       if (!product) throw ApiError.notFound('That product');
+
+      if (req.query.live === '1' || req.query.live === 'true') {
+        const refresh = ctx.refreshProduct(product);
+        // A late failure must not surface as an unhandled rejection once the
+        // response has already gone out.
+        const outcome = await Promise.race([
+          refresh.catch((error: unknown) => {
+            logger.warn('background live refresh failed', {
+              productId: id.toHexString(),
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return 'unavailable' as const;
+          }),
+          new Promise<'pending'>((resolve) =>
+            setTimeout(() => resolve('pending'), LIVE_REFRESH_DEADLINE_MS),
+          ),
+        ]);
+        if (outcome === 'refreshed' || outcome === 'removed') {
+          product = (await collections.products.findOne({ _id: id })) ?? product;
+        }
+        if (outcome === 'removed' && (product === null || product.status === 'dead')) {
+          throw ApiError.notFound('That product');
+        }
+      }
 
       const candidate = { ...(product as unknown as VectorCandidate), vectorScore: 0.5 };
       const context = await buildCardContext(

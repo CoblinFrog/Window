@@ -78,7 +78,8 @@ export interface RawSeller {
 }
 
 export interface RawReview {
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   text: string;
   authorHandle: string | null;
@@ -95,6 +96,8 @@ export interface DiscoveredListing {
   url: string;
   /** Present when the listing page exposed it; lets refresh skip unchanged items. */
   priceHint: number | null;
+  /** Title-ish label from the listing surface, when one was attached to the link. */
+  titleHint?: string | null;
   seenAt: Date;
 }
 
@@ -133,6 +136,21 @@ export interface SourceAdapter {
     quantity: number | null;
     removed: boolean;
   } | null>;
+}
+
+/**
+ * What a web adapter can read off one fetched page: the listings it links to,
+ * and the pages worth visiting next. The browse agent feeds each fetched page
+ * through this so it can decide what to follow without knowing the markup.
+ */
+export interface PageCandidates {
+  items: DiscoveredListing[];
+  nav: string[];
+}
+
+/** An adapter that reads the live storefront rather than an API or feed. */
+export interface WebSourceAdapter extends SourceAdapter {
+  candidatesFromPage(html: string, pageUrl: string): PageCandidates;
 }
 
 export class SourceUnavailableError extends Error {

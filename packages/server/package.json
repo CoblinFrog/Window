@@ -14,6 +14,7 @@
     "smoke": "tsx --env-file-if-exists=.env src/scripts/smoke.ts",
     "ingest": "tsx --env-file-if-exists=.env src/scripts/ingest.ts",
     "ingest:api": "tsx --env-file-if-exists=.env src/scripts/ingest-api.ts",
+    "ingest:web": "tsx --env-file-if-exists=.env src/scripts/ingest-web.ts",
     "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts"
   },
   "dependencies": {
