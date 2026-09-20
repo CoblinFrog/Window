@@ -61,6 +61,7 @@ export default function FeedScreen(): React.ReactElement {
   const [upvoted, setUpvoted] = useState<Set<string>>(new Set());
   const [showSwipeHint, setShowSwipeHint] = useState(true);
 
+  const patchCard = feed.patchCard;
   const card = feed.buffer[feed.cursor] ?? null;
   const paneStartIndex = paneToRender(feed);
   const pane = useMemo(
@@ -217,19 +218,54 @@ export default function FeedScreen(): React.ReactElement {
     [feed, zoom],
   );
 
+  /**
+   * Fetch a card's full detail and patch it into the buffer.
+   *
+   * A feed page carries the hero image and a count of the rest; the gallery
+   * itself only comes with the detail. Never awaited — whatever prompted this
+   * has already happened on screen and must not wait on the network.
+   *
+   * `live` additionally re-fetches the listing at its source. That belongs to
+   * the tile tap, which is someone choosing a product and the one moment the
+   * price is worth a marketplace round-trip. It does not belong to arriving at
+   * a product by scrolling: the gallery is in the stored row either way, and
+   * making every scroll step scrape a storefront would be a real cost for
+   * products nobody has decided to look at yet.
+   */
+  const detailed = useRef<Set<string>>(new Set());
+  const loadDetail = useCallback(
+    (productId: string, live: boolean) => {
+      if (!live && detailed.current.has(productId)) return;
+      detailed.current.add(productId);
+      void api
+        .product(productId, { live })
+        .then((detail) => patchCard(detail))
+        // Left out of the set again so arriving a second time can retry; a
+        // product whose detail never loads is one whose gallery cannot be
+        // stepped, and that is worth another attempt rather than a permanent
+        // row of ticks that do nothing.
+        .catch(() => {
+          detailed.current.delete(productId);
+        });
+    },
+    [patchCard],
+  );
+
+  // The card in view needs its gallery whether it was tapped or scrolled to.
+  // Only the tap used to ask, so a product reached by scrolling showed ticks
+  // for photographs it had never fetched, and every tap on the frame was a
+  // no-op against a gallery of one.
+  useEffect(() => {
+    if (feed.mode !== 'single' || !card) return;
+    loadDetail(card.productId, false);
+  }, [card?.productId, feed.mode, loadDetail]);
+
   const tapTile = useCallback(
     (index: number, card: ProductCard, rect: TileRect | null) => {
       zoom.zoomIn(rect, () => feed.dispatch({ kind: 'tap_tile', index }));
-      // A tap is also the moment to ask the source for the freshest copy of
-      // this listing; the refreshed detail patches the card in place when it
-      // lands. It is deliberately not awaited — the zoom has already started
-      // and must not wait on the network to finish.
-      void api
-        .product(card.productId, { live: true })
-        .then((detail) => feed.patchCard(detail))
-        .catch(() => undefined);
+      loadDetail(card.productId, true);
     },
-    [feed, zoom],
+    [feed, loadDetail, zoom],
   );
 
   // One page per settle, whatever asked for it.
@@ -364,7 +400,7 @@ export default function FeedScreen(): React.ReactElement {
                 // The controls belong to the card, not to the stage: anchored
                 // to the stage they land off the right edge on desktop, where
                 // the column is narrower than the window.
-                renderActions={(target: ProductCard) => (
+                renderActions={(target: ProductCard, suppressTap: () => boolean) => (
                   <ActionBar
                     card={target}
                     upvoted={upvoted.has(target.productId)}
@@ -377,6 +413,7 @@ export default function FeedScreen(): React.ReactElement {
                     onCartLongPress={() => addToCart(target)}
                     onShare={() => share(target)}
                     onShareLongPress={() => share(target)}
+                    suppressTap={suppressTap}
                   />
                 )}
                 onSeller={openSeller}

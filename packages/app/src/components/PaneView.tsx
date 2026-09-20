@@ -110,6 +110,16 @@ export interface PaneViewProps {
    * above it, so the controls are never the thing a short screen squeezes.
    */
   actions?: React.ReactNode;
+  /**
+   * Asks whether a press arriving right now is a drag's ghost.
+   *
+   * The flap scrolls with the pane, so it is inside the surface the finger
+   * drags — and on the web a drag that starts and ends on the same element
+   * still emits a click when the finger lifts. A scroll begun anywhere on the
+   * title therefore opened the listing at its source instead of scrolling.
+   * Only the deck can answer this, because only the deck sees the drag.
+   */
+  suppressTap?: (() => boolean) | undefined;
   dataSaver?: boolean;
 }
 
@@ -126,6 +136,7 @@ export function PaneView({
   onSeller,
   onSimilar,
   actions,
+  suppressTap,
   dataSaver = false,
 }: PaneViewProps): React.ReactElement {
   const images = [card.media.hero, ...card.media.gallery];
@@ -253,7 +264,10 @@ export function PaneView({
       {/* ---- The flap ------------------------------------------------------ */}
       <View style={styles.meta}>
         <Pressable
-          onPress={onSeller}
+          onPress={() => {
+            if (suppressTap?.()) return;
+            onSeller();
+          }}
           accessibilityRole="button"
           accessibilityLabel={`Seller ${card.seller.displayName} on ${card.merchant.domain}`}
           hitSlop={6}
@@ -268,6 +282,7 @@ export function PaneView({
             source url keeps plain, unlinked text. */}
         <Pressable
           onPress={() => {
+            if (suppressTap?.()) return;
             if (card.sourceUrl) void Linking.openURL(card.sourceUrl);
           }}
           disabled={!card.sourceUrl}
