@@ -1,544 +1,432 @@
-/**
- * Supabase implementation of the checkout repository.
- *
- * This implementation follows the contract defined in repository.ts:
- * - Ids are opaque strings (UUIDs)
- * - Missing rows return null, never throw
- * - claimForSubmission is a single atomic compare-and-set operation
- */
-
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { CHECKOUT_CONFIG, type OrderStatus } from '@window/shared';
+import { logger } from '../lib/logger.js';
 import type {
-  CheckoutRepository,
-  User,
   Cart,
-  Order,
-  Source,
+  CheckoutRepository,
   Coupon,
   MerchantLink,
+  NewOrder,
+  Order,
+  OrderPatch,
   Product,
+  Source,
 } from './repository.js';
 
-/**
- * Helper to convert snake_case database columns to camelCase application fields
- */
-function toCamelCase<T>(obj: Record<string, any>): T {
-  const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    const camelKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
-    result[camelKey] = value;
-  }
-  return result as T;
-}
+const log = logger.child('checkout.repo');
 
 /**
- * Helper to convert camelCase application fields to snake_case database columns
+ * The Supabase implementation of the checkout boundary.
+ *
+ * Two conventions, both load-bearing:
+ *
+ * **Column names are snake_case; everything inside a `jsonb` column is not.**
+ * The row-level mapping is shallow on purpose. A `quote`, an `authorization` or
+ * a cart's `items` is stored exactly as the application holds it, so the round
+ * trip is symmetric. Snake-casing on the way in while reading shallowly on the
+ * way out is the asymmetry that silently turns `authorizedAt` into `undefined`.
+ *
+ * **Every read that can reach a user's data takes a `userId`.** Not because the
+ * caller might forget — because at this layer forgetting is impossible. The
+ * scoping is in the signature, so there is no version of `getOrder` that
+ * returns somebody else's order.
  */
-function toSnakeCase(obj: Record<string, any>): Record<string, any> {
-  const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    const snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-    result[snakeKey] = value;
-  }
-  return result;
-}
-
-/**
- * Helper to parse timestamptz to Date objects
- */
-function parseDates<T>(obj: T): T {
-  if (!obj || typeof obj !== 'object') return obj;
-  const result: Record<string, any> = Array.isArray(obj) ? [] : {};
-  for (const [key, value] of Object.entries(obj as Record<string, any>)) {
-    if (value instanceof Date) {
-      (result as Record<string, any>)[key] = value;
-    } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) {
-      (result as Record<string, any>)[key] = new Date(value);
-    } else if (typeof value === 'object' && value !== null) {
-      (result as Record<string, any>)[key] = parseDates(value);
-    } else {
-      (result as Record<string, any>)[key] = value;
-    }
-  }
-  return Array.isArray(obj) ? (result as T) : (result as T);
-}
-
 export class SupabaseCheckoutRepository implements CheckoutRepository {
+  readonly kind = 'supabase';
+
   constructor(private readonly client: SupabaseClient) {}
 
+  /** Test-only. Empties the checkout tables so each case starts from nothing. */
   async truncate(): Promise<void> {
-    const tables = [
-      'merchant_links',
-      'orders',
-      'carts',
-      'coupons',
-      'users',
-      'sources',
-      'products',
-    ];
-
-    for (const table of tables) {
-      await this.client.from(table).delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    for (const table of ['orders', 'carts', 'merchant_links', 'coupons']) {
+      await this.client.from(table).delete().neq('id', ZERO_UUID);
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // Users
-  // -------------------------------------------------------------------------
-
-  async findUserByDeviceUserId(deviceUserId: string): Promise<User | null> {
-    const { data, error } = await this.client
-      .from('users')
-      .select('*')
-      .eq('device_user_id', deviceUserId)
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<User>(data));
-  }
-
-  async findUserById(id: string): Promise<User | null> {
-    const { data, error } = await this.client.from('users').select('*').eq('id', id).single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<User>(data));
-  }
-
-  async createUser(user: Omit<User, 'id' | 'createdAt' | 'updatedAt'>): Promise<User> {
-    const now = new Date();
-    const doc = {
-      ...toSnakeCase(user),
-      // Provide defaults for required fields from existing schema
-      onboarding: null,
-      interest_vector: null,
-      interest_set: [],
-      exploration_state: {
-        counter: 0,
-        last_topic: null,
-        rejected: [],
-        pending: [],
-      },
-      price_prior: {
-        center: 0,
-        currency: 'USD',
-        confidence: 0.1,
-      },
-      affinities: {
-        brands: {},
-        sellers: {},
-      },
-      suppressions: {
-        products: [],
-        brands: [],
-        sellers: [],
-      },
-      seen_filter: {
-        bits: '',
-        k: 7,
-        m: 200000,
-        n: 0,
-        rebuilt_at: now.toISOString(),
-      },
-      counters: {
-        interaction_count: 0,
-        session_count: 0,
-        last_active_at: now.toISOString(),
-        last_decayed_on: null,
-      },
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
-    };
-
-    const { data, error } = await this.client.from('users').insert(doc).select().single();
-
-    if (error) throw error;
-
-    return parseDates(toCamelCase<User>(data));
-  }
-
-  async createUserMinimal(deviceUserId: string, deviceSecretHash: string | null): Promise<User> {
-    return this.createUser({
-      deviceUserId,
-      deviceSecretHash,
-      sessionEpoch: 1,
-      auth: null,
-      settings: {},
-      onboarding: null,
-      interestVector: null,
-      interestSet: [],
-      explorationState: {
-        counter: 0,
-        lastTopic: null,
-        rejected: [],
-        pending: [],
-      },
-      pricePrior: {
-        center: 0,
-        currency: 'USD',
-        confidence: 0.1,
-      },
-      affinities: {
-        brands: {},
-        sellers: {},
-      },
-      suppressions: {
-        products: [],
-        brands: [],
-        sellers: [],
-      },
-      seenFilter: {
-        bits: '',
-        k: 7,
-        m: 200000,
-        n: 0,
-        rebuiltAt: new Date(),
-      },
-      counters: {
-        interactionCount: 0,
-        sessionCount: 0,
-        lastActiveAt: new Date(),
-        lastDecayedOn: null,
-      },
-    });
-  }
-
-  async updateUser(id: string, updates: Partial<Omit<User, 'id' | 'createdAt'>>): Promise<User | null> {
-    const doc = {
-      ...toSnakeCase(updates),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await this.client.from('users').update(doc).eq('id', id).select().single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<User>(data));
   }
 
   // -------------------------------------------------------------------------
   // Carts
   // -------------------------------------------------------------------------
 
-  async findCartById(id: string): Promise<Cart | null> {
-    const { data, error } = await this.client.from('carts').select('*').eq('id', id).single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Cart>(data));
+  async getOpenCart(userId: string): Promise<Cart | null> {
+    return this.oneCart(
+      this.client.from('carts').select('*').eq('user_id', userId).eq('status', 'open').limit(1),
+    );
   }
 
-  async findOpenCartByUserId(userId: string): Promise<Cart | null> {
+  async getCart(cartId: string, userId: string): Promise<Cart | null> {
+    return this.oneCart(
+      this.client.from('carts').select('*').eq('id', cartId).eq('user_id', userId).limit(1),
+    );
+  }
+
+  async createCart(userId: string, now: Date): Promise<Cart> {
     const { data, error } = await this.client
       .from('carts')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'open')
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Cart>(data));
-  }
-
-  async createCart(cart: Omit<Cart, 'id' | 'updatedAt'>): Promise<Cart> {
-    const doc = {
-      ...toSnakeCase(cart),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await this.client.from('carts').insert(doc).select().single();
-
-    if (error) throw error;
-
-    return parseDates(toCamelCase<Cart>(data));
-  }
-
-  async updateCart(id: string, updates: Partial<Omit<Cart, 'id'>>): Promise<Cart | null> {
-    const doc = {
-      ...toSnakeCase(updates),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await this.client.from('carts').update(doc).eq('id', id).select().single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Cart>(data));
-  }
-
-  async reopenCart(id: string): Promise<Cart | null> {
-    const { data, error } = await this.client
-      .from('carts')
-      .update({ status: 'open', updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .eq('status', 'checking_out')
+      .insert({ user_id: userId, status: 'open', items: [], updated_at: now.toISOString() })
       .select()
       .single();
+    if (error) throw error;
+    return rowToCart(data);
+  }
 
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
+  async saveCartItems(cartId: string, items: Cart['items'], now: Date): Promise<void> {
+    const { error } = await this.client
+      .from('carts')
+      .update({ items, updated_at: now.toISOString() })
+      .eq('id', cartId);
+    if (error) throw error;
+  }
 
-    return parseDates(toCamelCase<Cart>(data));
+  async setCartStatus(cartId: string, status: Cart['status'], now: Date): Promise<void> {
+    const { error } = await this.client
+      .from('carts')
+      .update({ status, updated_at: now.toISOString() })
+      .eq('id', cartId);
+    if (error) throw error;
+  }
+
+  async reopenCart(cartId: string, expected: Cart['status'], now: Date): Promise<void> {
+    // Conditional in the statement, so a cancellation arriving after the user
+    // started a new checkout cannot reopen the cart underneath it.
+    const { error } = await this.client
+      .from('carts')
+      .update({ status: 'open', updated_at: now.toISOString() })
+      .eq('id', cartId)
+      .eq('status', expected);
+    if (error) throw error;
   }
 
   // -------------------------------------------------------------------------
   // Orders
   // -------------------------------------------------------------------------
 
-  async findOrderById(id: string): Promise<Order | null> {
-    const { data, error } = await this.client.from('orders').select('*').eq('id', id).single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Order>(data));
+  async getOrder(orderId: string, userId: string): Promise<Order | null> {
+    return this.oneOrder(
+      this.client.from('orders').select('*').eq('id', orderId).eq('user_id', userId).limit(1),
+    );
   }
 
-  async findOrdersByUserId(userId: string): Promise<Order[]> {
+  async createOrder(order: NewOrder): Promise<Order> {
+    const { data, error } = await this.client
+      .from('orders')
+      .insert(orderToRow(order))
+      .select()
+      .single();
+    if (error) throw error;
+    return rowToOrder(data);
+  }
+
+  async updateOrder(orderId: string, patch: OrderPatch): Promise<Order | null> {
+    return this.oneOrder(
+      this.client.from('orders').update(patchToRow(patch)).eq('id', orderId).select() as Thenable,
+    );
+  }
+
+  async listOrders(userId: string, limit: number): Promise<Order[]> {
     const { data, error } = await this.client
       .from('orders')
       .select('*')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
+      .order('created_at', { ascending: false })
+      .limit(limit);
     if (error) throw error;
-
-    return (data ?? []).map((row) => parseDates(toCamelCase<Order>(row)));
+    return (data ?? []).map(rowToOrder);
   }
 
-  async createOrder(order: Omit<Order, 'id' | 'createdAt' | 'updatedAt'>): Promise<Order> {
-    const now = new Date();
-    const doc = {
-      ...toSnakeCase(order),
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
-    };
+  async countOrders(
+    userId: string,
+    filter: { status: OrderStatus; since?: Date },
+  ): Promise<number> {
+    let query = this.client
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('status', filter.status);
+    if (filter.since) query = query.gte('created_at', filter.since.toISOString());
 
-    const { data, error } = await this.client.from('orders').insert(doc).select().single();
-
+    const { count, error } = await query;
     if (error) throw error;
-
-    return parseDates(toCamelCase<Order>(data));
+    return count ?? 0;
   }
 
-  async updateOrder(id: string, updates: Partial<Omit<Order, 'id' | 'createdAt'>>): Promise<Order | null> {
-    const doc = {
-      ...toSnakeCase(updates),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await this.client.from('orders').update(doc).eq('id', id).select().single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Order>(data));
+  /**
+   * The replay guard: one statement, three conditions, `RETURNING`.
+   *
+   * Postgres applies the predicate and the write atomically to the row, so two
+   * concurrent callers cannot both match `submission_seq = 0`. The loser
+   * updates zero rows and gets `null` — which is the contention case, not an
+   * error, and must never throw.
+   */
+  async claimForSubmission(orderId: string, patch: OrderPatch): Promise<Order | null> {
+    return this.oneOrder(
+      this.client
+        .from('orders')
+        .update({ ...patchToRow(patch), submission_seq: 1 })
+        .eq('id', orderId)
+        .eq('status', 'awaiting_auth')
+        .eq('submission_seq', 0)
+        .select() as Thenable,
+    );
   }
 
-  async claimForSubmission(
-    id: string,
-    authorization: Order['authorization'],
-    payment: Order['payment']
-  ): Promise<Order | null> {
-    const { data, error } = await this.client
-      .from('orders')
-      .update({
-        status: 'placing',
-        submission_seq: 1,
-        authorization: authorization ? toSnakeCase(authorization) : null,
-        payment: payment ? toSnakeCase(payment) : null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .eq('status', 'awaiting_auth')
-      .eq('submission_seq', 0)
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Order>(data));
-  }
-
-  async cancelOrder(id: string): Promise<Order | null> {
-    const { data, error } = await this.client
-      .from('orders')
-      .update({
-        status: 'cancelled',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .not('status', 'in', '("placed","placing","uncertain")')
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<Order>(data));
+  async cancelOrder(orderId: string, userId: string, now: Date): Promise<Order | null> {
+    return this.oneOrder(
+      this.client
+        .from('orders')
+        .update({ status: 'cancelled', updated_at: now.toISOString() })
+        .eq('id', orderId)
+        .eq('user_id', userId)
+        // Past these three the merchant may already hold the order.
+        .not('status', 'in', '("placed","placing","uncertain")')
+        .select() as Thenable,
+    );
   }
 
   // -------------------------------------------------------------------------
-  // Sources
+  // Catalog
   // -------------------------------------------------------------------------
 
-  async findSourceByDomain(domain: string): Promise<Source | null> {
-    const { data, error } = await this.client.from('sources').select('*').eq('id', domain).single();
+  async getProduct(productId: string): Promise<Product | null> {
+    const { data, error } = await this.client
+      .from('products')
+      .select('*')
+      .eq('id', productId)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? (rowToDoc(data) as unknown as Product) : null;
+  }
 
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
+  async getProducts(productIds: readonly string[]): Promise<Product[]> {
+    const ids = [...new Set(productIds)];
+    if (ids.length === 0) return [];
 
-    return parseDates(toCamelCase<Source>(data));
+    const { data, error } = await this.client.from('products').select('*').in('id', ids);
+    if (error) throw error;
+    return (data ?? []).map((row: Record<string, unknown>) => rowToDoc(row) as unknown as Product);
+  }
+
+  async getSource(merchantDomain: string): Promise<Source | null> {
+    const { data, error } = await this.client
+      .from('sources')
+      .select('*')
+      .eq('id', merchantDomain)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? (rowToDoc(data) as unknown as Source) : null;
   }
 
   // -------------------------------------------------------------------------
   // Coupons
   // -------------------------------------------------------------------------
 
-  async findCouponsByMerchantDomain(merchantDomain: string): Promise<Coupon[]> {
+  async listCoupons(merchantDomain: string): Promise<Coupon[]> {
     const { data, error } = await this.client
       .from('coupons')
       .select('*')
       .eq('merchant_domain', merchantDomain);
-
     if (error) throw error;
-
-    return (data ?? []).map((row) => parseDates(toCamelCase<Coupon>(row)));
+    return (data ?? []).map((row: Record<string, unknown>) => rowToDoc(row) as unknown as Coupon);
   }
 
-  async createCoupon(coupon: Omit<Coupon, 'id'>): Promise<Coupon> {
-    const doc = toSnakeCase(coupon);
-
-    const { data, error } = await this.client.from('coupons').insert(doc).select().single();
-
+  async recordCouponOutcome(
+    merchantDomain: string,
+    code: string,
+    outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
+    now: Date,
+  ): Promise<void> {
+    const { data, error } = await this.client
+      .from('coupons')
+      .select('*')
+      .eq('merchant_domain', merchantDomain)
+      .eq('code', code)
+      .limit(1)
+      .maybeSingle();
     if (error) throw error;
+    // An unknown code is ignored rather than created: codes enter through
+    // discovery, and a failure against one we never had is not evidence.
+    if (!data) return;
 
-    return parseDates(toCamelCase<Coupon>(data));
-  }
+    const coupon = rowToDoc(data) as unknown as Coupon;
+    const attempts = coupon.performance.attempts + 1;
+    const successes = coupon.performance.successes + (outcome.applied ? 1 : 0);
+    const consecutiveFailures = outcome.applied ? 0 : coupon.performance.consecutiveFailures + 1;
 
-  async updateCoupon(id: string, updates: Partial<Omit<Coupon, 'id'>>): Promise<Coupon | null> {
-    const doc = toSnakeCase(updates);
+    const discountPct =
+      outcome.applied && outcome.subtotal > 0
+        ? (outcome.observedDiscount / outcome.subtotal) * 100
+        : 0;
+    const meanDiscountPct = outcome.applied
+      ? (coupon.performance.meanDiscountPct * coupon.performance.successes + discountPct) /
+        Math.max(1, successes)
+      : coupon.performance.meanDiscountPct;
 
-    const { data, error } = await this.client.from('coupons').update(doc).eq('id', id).select().single();
+    const retired = consecutiveFailures >= CHECKOUT_CONFIG.couponRetirementFailures;
 
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
+    const { error: updateError } = await this.client
+      .from('coupons')
+      .update({
+        performance: {
+          attempts,
+          successes,
+          successRate: successes / attempts,
+          meanDiscountPct: Math.round(meanDiscountPct * 10) / 10,
+          consecutiveFailures,
+          lastSuccessAt: outcome.applied ? now.toISOString() : coupon.performance.lastSuccessAt,
+        },
+        ...(retired ? { status: 'retired' } : {}),
+      })
+      .eq('id', coupon.id);
+    if (updateError) throw updateError;
 
-    return parseDates(toCamelCase<Coupon>(data));
+    if (retired) log.info('coupon retired after consecutive failures', { merchantDomain, code });
   }
 
   // -------------------------------------------------------------------------
-  // Merchant Links
+  // Merchant links
   // -------------------------------------------------------------------------
 
-  async findMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null> {
+  async upsertMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<void> {
+    const { error } = await this.client.from('merchant_links').upsert(
+      {
+        user_id: link.userId,
+        merchant_domain: link.merchantDomain,
+        status: link.status,
+        encrypted_session: link.encryptedSession,
+        created_at: link.createdAt.toISOString(),
+        linked_at: link.linkedAt?.toISOString() ?? null,
+        expires_at: link.expiresAt.toISOString(),
+      },
+      { onConflict: 'user_id,merchant_domain' },
+    );
+    if (error) throw error;
+  }
+
+  async getMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null> {
     const { data, error } = await this.client
       .from('merchant_links')
       .select('*')
       .eq('user_id', userId)
       .eq('merchant_domain', merchantDomain)
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<MerchantLink>(data));
-  }
-
-  async createMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<MerchantLink> {
-    const doc = toSnakeCase(link);
-
-    const { data, error } = await this.client.from('merchant_links').insert(doc).select().single();
-
+      .limit(1)
+      .maybeSingle();
     if (error) throw error;
-
-    return parseDates(toCamelCase<MerchantLink>(data));
-  }
-
-  async updateMerchantLink(id: string, updates: Partial<Omit<MerchantLink, 'id'>>): Promise<MerchantLink | null> {
-    const doc = toSnakeCase(updates);
-
-    const { data, error } = await this.client
-      .from('merchant_links')
-      .update(doc)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
-    }
-
-    return parseDates(toCamelCase<MerchantLink>(data));
+    return data ? (rowToDoc(data) as unknown as MerchantLink) : null;
   }
 
   // -------------------------------------------------------------------------
-  // Products
+  // Internals
   // -------------------------------------------------------------------------
 
-  async findProductsByIds(ids: string[]): Promise<Product[]> {
-    if (ids.length === 0) return [];
-
-    const { data, error } = await this.client
-      .from('products')
-      .select('id,title,price,stock,risk,status,source_type,source')
-      .in('id', ids);
-
+  /** Zero or one order, with no-rows treated as absence rather than failure. */
+  private async oneOrder(query: Thenable): Promise<Order | null> {
+    const { data, error } = await query;
     if (error) throw error;
-
-    return (data ?? []).map((row) => parseDates(toCamelCase<Product>(row)));
+    const row = Array.isArray(data) ? data[0] : data;
+    return row ? rowToOrder(row) : null;
   }
 
-  async findProductById(id: string): Promise<Product | null> {
-    const { data, error } = await this.client
-      .from('products')
-      .select('id,title,price,stock,risk,status,source_type,source')
-      .eq('id', id)
-      .single();
+  private async oneCart(query: Thenable): Promise<Cart | null> {
+    const { data, error } = await query;
+    if (error) throw error;
+    const row = Array.isArray(data) ? data[0] : data;
+    return row ? rowToCart(row) : null;
+  }
+}
 
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw error;
+/**
+ * What a PostgREST builder resolves to.
+ *
+ * The client's own generic types describe the builder, not the awaited value,
+ * and they differ per verb. This is the shape every one of them settles into.
+ */
+type Thenable = PromiseLike<{
+  data: Record<string, unknown> | Record<string, unknown>[] | null;
+  error: { code?: string; message: string } | null;
+}>;
+
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
+
+// ---------------------------------------------------------------------------
+// Row translation
+// ---------------------------------------------------------------------------
+
+/**
+ * Column names only, one level deep.
+ *
+ * Deliberately shallow: a `jsonb` column holds the application's own shape and
+ * must come back exactly as it went in. Recursing here would rename keys inside
+ * `quote` and `items`, and the write path does not rename them — the two would
+ * disagree, and `quote.expiresAt` would arrive as `undefined`.
+ */
+function rowToDoc(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())] = value;
+  }
+  return out;
+}
+
+/** Revives ISO strings into `Date`, including inside `jsonb` payloads. */
+function reviveDates<T>(value: T): T {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    return (ISO_DATE.test(value) ? new Date(value) : value) as unknown as T;
+  }
+  if (Array.isArray(value)) return value.map(reviveDates) as unknown as T;
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = reviveDates(entry);
     }
-
-    return parseDates(toCamelCase<Product>(data));
+    return out as unknown as T;
   }
+  return value;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+function rowToOrder(row: Record<string, unknown>): Order {
+  return reviveDates(rowToDoc(row)) as unknown as Order;
+}
+
+function rowToCart(row: Record<string, unknown>): Cart {
+  return reviveDates(rowToDoc(row)) as unknown as Cart;
+}
+
+function orderToRow(order: NewOrder): Record<string, unknown> {
+  return {
+    user_id: order.userId,
+    cart_id: order.cartId,
+    merchant_domain: order.merchantDomain,
+    // jsonb, stored as the application holds it.
+    items: order.items,
+    quote: order.quote,
+    coupon: order.coupon,
+    authorization: order.authorization,
+    payment: order.payment,
+    agent_run: order.agentRun,
+    status: order.status,
+    merchant_order_number: order.merchantOrderNumber,
+    failure: order.failure,
+    submission_seq: order.submissionSeq,
+    created_at: order.createdAt.toISOString(),
+    updated_at: order.updatedAt.toISOString(),
+  };
+}
+
+function patchToRow(patch: OrderPatch): Record<string, unknown> {
+  const row: Record<string, unknown> = {};
+  if (patch.items !== undefined) row.items = patch.items;
+  if (patch.quote !== undefined) row.quote = patch.quote;
+  if (patch.coupon !== undefined) row.coupon = patch.coupon;
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.authorization !== undefined) row.authorization = patch.authorization;
+  if (patch.payment !== undefined) row.payment = patch.payment;
+  if (patch.agentRun !== undefined) row.agent_run = patch.agentRun;
+  if (patch.merchantOrderNumber !== undefined) row.merchant_order_number = patch.merchantOrderNumber;
+  if (patch.failure !== undefined) row.failure = patch.failure;
+  row.updated_at = (patch.updatedAt ?? new Date()).toISOString();
+  return row;
 }

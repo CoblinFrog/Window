@@ -27,6 +27,8 @@ import {
   watchConnectivity,
   type CartDiff,
 } from '../src/store/cart.js';
+import { useSession } from '../src/store/session.js';
+import { goBackOrFeed } from '../src/navigation.js';
 
 /**
  * The cart.
@@ -37,8 +39,17 @@ import {
  * until every change has been looked at. Nothing here auto-accepts.
  */
 
-function heroUri(hero: MediaImage): string | null {
-  return hero.webp[0] ?? hero.avif[0] ?? null;
+/**
+ * The best available image URL for a line, or null.
+ *
+ * A line whose product has no hero is an ordinary state — a listing can reach
+ * the cart without usable imagery. Taking `MediaImage` non-null here meant one
+ * such line threw inside `lines.map` and took down the whole cart screen,
+ * including the items that were fine.
+ */
+function heroUri(hero: MediaImage | null | undefined): string | null {
+  if (!hero) return null;
+  return hero.webp?.[0] ?? hero.avif?.[0] ?? null;
 }
 
 interface ControlProps {
@@ -99,6 +110,7 @@ export default function CartScreen(): React.ReactElement {
   const auctionBlock = useCart((state) => state.auctionBlock);
   const acknowledged = useCart((state) => state.acknowledged);
 
+  const session = useSession();
   const load = useCart((state) => state.load);
   const restoreQueue = useCart((state) => state.restoreQueue);
   const acknowledgeDiff = useCart((state) => state.acknowledgeDiff);
@@ -107,10 +119,22 @@ export default function CartScreen(): React.ReactElement {
   const remove = useCart((state) => state.remove);
   const clearAuctionBlock = useCart((state) => state.clearAuctionBlock);
 
+  // Wait for the session before fetching.
+  //
+  // Opening /cart directly is a cold page load: the auth token lives in memory
+  // and does not exist until `boot()` has run. Loading the cart before then
+  // sends an unauthenticated request, gets a 401, and renders an empty cart
+  // over a cart that actually has items in it — which reads as lost data
+  // rather than as a race.
   useEffect(() => {
+    if (session.status === 'idle') void session.boot();
+  }, [session.status, session]);
+
+  useEffect(() => {
+    if (session.status !== 'ready') return;
     void restoreQueue().then(() => load());
     return watchConnectivity();
-  }, [load, restoreQueue]);
+  }, [session.status, load, restoreQueue]);
 
   const linesById = new Map((cart?.lines ?? []).map((line) => [line.id, line]));
   const pendingDiffs = (cart?.diffs ?? []).filter(
@@ -118,6 +142,15 @@ export default function CartScreen(): React.ReactElement {
   );
   const blockedReason = useCart((state) => state.checkoutBlockedReason());
   const canCheckout = blockedReason === null;
+
+  // Browsing is anonymous; ordering is not. Rather than letting checkout fail
+  // with "an anonymous principal cannot place orders" — which is true, and
+  // useless to the person reading it — the button says what it needs and goes
+  // and gets it.
+  // Mirrors the server's policy. `session.requiresAccount` comes from the
+  // bootstrap response, so a demo running without the requirement does not send
+  // the user to a sign-in screen the server will not ask for.
+  const needsAccount = session.isAnonymous && session.requiresAccount;
 
   const openBid = useCallback(() => {
     if (auctionBlock?.sourceUrl) void Linking.openURL(auctionBlock.sourceUrl);
@@ -127,7 +160,7 @@ export default function CartScreen(): React.ReactElement {
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Control label="Back" onPress={() => router.back()} style={styles.headerButton}>
+        <Control label="Back" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
         </Control>
         <Text style={styles.headerTitle}>Cart</Text>
@@ -321,12 +354,16 @@ export default function CartScreen(): React.ReactElement {
         {blockedReason ? <Text style={styles.smallText}>{blockedReason}</Text> : null}
         <Control
           label="Review checkout"
-          onPress={() => router.push('/checkout')}
+          onPress={() => router.push(needsAccount ? '/claim' : '/checkout')}
           disabled={!canCheckout}
           style={[styles.primary, canCheckout ? null : styles.primaryDisabled]}
         >
           <Text style={styles.primaryText}>
-            {canCheckout ? 'Review checkout' : 'Checkout unavailable'}
+            {!canCheckout
+              ? 'Checkout unavailable'
+              : needsAccount
+                ? 'Confirm your email to check out'
+                : 'Review checkout'}
           </Text>
         </Control>
       </View>

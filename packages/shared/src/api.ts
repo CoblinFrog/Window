@@ -287,7 +287,14 @@ export interface CartLine {
   title: string;
   merchant: { domain: string; displayName: string };
   seller: { id: string; handle: string };
-  hero: MediaImage;
+  /**
+   * The product's hero image, when it has one.
+   *
+   * Nullable, like `OrdersResponse`'s already is: a listing can reach the
+   * cart without usable imagery, and declaring otherwise only moves the
+   * problem to a null dereference in the renderer.
+   */
+  hero: MediaImage | null;
   variant: Record<string, string>;
   quantity: number;
   priceAtAdd: Money;

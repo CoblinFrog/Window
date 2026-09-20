@@ -11,18 +11,23 @@ import {
 } from '@window/shared';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import type { CollectionSet, Order, User, Cart, Product, Source } from '../db/supabase-collections.js';
-import { count, find, findOne, insert, updateOne } from '../db/supabase-helpers.js';
+import type { User } from '../db/supabase-collections.js';
+import type { CheckoutRepository, Order } from './repository.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
 import { checkoutInterstitial } from '../ingestion/risk.js';
 import {
   AgentAbort,
+  BrowserCheckoutAgent,
   SimulatedMerchantAgent,
   type AgentPrompt,
   type AgentSession,
+  type AgentToolCall,
   type CheckoutAgent,
+  type CheckoutBrowser,
   type CheckoutLineItem,
+  type FieldMap,
 } from './agent.js';
+import type { VaultHandle } from './vault.js';
 import { CouponStore, bestCouponOutcome, stackableSubset } from './coupons.js';
 import {
   DEFAULT_SPEND_RULES,
@@ -34,7 +39,12 @@ import {
 const log = logger.child('checkout');
 
 export interface OrchestratorDeps {
-  collections: CollectionSet;
+  /**
+   * The checkout data boundary. Seven tables, named operations, opaque string
+   * ids — so the orchestrator's invariants can be tested in-process against an
+   * in-memory store, and run in production against whatever the deployment has.
+   */
+  repository: CheckoutRepository;
   cache: KeyValueCache;
   coupons?: CouponStore;
   payments?: PaymentRail;
@@ -43,6 +53,14 @@ export interface OrchestratorDeps {
    * the simulator is what runs when neither is configured.
    */
   agentFor?: (merchantDomain: string) => Promise<CheckoutAgent>;
+  /** The browser fleet, when `CHECKOUT_AGENT=browser`. */
+  browser?: CheckoutBrowser | null;
+  /** Per-merchant selector maps. No map means hand off rather than guess. */
+  fieldMapFor?: (merchantDomain: string) => FieldMap | null;
+  /** The user's delivery details, encrypted for the life of the job. */
+  vaultFor?: () => VaultHandle | null;
+  /** Origin override, so a test can point a merchant at a local fixture. */
+  originFor?: (merchantDomain: string) => string;
 }
 
 interface PendingPrompt {
@@ -91,6 +109,35 @@ export function hashQuote(input: {
   return createHash('sha256').update(canonical).digest('hex');
 }
 
+/**
+ * Reduces a tool call to what an auditor needs and a breach cannot use.
+ *
+ * Selectors, URLs and the tool name are kept — they are the record of what the
+ * agent did. Typed values become a type and a length, so "the agent entered a
+ * 14-character value into #phone" survives and the phone number does not.
+ */
+export function redactToolCall(call: AgentToolCall): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(call.args)) {
+    if (key === 'value' || key === 'text' || key === 'password') {
+      args[key] = typeof value === 'string' ? `<redacted:${value.length}>` : '<redacted>';
+    } else if (typeof value === 'string') {
+      args[key] = value.slice(0, 256);
+    } else {
+      args[key] = value;
+    }
+  }
+
+  return {
+    tool: call.tool,
+    args,
+    at: call.at,
+    // The result can echo page content back, which is merchant-controlled text.
+    result: call.result.slice(0, 256),
+  };
+}
+
 export class CheckoutConflict extends Error {
   constructor(
     readonly code: 'quote_mismatch' | 'quote_expired' | 'bad_state' | 'already_submitted',
@@ -115,7 +162,7 @@ export class CheckoutOrchestrator {
   private readonly payments: PaymentRail;
 
   constructor(private readonly deps: OrchestratorDeps) {
-    this.coupons = deps.coupons ?? new CouponStore(deps.collections.coupons);
+    this.coupons = deps.coupons ?? new CouponStore(deps.repository);
     this.payments = deps.payments ?? createPaymentRail();
   }
 
@@ -129,8 +176,9 @@ export class CheckoutOrchestrator {
    * no single API to post an order to fifteen different sites.
    */
   async createJobs(user: User, cartId: string, now = new Date()): Promise<Order[]> {
-    const { collections } = this.deps;
-    const cart = await findOne<Cart>(collections.carts, { id: cartId, userId: user.id });
+    const { repository } = this.deps;
+    const userId = user.id;
+    const cart = await repository.getCart(cartId, userId);
     if (!cart) throw new Error('Cart not found.');
 
     const byMerchant = new Map<string, typeof cart.items>();
@@ -141,14 +189,13 @@ export class CheckoutOrchestrator {
       byMerchant.set(item.merchantDomain, list);
     }
 
-    const productIds = cart.items.map((i) => i.productId);
-    const products = await find<Product>(collections.products, { id: { $in: productIds } });
+    const products = await repository.getProducts(cart.items.map((i) => i.productId));
     const titles = new Map(products.map((p) => [p.id, p.title]));
 
     const orders: Order[] = [];
     for (const [merchantDomain, items] of byMerchant) {
       const order: Omit<Order, 'id'> = {
-        userId: user.id,
+        userId,
         cartId,
         merchantDomain,
         items: items.map((item) => ({
@@ -170,11 +217,10 @@ export class CheckoutOrchestrator {
         createdAt: now,
         updatedAt: now,
       };
-      const result = await insert<Order>(collections.orders, order);
-      orders.push(result);
+      orders.push(await repository.createOrder(order));
     }
 
-    await updateOne<Cart>(collections.carts, { id: cartId }, { status: 'checking_out', updatedAt: now });
+    await repository.setCartStatus(cartId, 'checking_out', now);
 
     return orders;
   }
@@ -189,32 +235,28 @@ export class CheckoutOrchestrator {
    * explicit user tap against this exact quote.
    */
   async runQuote(order: Order, user: User): Promise<Order> {
-    const { collections } = this.deps;
+    const { repository } = this.deps;
     const jobId = order.agentRun?.jobId ?? `job_${randomUUID().slice(0, 18)}`;
     const runtime = this.runtimeFor(order.id, jobId, order.merchantDomain);
 
-    await updateOne<Order>(
-      collections.orders,
-      { id: order.id },
-      {
-          status: 'quoting' as OrderStatus,
-          agentRun: {
-            jobId,
-            startedAt: new Date(),
-            endedAt: null,
-            toolCallCount: 0,
-            screenshots: [],
-            transcriptRef: `${jobId}/quote.json`,
-          },
-        updatedAt: new Date(),
+    await repository.updateOrder(order.id, {
+      status: 'quoting' as OrderStatus,
+      agentRun: {
+        jobId,
+        startedAt: new Date(),
+        endedAt: null,
+        toolCallCount: 0,
+        screenshots: [],
+        transcriptRef: `${jobId}/quote.json`,
       },
-    );
+      updatedAt: new Date(),
+    });
     this.emit(runtime, { event: 'state', state: 'quoting' });
 
     const timeout = setTimeout(() => runtime.abort.abort(), CHECKOUT_CONFIG.jobTimeoutMs);
 
     try {
-      const source = await findOne<Source>(collections.sources, { id: order.merchantDomain });
+      const source = await repository.getSource(order.merchantDomain);
       // A merchant that blocks agent traffic switches permanently to
       // deep-link-out; running the agent again would just get us blocked harder.
       if (source?.checkout.blocksAgents) {
@@ -225,8 +267,8 @@ export class CheckoutOrchestrator {
         );
       }
 
-      const products = await find<Product>(collections.products, { id: { $in: order.items.map((i) => i.productId) } });
-      const productById = new Map(products.map((p: any) => [p.id, p]));
+      const products = await repository.getProducts(order.items.map((i) => i.productId));
+      const productById = new Map(products.map((p) => [p.id, p]));
 
       const items: CheckoutLineItem[] = order.items.map((item) => {
         const product = productById.get(item.productId);
@@ -242,7 +284,9 @@ export class CheckoutOrchestrator {
       });
 
       const subtotal = items.reduce((s, i) => s + i.expectedUnitPrice * i.quantity, 0);
-      const orderCount = await count(collections.orders, { userId: user.id, status: 'placed' });
+      const orderCount = await repository.countOrders(user.id, {
+        status: 'placed',
+      });
 
       // Coupon discovery runs in parallel with cart building, so it adds no
       // wall-clock time to checkout.
@@ -319,27 +363,32 @@ export class CheckoutOrchestrator {
         hash,
       };
 
-      const updated = await updateOne<Order>(
-        collections.orders,
-        { id: order.id },
-        {
-          items: remainingItems,
-          quote: storedQuote,
-          coupon: best.code
-            ? { code: best.code, discount: best.discount, attempts: best.attempts }
-            : null,
-          status: 'awaiting_auth' as OrderStatus,
-          agentRun: {
-            ...(order.agentRun ?? {}),
+      const updated = await repository.updateOrder(order.id, {
+        items: remainingItems,
+        quote: storedQuote,
+        coupon: best.code
+          ? { code: best.code, discount: best.discount, attempts: best.attempts }
+          : null,
+        status: 'awaiting_auth' as OrderStatus,
+        agentRun: {
+          ...(order.agentRun ?? {
             jobId,
-            toolCallCount: runtime.session.toolCalls.length,
-            screenshots: runtime.session.screenshots,
-          },
-          updatedAt: generatedAt,
+            startedAt: new Date(),
+            endedAt: null,
+            transcriptRef: `${jobId}/quote.json`,
+          }),
+          jobId,
+          toolCallCount: runtime.session.toolCalls.length,
+          screenshots: runtime.session.screenshots,
         },
-      );
+        updatedAt: generatedAt,
+      });
 
       await this.writeAudit(runtime, order, 'quote');
+      // Carries the state, and the client refetches the full summary. The
+      // payload type allows a summary here, but building one needs the source
+      // and risk lookups the route does — so the event stays a signal and the
+      // route stays the single place a summary is assembled.
       this.emit(runtime, { event: 'quote_ready', state: 'awaiting_auth' });
 
       return updated as Order;
@@ -365,8 +414,8 @@ export class CheckoutOrchestrator {
     input: { quoteHash: string; passkeyAssertion: string; userAgent: string },
     now = new Date(),
   ): Promise<Order> {
-    const { collections } = this.deps;
-    const order = await findOne<Order>(collections.orders, { id: orderId, userId: user.id });
+    const { repository } = this.deps;
+    const order = await repository.getOrder(orderId, user.id);
     if (!order) throw new CheckoutConflict('bad_state', 'Order not found.');
 
     if (order.status !== 'awaiting_auth') {
@@ -397,13 +446,12 @@ export class CheckoutOrchestrator {
     }
 
     try {
-      const ordersToday = await count(collections.orders, {
-        userId: user.id,
+      const ordersToday = await repository.countOrders(user.id, {
         status: 'placed',
-        createdAt: { $gte: new Date(now.getTime() - 86_400_000) },
+        since: new Date(now.getTime() - 86_400_000),
       });
 
-      const source = await findOne<Source>(collections.sources, { id: order.merchantDomain });
+      const source = await repository.getSource(order.merchantDomain);
       const intent = await this.payments.createIntent({
         userId: user.id,
         jobId: order.agentRun?.jobId ?? orderId,
@@ -420,40 +468,31 @@ export class CheckoutOrchestrator {
       // The submission counter is incremented under the same guard that
       // authorised the job. If it is already non-zero, something placed this
       // order before us and we must not place it again.
-      let claimed: Order;
-      try {
-        claimed = await updateOne<Order>(
-          collections.orders,
-          { id: orderId, status: 'awaiting_auth', submissionSeq: 0 },
-          {
-            status: 'placing' as OrderStatus,
-            submissionSeq: 1,
-            authorization: {
-              authorizedAt: now,
-              userAgentHash: createHash('sha256').update(input.userAgent).digest('hex').slice(0, 32),
-              quoteHash: input.quoteHash,
-            },
-            payment: {
-              rail: 'reap' as const,
-              intentId: intent.intentId,
-              tokenRef: intent.tokenRef,
-              cap: intent.cap,
-              protocol: (source?.checkout.protocol ?? 'browser') as 'acp' | 'mpp' | 'tap' | 'browser',
-            },
-            updatedAt: now,
-          },
-        );
-      } catch {
-        await this.payments.revoke(intent.intentId);
-        throw new CheckoutConflict('already_submitted', 'This job has already been submitted.');
-      }
+      // One atomic compare-and-set. Two concurrent taps cannot both win it:
+      // the loser gets null and its intent is revoked immediately below.
+      const claimed = await repository.claimForSubmission(orderId, {
+        status: 'placing' as OrderStatus,
+        authorization: {
+          authorizedAt: now,
+          userAgentHash: createHash('sha256').update(input.userAgent).digest('hex').slice(0, 32),
+          quoteHash: input.quoteHash,
+        },
+        payment: {
+          rail: 'reap' as const,
+          intentId: intent.intentId,
+          tokenRef: intent.tokenRef,
+          cap: intent.cap,
+          protocol: (source?.checkout.protocol ?? 'browser') as 'acp' | 'mpp' | 'tap' | 'browser',
+        },
+        updatedAt: now,
+      });
 
       if (!claimed) {
         await this.payments.revoke(intent.intentId);
         throw new CheckoutConflict('already_submitted', 'This job has already been submitted.');
       }
 
-      return await this.place(claimed as Order, intent.intentId, intent.paymentHandle);
+      return await this.place(claimed, intent.intentId, intent.paymentHandle);
     } catch (error) {
       if (error instanceof PaymentRuleViolation) {
         await this.fail(order, error);
@@ -465,7 +504,7 @@ export class CheckoutOrchestrator {
   }
 
   private async place(order: Order, intentId: string, paymentHandle: string): Promise<Order> {
-    const { collections } = this.deps;
+    const { repository } = this.deps;
     const jobId = order.agentRun?.jobId as string;
     const runtime = this.runtimeFor(order.id, jobId, order.merchantDomain);
     const now = new Date();
@@ -511,21 +550,19 @@ export class CheckoutOrchestrator {
       // anything is shown as complete. It is never re-submitted.
       const status: OrderStatus = placement.uncertain ? 'uncertain' : 'placed';
 
-      const updated = await updateOne<Order>(
-        collections.orders,
-        { id: order.id },
-        {
-          status,
-          merchantOrderNumber: placement.merchantOrderNumber,
-          agentRun: {
-            ...(order.agentRun ?? {}),
-            endedAt: now,
-            toolCallCount: runtime.session.toolCalls.length,
-            screenshots: runtime.session.screenshots,
-          },
-          updatedAt: now,
-        },
-      );
+      const updated = await repository.updateOrder(order.id, {
+        status,
+        merchantOrderNumber: placement.merchantOrderNumber,
+        agentRun: order.agentRun
+          ? {
+              ...order.agentRun,
+              endedAt: now,
+              toolCallCount: runtime.session.toolCalls.length,
+              screenshots: runtime.session.screenshots,
+            }
+          : null,
+        updatedAt: now,
+      });
 
       await this.writeAudit(runtime, order, 'placement');
       this.emit(runtime, { event: 'state', state: status });
@@ -550,8 +587,8 @@ export class CheckoutOrchestrator {
    * the order, and a cancel that silently does nothing is worse than a refusal.
    */
   async cancel(orderId: string, user: User, now = new Date()): Promise<Order> {
-    const { collections } = this.deps;
-    const order = await findOne<Order>(collections.orders, { id: orderId, userId: user.id });
+    const { repository } = this.deps;
+    const order = await repository.getOrder(orderId, user.id);
     if (!order) throw new CheckoutConflict('bad_state', 'Order not found.');
     if (order.status === 'placed' || order.status === 'placing' || order.status === 'uncertain') {
       throw new CheckoutConflict(
@@ -568,23 +605,13 @@ export class CheckoutOrchestrator {
       this.runtimes.delete(orderId);
     }
 
-    const updated = await updateOne<Order>(
-      collections.orders,
-      { id: orderId, status: { $nin: ['placed', 'placing', 'uncertain'] } },
-      { status: 'cancelled' as OrderStatus, updatedAt: now },
-    );
+    const updated = await repository.cancelOrder(orderId, user.id, now);
     if (!updated) throw new CheckoutConflict('bad_state', 'This job could not be cancelled.');
 
     // The cart is restored to `open` so nothing is stranded by a cancellation.
-    if (order.cartId) {
-      await updateOne<Cart>(
-        collections.carts,
-        { id: order.cartId, status: 'checking_out' },
-        { status: 'open', updatedAt: now },
-      );
-    }
+    await repository.reopenCart(order.cartId, 'checking_out', now);
 
-    return updated as Order;
+    return updated;
   }
 
   /** Answers a `request_user_input` prompt. */
@@ -611,9 +638,8 @@ export class CheckoutOrchestrator {
 
   /** Copy shown before authorization when a line carries a caution-tier flag. */
   async riskInterstitial(order: Order): Promise<string | null> {
-    const products = await find<Product>(
-      this.deps.collections.products,
-      { id: { $in: order.items.map((i) => i.productId) } },
+    const products = await this.deps.repository.getProducts(
+      order.items.map((i) => i.productId),
     );
     for (const product of products) {
       const text = checkoutInterstitial(product.risk as never, product.title);
@@ -683,7 +709,19 @@ export class CheckoutOrchestrator {
     // protocol client nor a browser driver configured, the simulator is what
     // runs — and it is named a simulator precisely so that nobody mistakes a
     // green checkout here for a real one.
-    const source = await findOne<Source>(this.deps.collections.sources, { id: merchantDomain });
+    const source = await this.deps.repository.getSource(merchantDomain);
+
+    if (env.checkoutAgent === 'browser') {
+      // A field map is required: without one we do not know this merchant's
+      // form, and guessing selectors on a live checkout fills the wrong field.
+      // `BrowserCheckoutAgent` aborts to a deep-link handoff in that case.
+      return new BrowserCheckoutAgent(this.deps.browser ?? null, {
+        fieldMapFor: (domain) => this.deps.fieldMapFor?.(domain) ?? null,
+        vault: this.deps.vaultFor?.() ?? null,
+        ...(this.deps.originFor ? { originFor: this.deps.originFor } : {}),
+      });
+    }
+
     return new SimulatedMerchantAgent({
       stepDelayMs: env.agentStepDelayMs,
       automaticPromotionPct: source?.checkout.stackableCoupons ? 5 : 0,
@@ -704,19 +742,12 @@ export class CheckoutOrchestrator {
       message,
     });
 
-    const updated = await updateOne<Order>(
-      this.deps.collections.orders,
-      { id: order.id },
-      {
-        status: 'failed' as OrderStatus,
-        failure: { code, message, recoverable },
-        agentRun: {
-          ...(order.agentRun ?? {}),
-          endedAt: new Date(),
-        },
-        updatedAt: new Date(),
-      },
-    );
+    const updated = await this.deps.repository.updateOrder(order.id, {
+      status: 'failed' as OrderStatus,
+      failure: { code, message, recoverable },
+      agentRun: order.agentRun ? { ...order.agentRun, endedAt: new Date() } : null,
+      updatedAt: new Date(),
+    });
 
     const runtime = this.runtimes.get(order.id);
     if (runtime) {
@@ -732,6 +763,13 @@ export class CheckoutOrchestrator {
    * Every job writes an immutable audit record: the tool calls made, the final
    * screenshot, the quote shown and the authorization timestamp. Retained 90
    * days for dispute resolution, then deleted.
+   *
+   * What it does *not* write is the content the agent typed. A checkout agent
+   * fills in a name, a street address and a phone number; recording those
+   * verbatim, next to a user id, for ninety days, builds a store of personal
+   * data whose only purpose is to be breached. The dispute question an audit
+   * log has to answer is "what did the agent do", and field names plus value
+   * shapes answer it without keeping the values themselves.
    */
   private async writeAudit(runtime: JobRuntime, order: Order, phase: string): Promise<void> {
     const dir = join(env.auditDir, runtime.session.jobId);
@@ -745,7 +783,7 @@ export class CheckoutOrchestrator {
       writtenAt: new Date().toISOString(),
       quote: order.quote,
       authorization: order.authorization,
-      toolCalls: runtime.session.toolCalls,
+      toolCalls: runtime.session.toolCalls.map(redactToolCall),
       screenshots: runtime.session.screenshots,
     };
     // Append-only: one file per phase, never rewritten, so the record of what

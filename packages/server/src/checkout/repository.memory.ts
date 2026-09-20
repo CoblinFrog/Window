@@ -1,292 +1,279 @@
-/**
- * In-memory implementation of the checkout repository for testing.
- *
- * This implementation stores all data in memory and is used for testing
- * the conformance suite without requiring a real database connection.
- */
-
+import { randomUUID } from 'node:crypto';
+import { CHECKOUT_CONFIG, type OrderStatus } from '@window/shared';
 import type {
-  CheckoutRepository,
-  User,
   Cart,
-  Order,
-  Source,
+  CheckoutRepository,
   Coupon,
   MerchantLink,
+  NewOrder,
+  Order,
+  OrderPatch,
   Product,
+  Source,
 } from './repository.js';
 
+const COUPON_RETIREMENT_FAILURES = CHECKOUT_CONFIG.couponRetirementFailures;
+
+/**
+ * An in-process implementation of the checkout boundary.
+ *
+ * Its purpose is to let checkout be built and tested without a database at all.
+ * That is not a compromise: the invariants checkout has to hold — one
+ * submission per authorization, no cross-user read, a cancel that refuses after
+ * the point of no return — are logic, and logic is better tested against a
+ * store that starts empty and deterministic every run than against a seeded
+ * server somebody has to remember to start.
+ *
+ * Every document is structurally cloned on the way in and on the way out. A
+ * real store cannot hand a caller a live reference into its own state, and a
+ * fake that does will hide aliasing bugs that only appear in production.
+ */
 export class MemoryCheckoutRepository implements CheckoutRepository {
-  private users = new Map<string, User>();
-  private carts = new Map<string, Cart>();
-  private orders = new Map<string, Order>();
-  private sources = new Map<string, Source>();
-  private coupons = new Map<string, Coupon>();
-  private merchantLinks = new Map<string, MerchantLink>();
-  private products = new Map<string, Product>();
+  readonly kind = 'memory';
 
-  async truncate(): Promise<void> {
-    this.users.clear();
-    this.carts.clear();
-    this.orders.clear();
-    this.sources.clear();
-    this.coupons.clear();
-    this.merchantLinks.clear();
-    this.products.clear();
-  }
+  private readonly carts = new Map<string, Cart>();
+  private readonly orders = new Map<string, Order>();
+  private readonly products = new Map<string, Product>();
+  private readonly sources = new Map<string, Source>();
+  private readonly coupons = new Map<string, Coupon>();
+  private readonly links = new Map<string, MerchantLink>();
 
   // -------------------------------------------------------------------------
-  // Users
+  // Test fixtures
   // -------------------------------------------------------------------------
 
-  async findUserByDeviceUserId(deviceUserId: string): Promise<User | null> {
-    for (const user of this.users.values()) {
-      if (user.deviceUserId === deviceUserId) return user;
-    }
-    return null;
-  }
-
-  async findUserById(id: string): Promise<User | null> {
-    return this.users.get(id) || null;
-  }
-
-  async createUser(user: Omit<User, 'id' | 'createdAt' | 'updatedAt'>): Promise<User> {
-    const id = crypto.randomUUID();
-    const now = new Date();
-    const newUser: User = { ...user, id, createdAt: now, updatedAt: now };
-    this.users.set(id, newUser);
-    return newUser;
-  }
-
-  async createUserMinimal(deviceUserId: string, deviceSecretHash: string | null): Promise<User> {
-    return this.createUser({
-      deviceUserId,
-      deviceSecretHash,
-      sessionEpoch: 1,
-      auth: null,
-      settings: {},
-      onboarding: null,
-      interestVector: null,
-      interestSet: [],
-      explorationState: {
-        counter: 0,
-        lastTopic: null,
-        rejected: [],
-        pending: [],
-      },
-      pricePrior: {
-        center: 0,
-        currency: 'USD',
-        confidence: 0.1,
-      },
-      affinities: {
-        brands: {},
-        sellers: {},
-      },
-      suppressions: {
-        products: [],
-        brands: [],
-        sellers: [],
-      },
-      seenFilter: {
-        bits: '',
-        k: 7,
-        m: 200000,
-        n: 0,
-        rebuiltAt: new Date(),
-      },
-      counters: {
-        interactionCount: 0,
-        sessionCount: 0,
-        lastActiveAt: new Date(),
-        lastDecayedOn: null,
-      },
-    });
-  }
-
-  async updateUser(id: string, updates: Partial<Omit<User, 'id' | 'createdAt'>>): Promise<User | null> {
-    const user = this.users.get(id);
-    if (!user) return null;
-    const updated = { ...user, ...updates, updatedAt: new Date() };
-    this.users.set(id, updated);
-    return updated;
+  /** Seeds the read-only catalog a checkout run needs. */
+  seed(fixtures: {
+    products?: readonly Product[];
+    sources?: readonly Source[];
+    coupons?: readonly Coupon[];
+  }): this {
+    for (const product of fixtures.products ?? []) this.products.set(product.id, clone(product));
+    for (const source of fixtures.sources ?? []) this.sources.set(source.id, clone(source));
+    for (const coupon of fixtures.coupons ?? []) this.coupons.set(coupon.id, clone(coupon));
+    return this;
   }
 
   // -------------------------------------------------------------------------
   // Carts
   // -------------------------------------------------------------------------
 
-  async findCartById(id: string): Promise<Cart | null> {
-    return this.carts.get(id) || null;
-  }
-
-  async findOpenCartByUserId(userId: string): Promise<Cart | null> {
+  async getOpenCart(userId: string): Promise<Cart | null> {
     for (const cart of this.carts.values()) {
-      if (cart.userId === userId && cart.status === 'open') return cart;
+      if (cart.userId === userId && cart.status === 'open') return clone(cart);
     }
     return null;
   }
 
-  async createCart(cart: Omit<Cart, 'id' | 'updatedAt'>): Promise<Cart> {
-    const id = crypto.randomUUID();
-    const now = new Date();
-    const newCart: Cart = { ...cart, id, updatedAt: now };
-    this.carts.set(id, newCart);
-    return newCart;
+  async getCart(cartId: string, userId: string): Promise<Cart | null> {
+    const cart = this.carts.get(cartId);
+    // Scoped, exactly as the real store is. A fake that ignores the user id
+    // lets a cross-user read pass its tests and fail in production.
+    return cart && cart.userId === userId ? clone(cart) : null;
   }
 
-  async updateCart(id: string, updates: Partial<Omit<Cart, 'id'>>): Promise<Cart | null> {
-    const cart = this.carts.get(id);
-    if (!cart) return null;
-    const updated = { ...cart, ...updates, updatedAt: new Date() };
-    this.carts.set(id, updated);
-    return updated;
+  async createCart(userId: string, now: Date): Promise<Cart> {
+    const cart: Cart = { id: newId(), userId, status: 'open', items: [], updatedAt: now };
+    this.carts.set(cart.id, cart);
+    return clone(cart);
   }
 
-  async reopenCart(id: string): Promise<Cart | null> {
-    const cart = this.carts.get(id);
-    if (!cart || cart.status !== 'checking_out') return null;
-    const updated = { ...cart, status: 'open' as const, updatedAt: new Date() };
-    this.carts.set(id, updated);
-    return updated;
+  async saveCartItems(cartId: string, items: Cart['items'], now: Date): Promise<void> {
+    const cart = this.carts.get(cartId);
+    if (!cart) return;
+    cart.items = clone(items) as Cart['items'];
+    cart.updatedAt = now;
+  }
+
+  async setCartStatus(cartId: string, status: Cart['status'], now: Date): Promise<void> {
+    const cart = this.carts.get(cartId);
+    if (!cart) return;
+    cart.status = status;
+    cart.updatedAt = now;
+  }
+
+  async reopenCart(cartId: string, expected: Cart['status'], now: Date): Promise<void> {
+    const cart = this.carts.get(cartId);
+    if (!cart || cart.status !== expected) return;
+    cart.status = 'open';
+    cart.updatedAt = now;
   }
 
   // -------------------------------------------------------------------------
   // Orders
   // -------------------------------------------------------------------------
 
-  async findOrderById(id: string): Promise<Order | null> {
-    return this.orders.get(id) || null;
+  async getOrder(orderId: string, userId: string): Promise<Order | null> {
+    const order = this.orders.get(orderId);
+    return order && order.userId === userId ? clone(order) : null;
   }
 
-  async findOrdersByUserId(userId: string): Promise<Order[]> {
-    const result: Order[] = [];
-    for (const order of this.orders.values()) {
-      if (order.userId === userId) result.push(order);
-    }
-    return result.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  async createOrder(order: NewOrder): Promise<Order> {
+    const stored: Order = { ...clone(order), id: newId() };
+    this.orders.set(stored.id, stored);
+    return clone(stored);
   }
 
-  async createOrder(order: Omit<Order, 'id' | 'createdAt' | 'updatedAt'>): Promise<Order> {
-    const id = crypto.randomUUID();
-    const now = new Date();
-    const newOrder: Order = { ...order, id, createdAt: now, updatedAt: now };
-    this.orders.set(id, newOrder);
-    return newOrder;
-  }
-
-  async updateOrder(id: string, updates: Partial<Omit<Order, 'id' | 'createdAt'>>): Promise<Order | null> {
-    const order = this.orders.get(id);
+  async updateOrder(orderId: string, patch: OrderPatch): Promise<Order | null> {
+    const order = this.orders.get(orderId);
     if (!order) return null;
-    const updated = { ...order, ...updates, updatedAt: new Date() };
-    this.orders.set(id, updated);
-    return updated;
+    Object.assign(order, clone(patch));
+    return clone(order);
   }
 
-  async claimForSubmission(
-    id: string,
-    authorization: Order['authorization'],
-    payment: Order['payment']
-  ): Promise<Order | null> {
-    const order = this.orders.get(id);
-    if (!order || order.status !== 'awaiting_auth' || order.submissionSeq !== 0) return null;
-    const updated = {
-      ...order,
-      status: 'placing' as const,
-      submissionSeq: 1,
-      authorization,
-      payment,
-      updatedAt: new Date(),
-    };
-    this.orders.set(id, updated);
-    return updated;
+  async listOrders(userId: string, limit: number): Promise<Order[]> {
+    return [...this.orders.values()]
+      .filter((order) => order.userId === userId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit)
+      .map(clone);
   }
 
-  async cancelOrder(id: string): Promise<Order | null> {
-    const order = this.orders.get(id);
-    if (!order || order.status === 'placed' || order.status === 'placing' || order.status === 'uncertain') {
+  async countOrders(
+    userId: string,
+    filter: { status: OrderStatus; since?: Date },
+  ): Promise<number> {
+    return [...this.orders.values()].filter(
+      (order) =>
+        order.userId === userId &&
+        order.status === filter.status &&
+        (!filter.since || order.createdAt.getTime() >= filter.since.getTime()),
+    ).length;
+  }
+
+  /**
+   * The replay guard.
+   *
+   * JavaScript's single-threaded execution makes this atomic here for free,
+   * which is exactly why the conformance suite matters: the guarantee this
+   * method provides is trivial to hold in memory and easy to get wrong in SQL.
+   */
+  async claimForSubmission(orderId: string, patch: OrderPatch): Promise<Order | null> {
+    const order = this.orders.get(orderId);
+    if (!order) return null;
+    if (order.status !== 'awaiting_auth' || order.submissionSeq !== 0) return null;
+
+    Object.assign(order, clone(patch));
+    order.submissionSeq = 1;
+    return clone(order);
+  }
+
+  async cancelOrder(orderId: string, userId: string, now: Date): Promise<Order | null> {
+    const order = this.orders.get(orderId);
+    if (!order || order.userId !== userId) return null;
+    // Past these three states the merchant may already hold the order.
+    if (order.status === 'placed' || order.status === 'placing' || order.status === 'uncertain') {
       return null;
     }
-    const updated = { ...order, status: 'cancelled' as const, updatedAt: new Date() };
-    this.orders.set(id, updated);
-    return updated;
+
+    order.status = 'cancelled';
+    order.updatedAt = now;
+    return clone(order);
   }
 
   // -------------------------------------------------------------------------
-  // Sources
+  // Catalog
   // -------------------------------------------------------------------------
 
-  async findSourceByDomain(domain: string): Promise<Source | null> {
-    return this.sources.get(domain) || null;
+  async getProduct(productId: string): Promise<Product | null> {
+    const product = this.products.get(productId);
+    return product ? clone(product) : null;
+  }
+
+  async getProducts(productIds: readonly string[]): Promise<Product[]> {
+    const found: Product[] = [];
+    for (const id of new Set(productIds)) {
+      const product = this.products.get(id);
+      if (product) found.push(clone(product));
+    }
+    return found;
+  }
+
+  async getSource(merchantDomain: string): Promise<Source | null> {
+    const source = this.sources.get(merchantDomain);
+    return source ? clone(source) : null;
   }
 
   // -------------------------------------------------------------------------
   // Coupons
   // -------------------------------------------------------------------------
 
-  async findCouponsByMerchantDomain(merchantDomain: string): Promise<Coupon[]> {
-    const result: Coupon[] = [];
-    for (const coupon of this.coupons.values()) {
-      if (coupon.merchantDomain === merchantDomain) result.push(coupon);
-    }
-    return result;
+  async listCoupons(merchantDomain: string): Promise<Coupon[]> {
+    return [...this.coupons.values()]
+      .filter((coupon) => coupon.merchantDomain === merchantDomain)
+      .map(clone);
   }
 
-  async createCoupon(coupon: Omit<Coupon, 'id'>): Promise<Coupon> {
-    const id = crypto.randomUUID();
-    const newCoupon: Coupon = { ...coupon, id };
-    this.coupons.set(id, newCoupon);
-    return newCoupon;
-  }
+  /**
+   * The coupon learning loop, mirroring `CouponStore.recordAttempt`.
+   *
+   * An unknown code is ignored rather than created: codes enter the store
+   * through discovery, and a failed attempt against one we never had is not
+   * evidence of anything worth recording.
+   */
+  async recordCouponOutcome(
+    merchantDomain: string,
+    code: string,
+    outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
+    now: Date,
+  ): Promise<void> {
+    const coupon = [...this.coupons.values()].find(
+      (candidate) => candidate.merchantDomain === merchantDomain && candidate.code === code,
+    );
+    if (!coupon) return;
 
-  async updateCoupon(id: string, updates: Partial<Omit<Coupon, 'id'>>): Promise<Coupon | null> {
-    const coupon = this.coupons.get(id);
-    if (!coupon) return null;
-    const updated = { ...coupon, ...updates };
-    this.coupons.set(id, updated);
-    return updated;
+    const attempts = coupon.performance.attempts + 1;
+    const successes = coupon.performance.successes + (outcome.applied ? 1 : 0);
+    const consecutiveFailures = outcome.applied ? 0 : coupon.performance.consecutiveFailures + 1;
+
+    const discountPct =
+      outcome.applied && outcome.subtotal > 0
+        ? (outcome.observedDiscount / outcome.subtotal) * 100
+        : 0;
+    const meanDiscountPct = outcome.applied
+      ? (coupon.performance.meanDiscountPct * coupon.performance.successes + discountPct) /
+        Math.max(1, successes)
+      : coupon.performance.meanDiscountPct;
+
+    coupon.performance = {
+      attempts,
+      successes,
+      successRate: successes / attempts,
+      meanDiscountPct: Math.round(meanDiscountPct * 10) / 10,
+      consecutiveFailures,
+      lastSuccessAt: outcome.applied ? now : coupon.performance.lastSuccessAt,
+    };
+    if (consecutiveFailures >= COUPON_RETIREMENT_FAILURES) coupon.status = 'retired';
   }
 
   // -------------------------------------------------------------------------
-  // Merchant Links
+  // Merchant links
   // -------------------------------------------------------------------------
 
-  async findMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null> {
-    for (const link of this.merchantLinks.values()) {
-      if (link.userId === userId && link.merchantDomain === merchantDomain) return link;
-    }
-    return null;
+  async upsertMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<void> {
+    const key = `${link.userId}:${link.merchantDomain}`;
+    const existing = this.links.get(key);
+    this.links.set(key, { ...clone(link), id: existing?.id ?? newId() });
   }
 
-  async createMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<MerchantLink> {
-    const id = crypto.randomUUID();
-    const newLink: MerchantLink = { ...link, id };
-    this.merchantLinks.set(id, newLink);
-    return newLink;
+  async getMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null> {
+    const link = this.links.get(`${userId}:${merchantDomain}`);
+    return link ? clone(link) : null;
   }
+}
 
-  async updateMerchantLink(id: string, updates: Partial<Omit<MerchantLink, 'id'>>): Promise<MerchantLink | null> {
-    const link = this.merchantLinks.get(id);
-    if (!link) return null;
-    const updated = { ...link, ...updates };
-    this.merchantLinks.set(id, updated);
-    return updated;
-  }
+/** Ids are opaque to every caller, so a uuid is as good as anything else. */
+function newId(): string {
+  return randomUUID();
+}
 
-  // -------------------------------------------------------------------------
-  // Products
-  // -------------------------------------------------------------------------
-
-  async findProductsByIds(ids: string[]): Promise<Product[]> {
-    const result: Product[] = [];
-    for (const id of ids) {
-      const product = this.products.get(id);
-      if (product) result.push(product);
-    }
-    return result;
-  }
-
-  async findProductById(id: string): Promise<Product | null> {
-    return this.products.get(id) || null;
-  }
+/**
+ * Deep clone preserving `Date`.
+ *
+ * `structuredClone` handles dates correctly, where a JSON round trip would turn
+ * every one of them into a string — and `expiresAt` being a string rather than
+ * a Date is precisely the bug that would make an expired quote look valid.
+ */
+function clone<T>(value: T): T {
+  return structuredClone(value);
 }

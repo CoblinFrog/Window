@@ -13,13 +13,39 @@ import {
   type OnboardingTopicsResponse,
 } from '@window/shared';
 import { env } from '../../config/env.js';
-import { localEmbeddingProvider } from '../../embedding/local.js';
 import type { AppContext } from '../context.js';
-import type { Product } from '../../db/supabase-collections.js';
-import { bootstrapDevice, rateLimit } from '../middleware.js';
-import { mintToken, requireAuthenticated } from '../auth.js';
+import { rateLimit } from '../middleware.js';
+import {
+  createDeviceUser,
+  isAnonymousUser,
+  mintToken,
+  requireAuthenticated,
+  resumeDeviceUser,
+  revokeSessions,
+} from '../auth.js';
+import { issueEmailChallenge, normalizeEmail, verifyEmailChallenge } from '../claims.js';
+import { objectIdSchema, opaqueSecretSchema } from '../validation.js';
+import {
+  count,
+  deleteMany,
+  deleteOne,
+  find,
+  findOne,
+  insert,
+  updateMany,
+  updateOne,
+} from '../../db/supabase-helpers.js';
+import type { Category, Product, ReportDoc, User } from '../../db/supabase-collections.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
-import { find, findOne, updateOne, updateMany, deleteMany, deleteOne, count, insert } from '../../db/supabase-helpers.js';
+import { logger } from '../../lib/logger.js';
+
+const log = logger.child('api.profile');
+
+/** What an L1 topic means, for embedding when no centroid has been computed. */
+function describeTopic(topic: string): string {
+  const node = getCategory(topic);
+  return node ? `${node.displayName}. ${topic.replace(/[._-]/g, ' ')}` : topic;
+}
 
 export function profileRoutes(ctx: AppContext): Router {
   const router = Router();
@@ -74,10 +100,11 @@ export function profileRoutes(ctx: AppContext): Router {
 
   router.get('/onboarding/topics', async (_req, res, next) => {
     try {
-      // `tile.order` is a JSONB property, not a SQL column. Fetch the L1
-      // rows normally and sort the JSON metadata in application code; this
-      // also works when the category table has not been seeded yet.
-      const docs = await find(collections.categories, { level: 1 });
+      // Fetched unordered and sorted here: `tile.order` lives inside a jsonb
+      // column, and ordering by a dotted path is the same trap as selecting
+      // one — PostgREST does not read it. Sorting in application code also
+      // works on a database whose category table has not been seeded.
+      const docs = await find<Category>(collections.categories, { level: 1 });
       docs.sort((a, b) => (a.tile?.order ?? 0) - (b.tile?.order ?? 0));
 
       const photos = await topicImages();
@@ -138,19 +165,46 @@ export function profileRoutes(ctx: AppContext): Router {
         throw ApiError.validation('Topics must be distinct.');
       }
 
-      const categories = await find(collections.categories, { slug: { $in: topics }, level: 1 });
-      const embedder = localEmbeddingProvider();
-      // A fresh development database may not have products or computed
-      // centroids yet. Keep onboarding usable by using the deterministic local
-      // name embedding for only the missing topics; populated databases still
-      // use their data-derived centroids.
-      const centroids = await Promise.all(
-        topics.map(async (topic) => {
-          const stored = categories.find((category) => category.slug === topic)?.centroid;
-          if (Array.isArray(stored) && stored.length > 0) return stored;
-          return embedder.embedText(getCategory(topic)?.displayName ?? topic);
-        }),
-      );
+      // `$in`, not `in`: the Supabase helpers speak the Mongo filter dialect,
+      // and an unrecognised operator object is stringified into the query as
+      // "[object Object]" — a 500 rather than a no-match.
+      //
+      // The lookup is also allowed to fail outright. Taxonomy ids are slugs
+      // ("tech"), and `categories.id` is currently a uuid column, so Postgres
+      // refuses the comparison rather than returning nothing. Onboarding is the
+      // first thing a new user does; it must not be the thing a schema mismatch
+      // in an unrelated table takes down.
+      // Keyed by `slug`, not `id`: taxonomy ids are slugs ("tech") and the
+      // column is a uuid, so comparing against `id` is a type error Postgres
+      // refuses outright. The slug column is what the taxonomy actually keys on.
+      const categories = await find<Category>(collections.categories, {
+        slug: { $in: topics },
+        level: 1,
+      }).catch((error: unknown) => {
+        log.warn('category lookup failed; falling back to embedded topics', {
+          error: (error as Error).message,
+        });
+        return [] as Category[];
+      });
+
+      let centroids = categories
+        .map((c) => c.centroid)
+        .filter((c): c is number[] => Array.isArray(c) && c.length > 0);
+
+      if (centroids.length === 0) {
+        // The nightly job computes each centroid as the mean of its best
+        // members' embeddings, which is sharper. But a catalog loaded without
+        // that job leaves onboarding impossible, and refusing to let anyone
+        // into the app is a worse failure than a slightly blunter seed vector.
+        // Embedding the topic's own description is what the taxonomy affords.
+        centroids = await Promise.all(
+          topics.map((topic) => ctx.embedder.embedText(describeTopic(topic))),
+        );
+        log.warn('seeding the user vector from topic descriptions', {
+          reason: 'no category centroids are stored; run the seeder for sharper vectors',
+          topics,
+        });
+      }
 
       const now = new Date();
       const interestVector = seedUserVector(centroids);
@@ -164,18 +218,14 @@ export function profileRoutes(ctx: AppContext): Router {
         explorationState: { ...user.explorationState, counter: 0 },
       });
 
-      await updateOne(
-        collections.users,
-        { id: user.id },
-        {
-          onboarding: { topics, priceBand, completedAt: now },
-          interestVector,
-          interestSet,
-          pricePrior,
-          explorationState: { ...user.explorationState, counter },
-          updatedAt: now,
-        },
-      );
+      await updateOne<User>(collections.users, { id: user.id }, {
+        onboarding: { topics, priceBand, completedAt: now },
+        interestVector,
+        interestSet,
+        pricePrior,
+        explorationState: { ...user.explorationState, counter },
+        updatedAt: now,
+      } as Partial<User>);
 
       res.status(204).end();
     } catch (error) {
@@ -254,8 +304,8 @@ export function profileRoutes(ctx: AppContext): Router {
 
   const suppressionSchema = z.object({
     kind: z.enum(['product', 'brand', 'seller']),
-    value: z.string().min(1),
-    productId: z.string().optional(),
+    value: z.string().min(1).max(128),
+    productId: objectIdSchema.optional(),
   });
 
   /**
@@ -273,8 +323,15 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!parsed.success) throw ApiError.validation('Invalid suppression request.');
       const { kind, value, productId } = parsed.data;
 
+      // Validated before use, not after. Under Mongo this prevented a BSONError
+      // rendered as a 500; under Postgres a malformed uuid is a 22P02 with the
+      // same effect — a bad request reported as a server fault.
+      if (kind !== 'brand' && !objectIdSchema.safeParse(value).success) {
+        throw ApiError.validation(`${kind} suppressions require a valid id.`);
+      }
+
       // Get current user to check existing suppressions
-      const currentUser = await findOne(collections.users, { id: user.id });
+      const currentUser = await findOne<User>(collections.users, { id: user.id });
       if (!currentUser) throw ApiError.notFound('User not found');
 
       let newSuppressions = { ...currentUser.suppressions };
@@ -314,10 +371,41 @@ export function profileRoutes(ctx: AppContext): Router {
     }
   });
 
+  const challengeSchema = z.object({ email: z.string().email().max(254) });
+
+  /**
+   * Step one of an email claim: send a code to the address and prove nothing yet.
+   *
+   * The response is identical whether or not the address is already attached to
+   * another account. Telling the caller "that email is taken" turns this into an
+   * oracle for which of a list of addresses has a Window account, which is a
+   * privacy leak paid for with no security benefit.
+   */
+  router.post('/me/claim/email', rateLimit(ctx.cache, 'claim'), async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+
+      const parsed = challengeSchema.safeParse(req.body);
+      if (!parsed.success) throw ApiError.validation('A valid email address is required.');
+
+      const { expiresAt } = await issueEmailChallenge(
+        ctx.cache,
+        ctx.mailer,
+        user.id,
+        parsed.data.email,
+      );
+      res.status(202).json({ expiresAt: expiresAt.toISOString() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   const claimSchema = z.object({
     provider: z.enum(['email', 'apple', 'google']),
-    email: z.string().email().optional(),
-    token: z.string().min(1),
+    email: z.string().email().max(254).optional(),
+    /** The emailed code for `email`, or the provider ID token for the rest. */
+    token: z.string().min(1).max(4096),
   });
 
   /**
@@ -335,39 +423,97 @@ export function profileRoutes(ctx: AppContext): Router {
 
       const parsed = claimSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid claim request.');
-      const { provider, email } = parsed.data;
+      const { provider, email, token } = parsed.data;
 
-      if (provider === 'email' && !email) {
-        throw ApiError.validation('An email address is required for an email claim.');
-      }
+      // Every branch below ends in a *verified* address or an exception. This
+      // is the only route that raises a principal's privilege — it is what lets
+      // an identity spend money — so there is no path through it that takes the
+      // caller's word for who they are.
+      let verifiedEmail: string;
 
-      // The provider token is not verified here. A real deployment validates it
-      // against Apple/Google/the email-link service before this point; leaving
-      // that as an obvious hole rather than a fake check is deliberate.
-      if (process.env.AUTH_PROVIDER_VERIFICATION !== 'disabled' && provider !== 'email') {
-        throw ApiError.validation(
-          `OAuth claims need provider token verification, which is not configured. ` +
-            `Set AUTH_PROVIDER_VERIFICATION=disabled to accept unverified tokens in development.`,
+      if (provider === 'email') {
+        if (!email) throw ApiError.validation('An email address is required for an email claim.');
+
+        const result = await verifyEmailChallenge(
+          ctx.cache,
+          user.id,
+          email,
+          token,
         );
+        if (!result.ok) {
+          throw result.reason === 'too_many_attempts'
+            ? ApiError.validation('Too many incorrect codes. Request a new one.')
+            : ApiError.validation('That code is not valid. Request a new one if it has expired.');
+        }
+        verifiedEmail = result.email;
+      } else {
+        // Refuses until a JWKS verifier is configured. See `claims.ts`: a
+        // verification step that pretends to work is worse than an absent one.
+        const identity = await ctx.oidc.verify(provider, token);
+        if (!identity.emailVerified || !identity.email) {
+          throw ApiError.validation('That provider account has no verified email address.');
+        }
+        verifiedEmail = normalizeEmail(identity.email);
       }
 
       const now = new Date();
-      await updateOne(
-        collections.users,
-        { id: user.id },
-        {
+
+      // One account per address. Without this, claiming an address that already
+      // belongs to someone else silently produces two accounts answering to one
+      // identity — and a merge request nobody can safely honour. The unique
+      // index on `auth.email` is the actual enforcement; this is the message.
+      const taken = await findOne<User>(collections.users, { 'auth->>email': verifiedEmail });
+      if (taken && taken.id !== user.id) {
+        throw ApiError.validation(
+          'That address is already attached to another Window account. Sign in on that account instead.',
+        );
+      }
+
+      try {
+        await updateOne<User>(collections.users, { id: user.id }, {
           auth: {
-            email: email ?? null,
+            email: verifiedEmail,
             providers: [provider],
             claimedAt: now,
+            emailVerifiedAt: now,
           },
           updatedAt: now,
-        },
-      );
+        } as Partial<User>);
+      } catch (error) {
+        if ((error as { code?: number }).code === 11000) {
+          throw ApiError.validation('That address is already attached to another Window account.');
+        }
+        throw error;
+      }
+
+      // The session is regenerated at the privilege change. A token minted
+      // before the claim described an anonymous principal; leaving it valid
+      // means the old, lower-trust credential still opens the higher-trust
+      // account for the rest of its lifetime.
+      const epoch = await revokeSessions(collections, user.id);
 
       res.json({
-        token: mintToken({ ...principal, isAnonymous: false }),
+        token: mintToken({ ...principal, isAnonymous: false, epoch }),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Sign out everywhere.
+   *
+   * Bumping the session epoch invalidates every token already issued for this
+   * identity. Without it, "sign out" only clears local storage and a token
+   * copied off the device stays valid for its full lifetime — a button that
+   * describes an intention rather than an effect.
+   */
+  router.post('/me/sessions/revoke', async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      if (!user) throw ApiError.unauthorized();
+      await revokeSessions(collections, user.id);
+      res.status(204).end();
     } catch (error) {
       next(error);
     }
@@ -407,7 +553,7 @@ export function profileRoutes(ctx: AppContext): Router {
   });
 
   const reportSchema = z.object({
-    productId: z.string(),
+    productId: objectIdSchema,
     reason: z.enum([
       'counterfeit',
       'not_as_described',
@@ -435,7 +581,7 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!parsed.success) throw ApiError.validation('Invalid report.');
 
       const productId = parsed.data.productId;
-      const product = await findOne(collections.products, { id: productId });
+      const product = await findOne<Product>(collections.products, { id: productId });
       if (!product) throw ApiError.notFound('That product');
 
       // Check if report already exists
@@ -496,25 +642,55 @@ export function profileRoutes(ctx: AppContext): Router {
   return router;
 }
 
-/** Device bootstrap. Mints the anonymous principal the whole app runs on. */
+/**
+ * Device bootstrap. Mints the anonymous principal the whole app runs on.
+ *
+ * The rule that makes this safe: a presented secret may only ever *resume* an
+ * identity, never claim one. Previously the client chose its own
+ * `deviceUserId`, the server adopted whatever it was handed, and the client
+ * minted it with `Math.random()` — so a device identifier that nobody treated
+ * as a credential was in fact the only credential, and a guessable one. Now the
+ * server mints 256 bits from the CSPRNG, stores only the hash, and a secret it
+ * does not recognise gets a brand-new empty profile rather than someone else's.
+ */
 export function authRoutes(ctx: AppContext): Router {
   const router = Router();
-  const schema = z.object({ deviceUserId: z.string().min(8).max(128) });
+  const schema = z.object({ deviceSecret: opaqueSecretSchema.optional() });
 
-  router.post('/device', rateLimit(ctx.cache, 'events'), async (req, res, next) => {
+  router.post('/device', rateLimit(ctx.cache, 'bootstrap'), async (req, res, next) => {
     try {
-      const parsed = schema.safeParse(req.body);
+      const parsed = schema.safeParse(req.body ?? {});
       if (!parsed.success) {
-        throw ApiError.validation('deviceUserId must be between 8 and 128 characters.');
+        throw ApiError.validation('deviceSecret must be a base64url secret issued by this API.');
       }
-      const { user, principal } = await bootstrapDevice(
-        ctx.db.collections,
-        parsed.data.deviceUserId,
-      );
+
+      const existing = parsed.data.deviceSecret
+        ? await resumeDeviceUser(ctx.db.collections, parsed.data.deviceSecret)
+        : null;
+
+      // A miss is not an error. An unrecognised secret means a new device, a
+      // deleted account, or somebody guessing — and all three get the same
+      // answer, which is why guessing reveals nothing.
+      const minted = existing ? null : await createDeviceUser(ctx.db.collections);
+      const user = existing ?? minted!.user;
+
+      const principal = {
+        userId: user.id,
+        deviceUserId: user.deviceUserId,
+        isAnonymous: isAnonymousUser(user),
+        epoch: user.sessionEpoch ?? 1,
+      };
+
       res.json({
         token: mintToken(principal),
+        // Returned exactly once, at mint time. The client stores it in secure
+        // storage and presents it to resume; the server keeps only its hash.
+        ...(minted ? { deviceSecret: minted.deviceSecret } : {}),
+        deviceUserId: user.deviceUserId,
         userId: user.id,
         isAnonymous: principal.isAnonymous,
+        /** Whether this deployment requires a claimed account to order. */
+        requiresAccount: env.checkoutRequiresAccount,
         onboarded: user.onboarding !== null,
       });
     } catch (error) {

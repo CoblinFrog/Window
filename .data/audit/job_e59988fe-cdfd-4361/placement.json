@@ -1,0 +1,83 @@
+{
+  "jobId": "job_e59988fe-cdfd-4361",
+  "orderId": "a5490ac8-8439-4ad7-935f-fa2e27434140",
+  "userId": "507f1f77bcf86cd799439011",
+  "merchantDomain": "shop.test",
+  "phase": "placement",
+  "writtenAt": "2026-09-19T22:24:15.681Z",
+  "quote": {
+    "subtotal": 1000,
+    "shipping": 599,
+    "tax": 88,
+    "discount": 0,
+    "total": 1687,
+    "currency": "USD",
+    "generatedAt": "2026-09-19T22:24:15.681Z",
+    "expiresAt": "2026-09-19T22:34:15.681Z",
+    "hash": "a6d1f467af5ce8f4e5ee08bdd0d2e7509fc9db9003b38c80bc739c07227e6156"
+  },
+  "authorization": {
+    "authorizedAt": "2026-09-19T22:24:15.681Z",
+    "userAgentHash": "9f86d081884c7d659a2feaa0c55ad015",
+    "quoteHash": "a6d1f467af5ce8f4e5ee08bdd0d2e7509fc9db9003b38c80bc739c07227e6156"
+  },
+  "toolCalls": [
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/cart"
+      },
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "cart opened"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "[data-add=\"prod_1\"]"
+      },
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "added Keyboard"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "job-job_e59988fe-cdfd-4361-quote-1d4ee444"
+    },
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/checkout"
+      },
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "checkout opened"
+    },
+    {
+      "tool": "type",
+      "args": {
+        "selector": "#payment",
+        "text": "<redacted:16>"
+      },
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "payment method attached"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "#place-order"
+      },
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "order submitted"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-19T22:24:15.681Z",
+      "result": "job-job_e59988fe-cdfd-4361-placed-b60cb678"
+    }
+  ],
+  "screenshots": [
+    "job-job_e59988fe-cdfd-4361-quote-1d4ee444",
+    "job-job_e59988fe-cdfd-4361-placed-b60cb678"
+  ]
+}

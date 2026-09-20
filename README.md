@@ -71,7 +71,7 @@ The client derives the development machine's address from Expo unless
 Verify:
 
 ```bash
-npm test                              # server unit tests
+npm test                              # server unit tests, including the security suite
 npm run smoke -w @window/server       # needs a running server
 curl -s http://127.0.0.1:4000/health
 ```
@@ -132,6 +132,15 @@ streamed; the job stops at `awaiting_auth` and will not proceed without a tap
 that echoes the exact `quoteHash`. A mismatch, an expired quote or a replayed
 authorization is a 409 and places nothing.
 
+**Identity** is an anonymous device principal first — there is no sign-in wall
+before the feed — and the device credential is a 256-bit server-minted secret
+stored only as a hash. A presented secret may resume an identity, never claim
+one, so guessing yields a new empty profile rather than someone else's account.
+Placing an order requires a claimed profile, and claiming requires a verified
+email; the privilege level is read from the user document on every request
+rather than from the token. [SECURITY.md](SECURITY.md) is the threat model,
+the control list, and the honest inventory of what is still open.
+
 ## Configuration
 
 Set these in `packages/server/.env` unless noted otherwise:
@@ -146,6 +155,13 @@ Set these in `packages/server/.env` unless noted otherwise:
 | `EXPO_PUBLIC_API_URL` | auto-detected | Client API base; set explicitly for a deployed or device-accessible API |
 | `ATLAS_VECTOR_SEARCH` | `0` | Legacy/optional Atlas retrieval flag; local development uses the in-process vector index |
 | `REAP_API_KEY` / `REAP_BASE_URL` | unset | Without these, checkout uses the simulated rail |
+| `EXPO_PUBLIC_API_URL` | `http://127.0.0.1:4000` | API base for the client |
+| `AUTH_SECRET` | ephemeral | Signs session tokens. **Required in production**; the server refuses to boot without it |
+| `INTERNAL_TOKEN` | ephemeral | Guards `/internal`. **Required in production** |
+| `CORS_ORIGINS` | Expo dev origins | Browser origins allowed to call the API. Empty by default in production |
+| `TRUST_PROXY_HOPS` | `0` | Reverse-proxy hops to trust for `X-Forwarded-For`. Must match the deployment |
+| `CHECKOUT_AGENT` | `simulated` | `browser` drives the merchant's own checkout with Playwright |
+| `SHOPIFY_CHECKOUT_DOMAINS` | unset | Stores whose robots.txt permits `/checkouts/` |
 
 The application embedding contract is currently **1024 dimensions**. Product
 rows with another vector length are not compatible with local ranking.

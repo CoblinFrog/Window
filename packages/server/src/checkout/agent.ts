@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { CHECKOUT_CONFIG, hashString, mulberry32 } from '@window/shared';
+import { referenceFor, type VaultField, type VaultHandle } from './vault.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import type { CouponCandidate, CouponAttemptOutcome } from './coupons.js';
@@ -145,7 +146,12 @@ export interface CheckoutAgent {
  */
 export interface CheckoutBrowser {
   /** A fresh storage partition and egress identity per job, torn down after. */
-  newContext(options: { merchantDomain: string; sessionHandle: string | null }): Promise<CheckoutPage>;
+  newContext(options: {
+    merchantDomain: string;
+    sessionHandle: string | null;
+    /** Bound to the page so values are substituted at the keystroke. */
+    vault?: VaultHandle | null;
+  }): Promise<CheckoutPage>;
 }
 
 export interface CheckoutPage {
@@ -154,6 +160,27 @@ export interface CheckoutPage {
   type(selector: string, text: string): Promise<void>;
   select(selector: string, value: string): Promise<void>;
   readDom(selector?: string): Promise<string>;
+  /**
+   * Whether a field currently holds the value behind a vault reference.
+   *
+   * The agent has to confirm a field took what it typed — merchant forms
+   * reformat, truncate and silently reject — but handing the value back would
+   * undo the entire point of the vault. So the comparison happens in the
+   * driver and only the boolean crosses back.
+   */
+  isFilledWith(selector: string, reference: string): Promise<boolean>;
+  /** Whether a field is empty. Used to prove the agent left payment alone. */
+  isEmpty(selector: string): Promise<boolean>;
+  /**
+   * Signs in past a storefront password gate.
+   *
+   * Deliberately not `type`. `type` refuses any field that looks like a
+   * credential, and that refusal must stay absolute — it is what stops a page
+   * talking the agent into filling a card number. This is the one configured,
+   * non-user credential the agent is permitted to enter, so it gets its own
+   * method: narrow, unreachable from the normal fill loop, and never logged.
+   */
+  submitStorefrontPassword(field: string, submit: string, password: string): Promise<void>;
   screenshot(): Promise<Buffer>;
   close(): Promise<void>;
 }
@@ -161,17 +188,80 @@ export interface CheckoutPage {
 /**
  * The real browser agent.
  *
- * No browser is installed in this environment and none may be added, so this
- * refuses to run rather than returning a fabricated quote — a checkout path
- * that pretends to work is the single most dangerous thing this codebase could
- * contain. Injecting a Playwright-backed `CheckoutBrowser` is the only missing
- * piece; every other part of the flow, including the authorization gate and the
- * audit trail, is exercised by the simulator below.
+ * Drives a merchant's own checkout with a real browser, because there is no
+ * single API to post an order to fifteen different sites. What makes that safe
+ * is what it is *not* allowed to do:
+ *
+ *   * it never sees the user's details — it passes `{{ref:ship.line1}}` and the
+ *     driver substitutes plaintext at the keystroke (see `vault.ts`);
+ *   * it never touches a payment field, by selector or by attribute;
+ *   * it stops at the last screen before money moves and returns a quote. Only
+ *     `POST /authorize`, carrying the hash of that exact quote, can go further.
+ *
+ * The selector map is per-merchant configuration rather than something the
+ * agent infers. A model choosing selectors from page text is a model a page can
+ * instruct; a lookup table is not. `FieldMap` is the seam where a learned or
+ * hand-maintained mapping plugs in.
  */
+export interface FieldMap {
+  /**
+   * Origin override. Real merchants are reached at `https://<domain>`; this is
+   * for a local stand-in, whose domain does not resolve.
+   */
+  origin?: string;
+  /** Where the checkout form lives, relative to the merchant origin. */
+  checkoutPath: string;
+  /** Vault field → CSS selector for a text input on the merchant's form. */
+  fields: Partial<Record<VaultField, string>>;
+  /**
+   * Vault field → CSS selector for a `<select>`.
+   *
+   * Country and state are dropdowns on most real checkouts, and typing into a
+   * `<select>` silently does nothing — the field stays on its default and the
+   * parcel goes to the wrong country. They need a different call, so they are a
+   * different map rather than a guess made at runtime.
+   */
+  selectFields?: Partial<Record<VaultField, string>>;
+  /** Optional shipping-method select and the value to choose. */
+  shipping?: { selector: string; value: string };
+  /** Where the totals are read from. */
+  totals: {
+    subtotal: string;
+    shipping: string;
+    tax: string;
+    discount?: string;
+    total: string;
+  };
+  /** The button that would place the order. Located, never clicked, at quote time. */
+  placeOrder: string;
+  /** Where a coupon code goes, when the merchant takes one. */
+  coupon?: { input: string; apply: string };
+  /**
+   * A storefront password gate to pass before anything else.
+   *
+   * Shopify development stores are always password-protected and the page
+   * cannot be disabled, so a staging store is unreachable until the agent signs
+   * in with the store's own password. The password itself is never in the map —
+   * it is a credential, read from the environment at the moment it is typed and
+   * never logged, echoed in a step, or written to the audit record.
+   */
+  storefront?: { path: string; passwordField: string; submit: string; secretEnv: string };
+}
+
 export class BrowserCheckoutAgent implements CheckoutAgent {
   readonly kind = 'browser' as const;
 
-  constructor(private readonly browser: CheckoutBrowser | null) {}
+  constructor(
+    private readonly browser: CheckoutBrowser | null,
+    private readonly config: {
+      /** Resolves the selector map for a merchant. */
+      fieldMapFor: (merchantDomain: string) => FieldMap | null;
+      /** The user's details, held encrypted for the life of the job. */
+      vault: VaultHandle | null;
+      /** Origin override, for pointing a test at a local fixture. */
+      originFor?: (merchantDomain: string) => string;
+    },
+  ) {}
 
   private require(): CheckoutBrowser {
     if (!this.browser) {
@@ -186,15 +276,274 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
     return this.browser;
   }
 
-  async quote(): Promise<AgentQuote> {
-    this.require();
-    throw new AgentAbort('not_configured', 'Browser checkout is not wired up.', false);
+  private mapFor(merchantDomain: string): FieldMap {
+    const map = this.config.fieldMapFor(merchantDomain);
+    if (!map) {
+      // No map means we do not know this merchant's form. Guessing at selectors
+      // on a live checkout is how an agent fills the wrong field and places the
+      // wrong order, so this hands off instead.
+      throw new AgentAbort(
+        'blocked',
+        `No checkout field map for ${merchantDomain}. Finish this order on the merchant's site.`,
+        true,
+      );
+    }
+    return map;
   }
 
-  async place(): Promise<AgentPlacement> {
-    this.require();
-    throw new AgentAbort('not_configured', 'Browser checkout is not wired up.', false);
+  private originOf(merchantDomain: string): string {
+    return this.config.originFor?.(merchantDomain) ?? `https://${merchantDomain}`;
   }
+
+  /**
+   * Fills the merchant's cart and prices it, stopping before submission.
+   *
+   * Everything here is observation: the totals in the returned quote are read
+   * off the merchant's own page, never computed by us, because the number the
+   * user authorizes has to be the number the merchant will actually charge.
+   */
+  async quote(input: Parameters<CheckoutAgent['quote']>[0]): Promise<AgentQuote> {
+    const browser = this.require();
+    const map = this.mapFor(input.merchantDomain);
+    const currency = input.items[0]?.currency ?? 'USD';
+
+    const page = await browser.newContext({
+      merchantDomain: input.merchantDomain,
+      sessionHandle: null,
+      vault: this.config.vault,
+    });
+
+    try {
+      input.signal?.throwIfAborted();
+      const origin = this.originOf(input.merchantDomain);
+      await this.passStorefrontGate(page, map, origin, input.onStep);
+      await page.navigate(`${origin}${map.checkoutPath}`);
+      input.onStep?.('navigate: checkout opened');
+
+      // Delivery details, by reference. The agent does not know what it typed.
+      //
+      // Only fields the vault actually holds are filled. A second address line
+      // is optional for most people, and a form that offers the box must not
+      // fail the order because the user has nothing to put in it.
+      const held = new Set(this.config.vault?.availableFields() ?? []);
+      for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
+        input.signal?.throwIfAborted();
+        if (!held.has(field)) {
+          input.onStep?.(`skip: ${field} (not held for this user)`);
+          continue;
+        }
+        await page.type(selector, referenceFor(field));
+        input.onStep?.(`type: ${field} into ${selector}`);
+      }
+
+      for (const [field, selector] of Object.entries(map.selectFields ?? {}) as Array<
+        [VaultField, string]
+      >) {
+        input.signal?.throwIfAborted();
+        if (!held.has(field)) continue;
+        await page.select(selector, referenceFor(field));
+        input.onStep?.(`select: ${field} into ${selector}`);
+      }
+
+      if (map.shipping) {
+        await page.select(map.shipping.selector, map.shipping.value);
+        input.onStep?.(`select: shipping ${map.shipping.value}`);
+      }
+
+      const couponAttempts: CouponAttemptOutcome[] = [];
+      const before = await this.readTotals(page, map, currency);
+
+      // The coupon loop, bounded. Each code is tried against the merchant's own
+      // page and kept only if the observed total actually fell.
+      if (map.coupon) {
+        for (const candidate of input.coupons.slice(0, CHECKOUT_CONFIG.maxCouponAttempts)) {
+          input.signal?.throwIfAborted();
+          await page.type(map.coupon.input, candidate.code);
+          await page.click(map.coupon.apply);
+
+          const after = await this.readTotals(page, map, currency);
+          const observedDiscount = Math.max(0, before.total - after.total);
+          const applied = observedDiscount > 0;
+
+          couponAttempts.push({
+            code: candidate.code,
+            applied,
+            observedDiscount,
+            reason: applied ? null : 'no observed change to the total',
+          });
+          input.onCouponAttempt?.(couponAttempts[couponAttempts.length - 1]!);
+          if (applied && !input.allowStacking) break;
+        }
+      }
+
+      const totals = await this.readTotals(page, map, currency);
+
+      // The button must exist before we call this a quote. A checkout we cannot
+      // submit is not one the user should be asked to authorize.
+      const dom = await page.readDom();
+      if (!dom.includes(await this.labelOf(page, map.placeOrder))) {
+        throw new AgentAbort(
+          'payment_step_anomaly',
+          'Could not find the place-order control on the merchant checkout.',
+          true,
+        );
+      }
+      input.onStep?.('read_dom: totals and place-order control located');
+
+      const screenshotRef = `${input.session.jobId}/quote.png`;
+      input.session.screenshots.push(screenshotRef);
+      await page.screenshot();
+
+      return {
+        ...totals,
+        preCouponTotal: before.total,
+        couponCode: couponAttempts.find((a) => a.applied)?.code ?? null,
+        couponAttempts,
+        automaticPromotionApplied: false,
+        droppedProductIds: [],
+        screenshotRef,
+      };
+    } finally {
+      // The context, its storage and its egress identity die with the job.
+      await page.close();
+    }
+  }
+
+  /**
+   * Submits. Reached only after an authorization carrying the quote hash.
+   *
+   * The payment handle is opaque — a reference the rail understands and the
+   * page cannot reuse. No PAN, no CVV, no card field is ever touched here.
+   */
+  async place(input: Parameters<CheckoutAgent['place']>[0]): Promise<AgentPlacement> {
+    const browser = this.require();
+    const map = this.mapFor(input.merchantDomain);
+
+    const page = await browser.newContext({
+      merchantDomain: input.merchantDomain,
+      sessionHandle: null,
+      vault: this.config.vault,
+    });
+
+    try {
+      input.signal?.throwIfAborted();
+      const origin = this.originOf(input.merchantDomain);
+      await this.passStorefrontGate(page, map, origin, input.onStep);
+      await page.navigate(`${origin}${map.checkoutPath}`);
+
+      const held = new Set(this.config.vault?.availableFields() ?? []);
+      for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
+        if (!held.has(field)) continue;
+        await page.type(selector, referenceFor(field));
+      }
+      for (const [field, selector] of Object.entries(map.selectFields ?? {}) as Array<
+        [VaultField, string]
+      >) {
+        if (!held.has(field)) continue;
+        await page.select(selector, referenceFor(field));
+      }
+      if (map.shipping) await page.select(map.shipping.selector, map.shipping.value);
+      input.onStep?.('type: delivery details restored');
+
+      // This is the line. Everything before it is reversible.
+      await page.click(map.placeOrder);
+      input.onStep?.('click: order submitted');
+
+      const screenshotRef = `${input.session.jobId}/placement.png`;
+      input.session.screenshots.push(screenshotRef);
+      await page.screenshot();
+
+      const confirmation = await page.readDom();
+      const orderNumber = /\b([A-Z]{2,4}-[A-Z0-9-]{4,})\b/.exec(confirmation)?.[1] ?? null;
+
+      // Submitted but unparsed goes `uncertain` rather than `placed`, and is
+      // never re-submitted: a duplicate order is worse than an unclear one.
+      return {
+        merchantOrderNumber: orderNumber,
+        uncertain: orderNumber === null,
+        screenshotRef,
+      };
+    } finally {
+      await page.close();
+    }
+  }
+
+/**
+   * Signs in past a storefront password gate, if the merchant has one.
+   *
+   * Runs before every other navigation on the page. The password is read at the
+   * moment it is typed; the step log records that a gate was passed and never
+   * what passed it.
+   */
+  private async passStorefrontGate(page: CheckoutPage, map: FieldMap, origin: string, onStep?: (step: string) => void): Promise<void> {
+    if (!map.storefront) return;
+
+    const password = process.env[map.storefront.secretEnv];
+    if (!password) {
+      throw new AgentAbort(
+        'not_configured',
+        `${map.storefront.secretEnv} is not set, and this storefront is behind a password gate. ` +
+          'Set it to the store\'s storefront password.',
+        false,
+      );
+    }
+
+    await page.navigate(`${origin}${map.storefront.path}`);
+    await page.submitStorefrontPassword(
+      map.storefront.passwordField,
+      map.storefront.submit,
+      password,
+    );
+    onStep?.('storefront gate passed');
+  }
+
+  /** Reads the totals off the merchant's own page. */
+  private async readTotals(
+    page: CheckoutPage,
+    map: FieldMap,
+    currency: string,
+  ): Promise<{
+    subtotal: number;
+    shipping: number;
+    tax: number;
+    discount: number;
+    total: number;
+    currency: string;
+  }> {
+    const read = async (selector?: string): Promise<number> => {
+      if (!selector) return 0;
+      return parseMinorUnits(await page.readDom(selector));
+    };
+
+    return {
+      subtotal: await read(map.totals.subtotal),
+      shipping: await read(map.totals.shipping),
+      tax: await read(map.totals.tax),
+      discount: Math.abs(await read(map.totals.discount)),
+      total: await read(map.totals.total),
+      currency,
+    };
+  }
+
+  private async labelOf(page: CheckoutPage, selector: string): Promise<string> {
+    const text = (await page.readDom(selector)).trim();
+    return text.length > 0 ? text : 'Place';
+  }
+}
+
+/**
+ * Reads a displayed price into integer minor units.
+ *
+ * Deliberately strict: anything it cannot read becomes 0 rather than `NaN`,
+ * because `NaN` propagates silently into a total and a total is the one number
+ * in this system that must never be wrong by accident.
+ */
+export function parseMinorUnits(text: string): number {
+  const match = /(-?)\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/.exec(text.replace(/\u00a0/g, ' '));
+  if (!match) return 0;
+  const amount = Number.parseFloat((match[2] ?? '0').replace(/,/g, ''));
+  if (Number.isNaN(amount)) return 0;
+  return Math.round(amount * 100) * (match[1] === '-' ? -1 : 1);
 }
 
 // ---------------------------------------------------------------------------

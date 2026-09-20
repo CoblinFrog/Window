@@ -1,7 +1,6 @@
-import type { SupabaseTable, Coupon } from '../db/supabase-collections.js';
 import { CHECKOUT_CONFIG } from '@window/shared';
 import { logger } from '../lib/logger.js';
-import { find, findOne, updateOne } from '../db/supabase-helpers.js';
+import type { CheckoutRepository, Coupon } from './repository.js';
 
 const log = logger.child('coupons');
 
@@ -46,7 +45,7 @@ export type CouponFailureReason =
   | 'unknown';
 
 export class CouponStore {
-  constructor(private readonly coupons: SupabaseTable) {}
+  constructor(private readonly repository: CheckoutRepository) {}
 
   /**
    * Ranked candidates for a merchant. Constraints that can be evaluated before
@@ -59,13 +58,17 @@ export class CouponStore {
     now = new Date(),
     limit = CHECKOUT_CONFIG.maxCouponAttempts,
   ): Promise<CouponCandidate[]> {
-    const docs = await find<Coupon>(this.coupons, { merchantDomain, status: 'active' }, {
-      limit: limit * 4,
-      orderBy: [
-        { column: 'performance.successRate', ascending: false },
-        { column: 'performance.meanDiscountPct', ascending: false },
-      ],
-    });
+    // Ranking in memory rather than in the query: the candidate set for one
+    // merchant is small, and it keeps the ordering identical across stores
+    // rather than depending on each one's sort semantics.
+    const docs = (await this.repository.listCoupons(merchantDomain))
+      .filter((doc) => doc.status === 'active')
+      .sort(
+        (a, b) =>
+          b.performance.successRate - a.performance.successRate ||
+          b.performance.meanDiscountPct - a.performance.meanDiscountPct,
+      )
+      .slice(0, limit * 4);
 
     const eligible = docs.filter((doc) => {
       const c = doc.constraints;
@@ -103,44 +106,10 @@ export class CouponStore {
     outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
     now = new Date(),
   ): Promise<void> {
-    const doc = await findOne<Coupon>(this.coupons, { merchantDomain, code });
-    if (!doc) return;
-
-    const attempts = doc.performance.attempts + 1;
-    const successes = doc.performance.successes + (outcome.applied ? 1 : 0);
-    const consecutiveFailures = outcome.applied ? 0 : doc.performance.consecutiveFailures + 1;
-
-    const discountPct =
-      outcome.applied && outcome.subtotal > 0
-        ? (outcome.observedDiscount / outcome.subtotal) * 100
-        : 0;
-    const meanDiscountPct = outcome.applied
-      ? (doc.performance.meanDiscountPct * doc.performance.successes + discountPct) /
-        Math.max(1, successes)
-      : doc.performance.meanDiscountPct;
-
-    const retired = consecutiveFailures >= CHECKOUT_CONFIG.couponRetirementFailures;
-
-    await updateOne<Coupon>(
-      this.coupons,
-      { id: doc.id },
-      {
-        performance: {
-          ...doc.performance,
-          attempts,
-          successes,
-          successRate: successes / attempts,
-          meanDiscountPct: Math.round(meanDiscountPct * 10) / 10,
-          consecutiveFailures,
-          ...(outcome.applied ? { lastSuccessAt: now } : {}),
-        },
-        ...(retired ? { status: 'retired' as const } : {}),
-      },
-    );
-
-    if (retired) {
-      log.info('coupon retired after consecutive failures', { merchantDomain, code });
-    }
+    // The counter arithmetic lives in the store, because retirement is a
+    // read-modify-write on one row and every implementation has to make that
+    // atomic in its own way.
+    await this.repository.recordCouponOutcome(merchantDomain, code, outcome, now);
   }
 }
 

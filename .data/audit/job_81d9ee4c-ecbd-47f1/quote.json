@@ -1,0 +1,14 @@
+{
+  "jobId": "job_81d9ee4c-ecbd-47f1",
+  "orderId": "36f31cfa-f4ca-4f12-9c8c-a4375814a18c",
+  "userId": "d290f1ee-6c54-4b01-90e6-d701748f0851",
+  "merchantDomain": "northwind.test",
+  "phase": "quote",
+  "writtenAt": "2026-09-20T06:13:05.477Z",
+  "quote": null,
+  "authorization": null,
+  "toolCalls": [],
+  "screenshots": [
+    "job_81d9ee4c-ecbd-47f1/quote.png"
+  ]
+}

@@ -23,6 +23,8 @@ import {
 } from '@window/shared';
 import { Icon } from '../src/components/Icon.js';
 import { api } from '../src/api/client.js';
+import { useSession } from '../src/store/session.js';
+import { goBackOrFeed } from '../src/navigation.js';
 
 /**
  * Order history.
@@ -101,10 +103,20 @@ function Control({
 
 export default function OrdersScreen(): React.ReactElement {
   const router = useRouter();
+  const session = useSession();
   const [orders, setOrders] = useState<OrderSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Opening /orders directly is a cold page load, and the auth token lives in
+  // memory until `boot()` has run. Fetching before then sends an
+  // unauthenticated request and renders its 401 as the screen's error — the
+  // same race the cart had.
   useEffect(() => {
+    if (session.status === 'idle') void session.boot();
+  }, [session.status, session]);
+
+  useEffect(() => {
+    if (session.status !== 'ready') return;
     let cancelled = false;
     void (async () => {
       try {
@@ -117,14 +129,14 @@ export default function OrdersScreen(): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session.status]);
 
   const groups = groupByDay(orders ?? []);
 
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Control label="Back" onPress={() => router.back()} style={styles.headerButton}>
+        <Control label="Back" onPress={goBackOrFeed} style={styles.headerButton}>
           <Icon name="back" size={20} />
         </Control>
         <Text style={styles.headerTitle}>Orders</Text>

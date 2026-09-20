@@ -1,0 +1,29 @@
+{
+  "jobId": "job_06103ed7-51d3-4910",
+  "orderId": "7233f2ff-dac6-4683-82e1-5a57fc833e13",
+  "userId": "fff22bd1-fe88-4da1-8e1b-ffc439f1a6b9",
+  "merchantDomain": "northwind.test",
+  "phase": "placement",
+  "writtenAt": "2026-09-20T06:01:08.411Z",
+  "quote": {
+    "tax": 544,
+    "hash": "28f28b6e16bc2278a57ca2a58de2f5e4ab8267e42633ff83ae4bfc5f3e5486a2",
+    "total": 6304,
+    "currency": "USD",
+    "discount": 640,
+    "shipping": 0,
+    "subtotal": 6400,
+    "expiresAt": "2026-09-20T06:10:45.820Z",
+    "generatedAt": "2026-09-20T06:00:45.820Z"
+  },
+  "authorization": {
+    "quoteHash": "28f28b6e16bc2278a57ca2a58de2f5e4ab8267e42633ff83ae4bfc5f3e5486a2",
+    "authorizedAt": "2026-09-20T06:01:06.197Z",
+    "userAgentHash": "6afe16e73eb90bf6fe1569207c774a0e"
+  },
+  "toolCalls": [],
+  "screenshots": [
+    "job_06103ed7-51d3-4910/quote.png",
+    "job_06103ed7-51d3-4910/placement.png"
+  ]
+}

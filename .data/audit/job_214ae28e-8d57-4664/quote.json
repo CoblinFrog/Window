@@ -1,0 +1,37 @@
+{
+  "jobId": "job_214ae28e-8d57-4664",
+  "orderId": "bdc9f0f4-59ec-45ea-99de-88c6e9624da4",
+  "userId": "507f1f77bcf86cd799439011",
+  "merchantDomain": "shop.test",
+  "phase": "quote",
+  "writtenAt": "2026-09-19T22:24:57.403Z",
+  "quote": null,
+  "authorization": null,
+  "toolCalls": [
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/cart"
+      },
+      "at": "2026-09-19T22:24:57.403Z",
+      "result": "cart opened"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "[data-add=\"prod_1\"]"
+      },
+      "at": "2026-09-19T22:24:57.403Z",
+      "result": "added Keyboard"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-19T22:24:57.403Z",
+      "result": "job-job_214ae28e-8d57-4664-quote-ead81694"
+    }
+  ],
+  "screenshots": [
+    "job-job_214ae28e-8d57-4664-quote-ead81694"
+  ]
+}

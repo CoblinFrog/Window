@@ -1,137 +1,359 @@
-import { before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CheckoutRepository, User } from './repository.js';
+import { describe, it } from 'node:test';
+import type { OrderStatus, ProductDoc, SourceDoc } from '@window/shared';
+import type { CheckoutRepository, NewOrder, Product, Source } from './repository.js';
 
-function minimalUserInput(overrides: Partial<Omit<User, 'id' | 'createdAt' | 'updatedAt'>> = {}) {
-  return {
-    deviceUserId: `device-${Math.random().toString(36).slice(2)}`,
-    deviceSecretHash: 'test-secret-hash',
-    sessionEpoch: 1,
-    auth: null,
-    settings: {},
-    onboarding: null,
-    interestVector: null,
-    interestSet: [],
-    explorationState: { counter: 0, lastTopic: null, rejected: [], pending: [] },
-    pricePrior: { center: 8000, currency: 'USD', confidence: 0.1 },
-    affinities: { brands: {}, sellers: {} },
-    suppressions: { products: [], brands: [], sellers: [] },
-    seenFilter: { bits: '', k: 7, m: 200000, n: 0, rebuiltAt: new Date() },
-    counters: { interactionCount: 0, sessionCount: 0, lastActiveAt: new Date(), lastDecayedOn: null },
-    ...overrides,
-  } satisfies Omit<User, 'id' | 'createdAt' | 'updatedAt'>;
-}
-
+/**
+ * The contract every `CheckoutRepository` must satisfy.
+ *
+ * This is the deliverable that makes a second implementation cheap. A new
+ * backing store is finished when this suite is green against it — not when it
+ * compiles, and not when it looks right. Run it like this:
+ *
+ * ```ts
+ * // repository.supabase.test.ts
+ * import { describeCheckoutRepository } from './repository.conformance.js';
+ *
+ * describeCheckoutRepository('supabase', async () => {
+ *   const repo = new SupabaseCheckoutRepository(client);
+ *   await repo.truncate();          // each case starts from empty
+ *   return repo;
+ * });
+ * ```
+ *
+ * The cases are written as the things that must not happen. A suite that only
+ * proved the happy path would pass against a store with no scoping and no
+ * compare-and-set — which is to say, against the two bugs that matter most.
+ */
 export function describeCheckoutRepository(
   name: string,
-  factory: () => Promise<CheckoutRepository>,
+  freshRepository: () => Promise<CheckoutRepository>,
 ): void {
-  describe(`CheckoutRepository: ${name}`, () => {
-    let repo: CheckoutRepository;
+  describe(`CheckoutRepository conformance: ${name}`, () => {
+    // -----------------------------------------------------------------------
+    // Scoping. Every read is scoped to a user; none of them is a filter the
+    // caller supplies and can forget.
+    // -----------------------------------------------------------------------
 
-    before(async () => {
-      repo = await factory();
-      await repo.truncate();
+    it('never returns one user\'s cart to another', async () => {
+      const repo = await freshRepository();
+      const mine = await repo.createCart('user_a', new Date());
+
+      assert.notEqual(await repo.getCart(mine.id, 'user_a'), null);
+      assert.equal(await repo.getCart(mine.id, 'user_b'), null);
     });
 
-    it('creates, reads, and updates a user with an opaque string id', async () => {
-      const user = await repo.createUser(minimalUserInput({ deviceUserId: 'device-user' }));
-      assert.match(user.id, /^[0-9a-f-]{36}$/i);
-      assert.equal((await repo.findUserByDeviceUserId('device-user'))?.id, user.id);
-      assert.equal((await repo.findUserById(user.id))?.deviceUserId, 'device-user');
+    it('never returns one user\'s order to another', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ userId: 'user_a' }));
 
-      const updated = await repo.updateUser(user.id, { sessionEpoch: 2 });
-      assert.equal(updated?.sessionEpoch, 2);
-      assert.equal(await repo.findUserById('00000000-0000-0000-0000-000000000000'), null);
+      assert.notEqual(await repo.getOrder(order.id, 'user_a'), null);
+      // This is the IDOR the checkout routes depend on being impossible.
+      assert.equal(await repo.getOrder(order.id, 'user_b'), null);
     });
 
-    it('creates, updates, and reopens carts by string id', async () => {
-      const user = await repo.createUserMinimal('device-cart', 'hash');
-      const cart = await repo.createCart({ userId: user.id, status: 'open', items: [] });
-      assert.equal((await repo.findOpenCartByUserId(user.id))?.id, cart.id);
+    it('lists only the caller\'s own orders', async () => {
+      const repo = await freshRepository();
+      await repo.createOrder(newOrder({ userId: 'user_a' }));
+      await repo.createOrder(newOrder({ userId: 'user_b' }));
 
-      const checkingOut = await repo.updateCart(cart.id, { status: 'checking_out' });
-      assert.equal(checkingOut?.status, 'checking_out');
-      assert.equal((await repo.reopenCart(cart.id))?.status, 'open');
-      assert.equal(await repo.reopenCart(cart.id), null);
+      const mine = await repo.listOrders('user_a', 50);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]!.userId, 'user_a');
     });
 
-    it('enforces the order claim compare-and-set contract', async () => {
-      const user = await repo.createUserMinimal('device-order', 'hash');
-      const order = await repo.createOrder({
-        userId: user.id,
-        cartId: null,
-        merchantDomain: 'example.com',
-        items: [],
-        quote: null,
-        coupon: null,
-        authorization: null,
-        payment: null,
-        agentRun: null,
-        status: 'awaiting_auth',
-        merchantOrderNumber: null,
-        failure: null,
-        submissionSeq: 0,
+    it('refuses to cancel another user\'s order', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ userId: 'user_a' }));
+
+      assert.equal(await repo.cancelOrder(order.id, 'user_b', new Date()), null);
+      const still = await repo.getOrder(order.id, 'user_a');
+      assert.equal(still?.status, 'awaiting_auth');
+    });
+
+    // -----------------------------------------------------------------------
+    // The replay guard. One authorization, at most one order.
+    // -----------------------------------------------------------------------
+
+    it('claims an order for submission exactly once', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ status: 'awaiting_auth' }));
+
+      const first = await repo.claimForSubmission(order.id, { status: 'placing' });
+      assert.notEqual(first, null);
+      assert.equal(first?.status, 'placing');
+      assert.equal(first?.submissionSeq, 1);
+
+      // The second caller must get null, not a second claim on the same order.
+      assert.equal(await repo.claimForSubmission(order.id, { status: 'placing' }), null);
+    });
+
+    it('gives the order to exactly one of many concurrent claims', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ status: 'awaiting_auth' }));
+
+      // The real contention case: a double-tap, a retried request, two tabs.
+      // If a store implements this as read-then-write, this is where it fails.
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => repo.claimForSubmission(order.id, { status: 'placing' })),
+      );
+
+      assert.equal(results.filter((r) => r !== null).length, 1);
+    });
+
+    it('refuses to claim an order that is not awaiting authorization', async () => {
+      const repo = await freshRepository();
+      for (const status of ['pending', 'quoting', 'placing', 'placed', 'cancelled', 'failed'] as const) {
+        const order = await repo.createOrder(newOrder({ status }));
+        assert.equal(
+          await repo.claimForSubmission(order.id, { status: 'placing' }),
+          null,
+          `status ${status} must not be claimable`,
+        );
+      }
+    });
+
+    it('returns null rather than throwing when the claim is lost', async () => {
+      // Contention is ordinary, not exceptional: the caller turns it into a
+      // 409. A store that throws here turns a normal double-tap into a 500.
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ status: 'awaiting_auth' }));
+      await repo.claimForSubmission(order.id, { status: 'placing' });
+
+      await assert.doesNotReject(() => repo.claimForSubmission(order.id, { status: 'placing' }));
+    });
+
+    // -----------------------------------------------------------------------
+    // Cancellation. Refusing is required; silently doing nothing is not.
+    // -----------------------------------------------------------------------
+
+    it('refuses to cancel past the point of no return', async () => {
+      const repo = await freshRepository();
+      for (const status of ['placing', 'placed', 'uncertain'] as const) {
+        const order = await repo.createOrder(newOrder({ status }));
+        assert.equal(
+          await repo.cancelOrder(order.id, 'user_a', new Date()),
+          null,
+          `${status} must not be cancellable`,
+        );
+      }
+    });
+
+    it('cancels an order that has not been submitted', async () => {
+      const repo = await freshRepository();
+      for (const status of ['pending', 'quoting', 'awaiting_auth'] as const) {
+        const order = await repo.createOrder(newOrder({ status }));
+        const cancelled = await repo.cancelOrder(order.id, 'user_a', new Date());
+        assert.equal(cancelled?.status, 'cancelled', `${status} must be cancellable`);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Round-tripping. Types have to survive storage.
+    // -----------------------------------------------------------------------
+
+    it('round-trips a quote with its dates intact', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({}));
+      const expiresAt = new Date('2026-06-01T12:00:00.000Z');
+
+      await repo.updateOrder(order.id, {
+        quote: {
+          subtotal: 1000,
+          shipping: 500,
+          tax: 90,
+          discount: 100,
+          total: 1490,
+          currency: 'USD',
+          generatedAt: new Date('2026-06-01T11:50:00.000Z'),
+          expiresAt,
+          hash: 'a'.repeat(64),
+        },
       });
-      const authorization = { authorizedAt: new Date(), userAgentHash: 'ua', quoteHash: 'quote' };
-      const payment = { rail: 'reap' as const, intentId: 'intent', tokenRef: 'token', cap: 1000, protocol: 'browser' as const };
-      const [first, second] = await Promise.all([
-        repo.claimForSubmission(order.id, authorization, payment),
-        repo.claimForSubmission(order.id, authorization, payment),
-      ]);
-      assert.equal([first, second].filter(Boolean).length, 1);
-      assert.equal((first ?? second)?.status, 'placing');
-      assert.equal((first ?? second)?.submissionSeq, 1);
+
+      const stored = await repo.getOrder(order.id, 'user_a');
+      // A Date that came back as a string would make every expired quote look
+      // valid, because a string is never less than Date.now().
+      assert.ok(stored?.quote?.expiresAt instanceof Date, 'expiresAt must be a Date');
+      assert.equal(stored?.quote?.expiresAt.toISOString(), expiresAt.toISOString());
+      assert.equal(stored?.quote?.total, 1490);
     });
 
-    it('cancels only cancellable orders and preserves user scoping', async () => {
-      const user = await repo.createUserMinimal('device-cancel', 'hash');
-      const order = await repo.createOrder({
-        userId: user.id,
-        cartId: null,
-        merchantDomain: 'example.com',
-        items: [],
-        quote: null,
-        coupon: null,
-        authorization: null,
-        payment: null,
-        agentRun: null,
-        status: 'quoting',
-        merchantOrderNumber: null,
-        failure: null,
-        submissionSeq: 0,
-      });
-      assert.equal((await repo.cancelOrder(order.id))?.status, 'cancelled');
-      assert.equal(await repo.findOrderById('00000000-0000-0000-0000-000000000000'), null);
+    it('round-trips money as integer minor units', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(
+        newOrder({ items: [{ productId: 'p1', title: 'Thing', quantity: 3, unitPrice: 1999, variant: {} }] }),
+      );
+
+      const stored = await repo.getOrder(order.id, 'user_a');
+      // 1999 must not come back as 19.99, "1999.00", or a float.
+      assert.equal(stored?.items[0]?.unitPrice, 1999);
+      assert.equal(Number.isInteger(stored?.items[0]?.unitPrice), true);
     });
 
-    it('round-trips sources, coupons, merchant links, and product lookups', async () => {
-      const user = await repo.createUserMinimal('device-related', 'hash');
-      const coupon = await repo.createCoupon({
-        merchantDomain: 'example.com',
-        code: 'SAVE10',
-        discovered: { from: 'aggregator', url: 'https://example.com', at: new Date() },
-        constraints: { minSpend: null, categories: [], firstOrderOnly: false, expiresAt: null },
-        performance: { attempts: 0, successes: 0, successRate: 0, meanDiscountPct: 0, lastSuccessAt: null, consecutiveFailures: 0 },
-        stackable: false,
-        status: 'active',
-      });
-      assert.equal((await repo.findCouponsByMerchantDomain('example.com'))[0]?.id, coupon.id);
-      assert.equal((await repo.updateCoupon(coupon.id, { status: 'retired' }))?.status, 'retired');
+    it('round-trips an empty variant map without turning it into null', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(
+        newOrder({ items: [{ productId: 'p1', title: 'Thing', quantity: 1, unitPrice: 100, variant: {} }] }),
+      );
 
-      const link = await repo.createMerchantLink({
-        userId: user.id,
-        merchantDomain: 'example.com',
-        status: 'pending',
-        encryptedSession: null,
-        createdAt: new Date(),
-        linkedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-      });
-      assert.equal((await repo.findMerchantLink(user.id, 'example.com'))?.id, link.id);
-      assert.equal((await repo.updateMerchantLink(link.id, { status: 'linked' }))?.status, 'linked');
-      assert.equal((await repo.findProductsByIds([])).length, 0);
-      assert.equal(await repo.findProductById('00000000-0000-0000-0000-000000000000'), null);
+      const stored = await repo.getOrder(order.id, 'user_a');
+      assert.deepEqual(stored?.items[0]?.variant, {});
+    });
+
+    it('does not hand out a live reference into its own state', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({}));
+
+      const first = await repo.getOrder(order.id, 'user_a');
+      first!.status = 'placed' as OrderStatus;
+
+      const second = await repo.getOrder(order.id, 'user_a');
+      // Mutating a returned document must not mutate the store. A real database
+      // gets this for free; an in-process one has to be deliberate about it.
+      assert.equal(second?.status, 'awaiting_auth');
+    });
+
+    it('applies a patch without dropping unmentioned fields', async () => {
+      const repo = await freshRepository();
+      const order = await repo.createOrder(newOrder({ merchantDomain: 'shop.test' }));
+
+      await repo.updateOrder(order.id, { status: 'quoting' });
+      const stored = await repo.getOrder(order.id, 'user_a');
+
+      assert.equal(stored?.status, 'quoting');
+      assert.equal(stored?.merchantDomain, 'shop.test', 'a patch must not clear other fields');
+    });
+
+    // -----------------------------------------------------------------------
+    // Carts
+    // -----------------------------------------------------------------------
+
+    it('finds the open cart and ignores closed ones', async () => {
+      const repo = await freshRepository();
+      const first = await repo.createCart('user_a', new Date());
+      await repo.setCartStatus(first.id, 'closed', new Date());
+
+      assert.equal(await repo.getOpenCart('user_a'), null);
+
+      const second = await repo.createCart('user_a', new Date());
+      assert.equal((await repo.getOpenCart('user_a'))?.id, second.id);
+    });
+
+    it('reopens a cart only from the expected status', async () => {
+      const repo = await freshRepository();
+      const cart = await repo.createCart('user_a', new Date());
+      await repo.setCartStatus(cart.id, 'closed', new Date());
+
+      // A cancellation arriving late must not reopen a cart the user has since
+      // moved on from.
+      await repo.reopenCart(cart.id, 'checking_out', new Date());
+      assert.equal((await repo.getCart(cart.id, 'user_a'))?.status, 'closed');
+
+      await repo.setCartStatus(cart.id, 'checking_out', new Date());
+      await repo.reopenCart(cart.id, 'checking_out', new Date());
+      assert.equal((await repo.getCart(cart.id, 'user_a'))?.status, 'open');
+    });
+
+    // -----------------------------------------------------------------------
+    // Counting, which feeds the daily spend rule
+    // -----------------------------------------------------------------------
+
+    it('counts placed orders within a window', async () => {
+      const repo = await freshRepository();
+      const now = new Date('2026-06-02T00:00:00.000Z');
+      const old = new Date('2026-05-01T00:00:00.000Z');
+
+      await repo.createOrder(newOrder({ status: 'placed', createdAt: now }));
+      await repo.createOrder(newOrder({ status: 'placed', createdAt: old }));
+      await repo.createOrder(newOrder({ status: 'failed', createdAt: now }));
+
+      assert.equal(await repo.countOrders('user_a', { status: 'placed' }), 2);
+      assert.equal(
+        await repo.countOrders('user_a', {
+          status: 'placed',
+          since: new Date('2026-06-01T00:00:00.000Z'),
+        }),
+        1,
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Missing rows are null, never an exception
+    // -----------------------------------------------------------------------
+
+    it('returns null for absent rows rather than throwing', async () => {
+      const repo = await freshRepository();
+      const absent = '00000000-0000-4000-8000-000000000000';
+
+      assert.equal(await repo.getOrder(absent, 'user_a'), null);
+      assert.equal(await repo.getCart(absent, 'user_a'), null);
+      assert.equal(await repo.getProduct(absent), null);
+      assert.equal(await repo.getSource('nobody.test'), null);
+      assert.equal(await repo.getMerchantLink('user_a', 'nobody.test'), null);
+      assert.deepEqual(await repo.getProducts([absent]), []);
     });
   });
+}
+
+/** A minimal order, overridable per case. Defaults to the interesting state. */
+export function newOrder(overrides: Partial<NewOrder> = {}): NewOrder {
+  return {
+    userId: 'user_a',
+    cartId: 'cart_a',
+    merchantDomain: 'shop.test',
+    items: [{ productId: 'p1', title: 'Thing', quantity: 1, unitPrice: 1000, variant: {} }],
+    quote: null,
+    coupon: null,
+    authorization: null,
+    payment: null,
+    agentRun: null,
+    status: 'awaiting_auth',
+    merchantOrderNumber: null,
+    failure: null,
+    submissionSeq: 0,
+    createdAt: new Date('2026-06-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+/**
+ * A product carrying every field the checkout path reads.
+ *
+ * "Only the fields it needs" is the right idea and an easy thing to get wrong —
+ * a fixture missing one of them fails deep inside the orchestrator with a
+ * property-of-undefined, which reads like a code bug rather than a test-setup
+ * one. The list below is derived from the actual reads in `orchestrator.ts` and
+ * `cart/service.ts`.
+ */
+export function fixtureProduct(overrides: Partial<Product> = {}): Product {
+  return {
+    id: 'p1',
+    title: 'Thing',
+    clusterId: null,
+    sellerId: 'seller_1',
+    price: { amount: 1000, currency: 'USD' },
+    stock: { inStock: true, quantity: 5, singleUnit: false },
+    risk: { tier: 'low', score: 0.1, flags: [], reports: { count: 0 } },
+    quality: { score: 0.8, cautions: [] },
+    category: { l1: 'tech', l2: 'tech.peripherals', l3: 'tech.peripherals.keyboards' },
+    media: { hero: null, images: [], video: null },
+    condition: 'new',
+    status: 'active',
+    sourceType: 'new',
+    source: { domain: 'shop.test', url: 'https://shop.test/p/1' },
+    ...overrides,
+  } as unknown as ProductDoc<string> as Product;
+}
+
+/** A merchant source with only the fields checkout actually reads. */
+export function fixtureSource(overrides: Partial<Source> = {}): Source {
+  return {
+    id: 'shop.test',
+    displayName: 'Shop',
+    sourceType: 'new',
+    checkout: { protocol: 'browser', blocksAgents: false, stackableCoupons: false },
+    ...overrides,
+  } as unknown as SourceDoc<string> as Source;
 }

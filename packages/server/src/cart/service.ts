@@ -6,11 +6,11 @@ import {
   type CartLine,
   type CartResponse,
 } from '@window/shared';
-import type { Cart, CollectionSet, Product, User } from '../db/supabase-collections.js';
+import type { User } from '../db/supabase-collections.js';
+import type { Cart, CheckoutRepository, Product } from '../checkout/repository.js';
 import { logger } from '../lib/logger.js';
 import { cautionText } from '../ingestion/quality.js';
 import { riskFlagText } from '../ingestion/risk.js';
-import { findOne, find, updateOne, deleteOne, insert } from '../db/supabase-helpers.js';
 
 const log = logger.child('cart');
 
@@ -61,7 +61,7 @@ export class StoredListingVerifier implements StockVerifier {
 }
 
 export interface CartDeps {
-  collections: CollectionSet;
+  repository: CheckoutRepository;
   verifier?: StockVerifier;
 }
 
@@ -73,18 +73,9 @@ export class CartService {
   }
 
   async openCart(user: User, now = new Date()): Promise<Cart> {
-    const { collections } = this.deps;
-    const existing = await findOne(collections.carts, { userId: user.id, status: 'open' });
-    if (existing) return existing;
-
-    const cart: Omit<Cart, 'id'> = {
-      userId: user.id,
-      status: 'open',
-      items: [],
-      updatedAt: now,
-    };
-    const result = await insert(collections.carts, cart as Cart);
-    return result as Cart;
+    const { repository } = this.deps;
+    const existing = await repository.getOpenCart(user.id);
+    return existing ?? (await repository.createCart(user.id, now));
   }
 
   /**
@@ -99,12 +90,8 @@ export class CartService {
     request: AddCartItemRequest,
     now = new Date(),
   ): Promise<Cart> {
-    const { collections } = this.deps;
-    if (!request.productId) {
-      throw ApiError.validation('productId must be a valid id.');
-    }
-
-    const product = await findOne(collections.products, { id: request.productId });
+    const { repository } = this.deps;
+    const product = await repository.getProduct(request.productId);
     if (!product) throw ApiError.notFound('That product');
 
     if (product.sourceType === 'auction') {
@@ -139,8 +126,7 @@ export class CartService {
     // the same bag twice.
     const variantKey = JSON.stringify(variant);
     const existing = cart.items.find(
-      (item) =>
-        item.productId === product.id && JSON.stringify(item.variant) === variantKey,
+      (item) => item.productId === product.id && JSON.stringify(item.variant) === variantKey,
     );
 
     if (existing) {
@@ -164,11 +150,7 @@ export class CartService {
       });
     }
 
-    await updateOne(
-      collections.carts,
-      { id: cart.id },
-      { items: cart.items, updatedAt: now },
-    );
+    await repository.saveCartItems(cart.id, cart.items, now);
     return cart;
   }
 
@@ -188,11 +170,7 @@ export class CartService {
     }
     if (patch.variant) line.variant = patch.variant;
 
-    await updateOne(
-      this.deps.collections.carts,
-      { id: cart.id },
-      { items: cart.items, updatedAt: now },
-    );
+    await this.deps.repository.saveCartItems(cart.id, cart.items, now);
     return cart;
   }
 
@@ -201,11 +179,7 @@ export class CartService {
     const next = cart.items.filter((item) => item.id !== lineId);
     if (next.length === cart.items.length) throw ApiError.notFound('That cart line');
 
-    await updateOne(
-      this.deps.collections.carts,
-      { id: cart.id },
-      { items: next, updatedAt: now },
-    );
+    await this.deps.repository.saveCartItems(cart.id, next, now);
     return { ...cart, items: next };
   }
 
@@ -216,7 +190,7 @@ export class CartService {
    * spending against it.
    */
   async view(user: User, now = new Date()): Promise<CartResponse> {
-    const { collections } = this.deps;
+    const { repository } = this.deps;
     const cart = await this.openCart(user, now);
 
     if (cart.items.length === 0) {
@@ -231,10 +205,7 @@ export class CartService {
       };
     }
 
-    const products = await find(
-      collections.products,
-      { id: { $in: cart.items.map((i) => i.productId) } }
-    );
+    const products = await repository.getProducts(cart.items.map((i) => i.productId));
     const productById = new Map(products.map((p) => [p.id, p]));
 
     const verified = await this.verifier.verify(products);
@@ -300,11 +271,7 @@ export class CartService {
       });
     }
 
-    await updateOne(
-      collections.carts,
-      { id: cart.id },
-      { items: cart.items, updatedAt: now },
-    );
+    await repository.saveCartItems(cart.id, cart.items, now);
 
     if (diffs.length > 0) {
       log.info('cart diff surfaced', { cartId: cart.id, diffs: diffs.length });

@@ -83,8 +83,16 @@ export interface CategoryRef {
 }
 
 export interface CategoryDoc<Id = string> {
-  /** Slug id, e.g. "mechanical-keyboards". */
-  id: string;
+  /**
+   * Row id. A uuid under Supabase — *not* the taxonomy key.
+   *
+   * The taxonomy is keyed by `slug`, and conflating the two is a comparison
+   * Postgres refuses outright: `id = 'tech'` is a uuid type error, not a
+   * no-match. Everything that means "which topic is this" uses `slug`.
+   */
+  id: Id;
+  /** The taxonomy key, e.g. "mechanical-keyboards". */
+  slug: string;
   level: 1 | 2 | 3;
   parent: string | null;
   l1: string;
@@ -316,9 +324,29 @@ export interface BloomFilterState {
 
 export interface UserDoc<Id = string> {
   id: Id;
-  /** Anonymous identity, minted client-side. */
+  /**
+   * Public, non-secret handle for the device. Server-minted, safe to log and
+   * to return. It is an identifier, not a credential.
+   */
   deviceUserId: string;
-  auth: { email: string | null; providers: string[]; claimedAt: Date } | null;
+  /**
+   * SHA-256 of the device secret the client holds. The secret itself is
+   * returned exactly once, at mint time, and never stored — so a dump of this
+   * collection yields no way to authenticate as anyone in it.
+   */
+  deviceSecretHash: string;
+  /**
+   * Session generation. Every token carries the epoch it was minted under;
+   * incrementing this revokes all of them at once.
+   */
+  sessionEpoch: number;
+  auth: {
+    email: string | null;
+    providers: string[];
+    claimedAt: Date;
+    /** Null until an ownership challenge is actually passed. */
+    emailVerifiedAt: Date | null;
+  } | null;
   onboarding: {
     topics: string[];
     priceBand: PriceBand | null;
@@ -547,6 +575,24 @@ export interface OrderDoc<Id = string> {
   submissionSeq: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * A user's linked account at one merchant.
+ *
+ * Guest checkout is always preferred, so this exists only for merchants that
+ * require an account. The session is encrypted at rest with a per-user key and
+ * is never placed in a model context — the agent receives an opaque handle.
+ */
+export interface MerchantLinkRecord<Id = string> {
+  id: Id;
+  userId: Id;
+  merchantDomain: string;
+  status: 'pending' | 'linked' | 'expired' | 'revoked';
+  encryptedSession: { ciphertext: string; iv: string; keyVersion: number } | null;
+  createdAt: Date;
+  linkedAt: Date | null;
+  expiresAt: Date;
 }
 
 // ---------------------------------------------------------------------------

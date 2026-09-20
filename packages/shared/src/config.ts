@@ -456,6 +456,35 @@ export const CHECKOUT_CONFIG = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Sessions and credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Session lifetimes.
+ *
+ * A token is a bearer credential: whoever holds it is the user. The only thing
+ * that bounds the damage of a leaked one is how long it stays useful, so it
+ * expires and the client silently re-derives a new one from the device secret
+ * it holds in secure storage. Thirty days is long enough that an anonymous
+ * browser never sees a sign-in prompt, and short enough that a token scraped
+ * from a log last quarter is inert.
+ */
+export const SESSION_CONFIG = {
+  tokenTtlMs: 30 * 24 * 60 * 60 * 1000,
+  /** Tolerated clock difference when checking `iat`. */
+  clockSkewMs: 2 * 60 * 1000,
+  /** How long an emailed verification code is valid. */
+  emailCodeTtlMs: 10 * 60 * 1000,
+  /** Wrong codes accepted for one challenge before it is burned. */
+  emailCodeMaxAttempts: 5,
+  /**
+   * SSE tickets. Short enough that a URL captured in an access log is already
+   * dead by the time anyone reads it, long enough to survive a reconnect.
+   */
+  streamTicketTtlMs: 60 * 1000,
+} as const;
+
+// ---------------------------------------------------------------------------
 // Rate limits, per principal
 // ---------------------------------------------------------------------------
 
@@ -464,6 +493,18 @@ export const RATE_LIMITS = {
   eventBatchesPerMinute: 600,
   checkoutQuotesPerHour: 20,
   merchantLinksPerDay: 5,
+  /**
+   * Credential paths, limited per IP rather than per principal: there is no
+   * principal yet when they are called, which is exactly why they are the ones
+   * worth limiting hardest.
+   */
+  deviceBootstrapsPerHour: 30,
+  claimAttemptsPerHour: 10,
+  /**
+   * Authorizations per hour. A user places a handful of orders; a script
+   * grinding stolen quote hashes places thousands.
+   */
+  authorizationsPerHour: 30,
 } as const;
 
 // ---------------------------------------------------------------------------

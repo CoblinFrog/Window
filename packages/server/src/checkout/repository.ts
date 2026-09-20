@@ -1,370 +1,176 @@
-/**
- * Checkout repository interface.
- *
- * This interface defines the contract for checkout data access. Implementations
- * must follow two rules:
- * 1. Ids are opaque strings - the store issues them, callers only echo them back
- * 2. Missing rows return null, never an exception
- */
-
-import type { Quote, OrderStatus } from '@window/shared';
-
-export interface User {
-  id: string;
-  deviceUserId: string;
-  deviceSecretHash: string | null;
-  sessionEpoch: number;
-  auth: {
-    email: string | null;
-    providers: string[];
-    claimedAt: Date | null;
-    emailVerifiedAt: Date | null;
-  } | null;
-  settings: Record<string, unknown>;
-  // Additional fields from existing schema
-  onboarding: {
-    topics: string[];
-    priceBand: string | null;
-    completedAt: Date;
-  } | null;
-  interestVector: number[] | null;
-  interestSet: Array<{
-    topic: string;
-    weight: number;
-    source: string;
-    addedAt: Date;
-    lastPositiveAt: Date | null;
-  }>;
-  explorationState: {
-    counter: number;
-    lastTopic: string | null;
-    rejected: Array<{ topic: string; strikes: number; until: Date }>;
-    pending: Array<{
-      topic: string;
-      sessions: string[];
-      positiveDwells: number;
-      bestDwellMs: number;
-      railInteraction: boolean;
-      cartAdd: boolean;
-    }>;
-  };
-  pricePrior: {
-    center: number;
-    currency: string;
-    confidence: number;
-  };
-  affinities: {
-    brands: Record<string, number>;
-    sellers: Record<string, number>;
-  };
-  suppressions: {
-    products: string[];
-    brands: string[];
-    sellers: string[];
-  };
-  seenFilter: {
-    bits: string;
-    k: number;
-    m: number;
-    n: number;
-    rebuiltAt: Date;
-  };
-  counters: {
-    interactionCount: number;
-    sessionCount: number;
-    lastActiveAt: Date;
-    lastDecayedOn: string | null;
-  };
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface Cart {
-  id: string;
-  userId: string;
-  status: 'open' | 'checking_out' | 'closed';
-  items: Array<{
-    id: string;
-    productId: string;
-    clusterId: string | null;
-    sellerId: string;
-    merchantDomain: string;
-    variant: Record<string, string>;
-    quantity: number;
-    priceAtAdd: { amount: number; currency: string };
-    priceNow: { amount: number; currency: string };
-    priceChanged: boolean;
-    available: boolean;
-    softHold: boolean;
-    addedAt: Date;
-  }>;
-  updatedAt: Date;
-}
-
-export interface Order {
-  id: string;
-  userId: string;
-  cartId: string | null;
-  merchantDomain: string;
-  items: Array<{
-    productId: string;
-    title: string;
-    quantity: number;
-    unitPrice: number;
-    variant: Record<string, string>;
-  }>;
-  quote: Quote | null;
-  coupon: { code: string; discount: number; attempts: number } | null;
-  authorization: {
-    authorizedAt: Date;
-    userAgentHash: string;
-    quoteHash: string;
-  } | null;
-  payment: {
-    rail: 'reap';
-    intentId: string;
-    tokenRef: string;
-    cap: number;
-    protocol: 'acp' | 'mpp' | 'tap' | 'browser';
-  } | null;
-  agentRun: {
-    jobId: string;
-    startedAt: Date;
-    endedAt: Date | null;
-    toolCallCount: number;
-    screenshots: string[];
-    transcriptRef: string;
-  } | null;
-  status: OrderStatus;
-  merchantOrderNumber: string | null;
-  failure: { code: string; message: string; recoverable: boolean } | null;
-  submissionSeq: number;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface Source {
-  id: string; // The domain is stored as id
-  displayName: string;
-  sourceType: string;
-  checkout: {
-    protocol: string;
-    blocksAgents: boolean;
-    stackableCoupons: boolean;
-  };
-}
-
-export interface Coupon {
-  id: string;
-  merchantDomain: string;
-  code: string;
-  discovered: Record<string, unknown>;
-  constraints: Record<string, unknown>;
-  performance: Record<string, unknown>;
-  stackable: boolean;
-  status: string;
-}
-
-export interface MerchantLink {
-  id: string;
-  userId: string;
-  merchantDomain: string;
-  status: string;
-  encryptedSession: Record<string, unknown> | null;
-  createdAt: Date;
-  linkedAt: Date | null;
-  expiresAt: Date;
-}
-
-export interface Product {
-  id: string;
-  title: string;
-  price: { amount: number; currency: string };
-  stock: { inStock: boolean; quantity: number | null; singleUnit: boolean };
-  risk: {
-    score: number;
-    tier: string;
-  };
-  status: string;
-  sourceType: string;
-  source: {
-    domain: string;
-    url: string;
-  };
-}
+import type {
+  CartDoc,
+  CouponDoc,
+  MerchantLinkRecord,
+  OrderDoc,
+  OrderStatus,
+  ProductDoc,
+  SourceDoc,
+} from '@window/shared';
 
 /**
- * Checkout repository interface.
+ * The checkout data boundary.
  *
- * Touches seven tables: users, carts, orders, sources, coupons, merchant_links, products.
- * All ids are opaque strings. Missing rows return null, never throw.
+ * Checkout needs seven tables and nothing else — no vector index, no ranking
+ * state, no clusters or reviews. Naming that subset as an interface is what
+ * lets the checkout system be built and tested against one implementation while
+ * a different one is written behind it, which is the same pattern `PaymentRail`,
+ * `CheckoutAgent`, `StockVerifier` and `VectorSearch` already follow here.
+ *
+ * Two rules keep it portable:
+ *
+ * **Ids are opaque strings.** Not `ObjectId`, not `uuid` — a string the store
+ * issued and the caller only ever echoes back. A Mongo implementation hands out
+ * hex, a Postgres one hands out uuids, and no code above this line can tell.
+ *
+ * **No query language crosses it.** Every method is a named operation with a
+ * meaning, not a filter document. `claimForSubmission` is the clearest case: as
+ * a raw update it is four conditions an implementation could get subtly wrong,
+ * and as a method it is one guarantee that can be tested once and relied on.
  */
+
+/** Documents at this boundary are the generic shapes with string ids. */
+export type Cart = CartDoc<string>;
+export type Order = OrderDoc<string>;
+export type Product = ProductDoc<string>;
+export type Source = SourceDoc<string>;
+export type Coupon = CouponDoc<string>;
+export type MerchantLink = MerchantLinkRecord<string>;
+
+/** The fields a new order is created with. The store assigns `id`. */
+export type NewOrder = Omit<Order, 'id'>;
+
+/**
+ * A partial update to an order.
+ *
+ * Deliberately a shallow patch of whole fields rather than a path-based update:
+ * `quote` and `payment` are written as complete values, which is what makes
+ * them a `jsonb` column in Postgres and a subdocument in Mongo without either
+ * implementation needing to understand the other's update syntax.
+ */
+export type OrderPatch = Partial<
+  Pick<
+    Order,
+    | 'items'
+    | 'quote'
+    | 'coupon'
+    | 'status'
+    | 'authorization'
+    | 'payment'
+    | 'agentRun'
+    | 'merchantOrderNumber'
+    | 'failure'
+    | 'updatedAt'
+  >
+>;
+
 export interface CheckoutRepository {
-  /**
-   * Truncate all checkout tables for testing.
-   * This is a test-only method and should never be used in production.
-   */
-  truncate(): Promise<void>;
-
-  // -------------------------------------------------------------------------
-  // Users
-  // -------------------------------------------------------------------------
-
-  /**
-   * Find a user by device user id.
-   */
-  findUserByDeviceUserId(deviceUserId: string): Promise<User | null>;
-
-  /**
-   * Find a user by id.
-   */
-  findUserById(id: string): Promise<User | null>;
-
-  /**
-   * Create a user.
-   */
-  createUser(user: Omit<User, 'id' | 'createdAt' | 'updatedAt'>): Promise<User>;
-
-  /**
-   * Create a user with minimal fields (provides defaults for required schema fields).
-   */
-  createUserMinimal(deviceUserId: string, deviceSecretHash: string | null): Promise<User>;
-
-  /**
-   * Update a user.
-   */
-  updateUser(id: string, updates: Partial<Omit<User, 'id' | 'createdAt'>>): Promise<User | null>;
+  /** Names the backing store, for logs and the health endpoint. */
+  readonly kind: string;
 
   // -------------------------------------------------------------------------
   // Carts
   // -------------------------------------------------------------------------
 
-  /**
-   * Find a cart by id.
-   */
-  findCartById(id: string): Promise<Cart | null>;
+  /** The user's open cart, or null. Scoped by user: there is no unscoped read. */
+  getOpenCart(userId: string): Promise<Cart | null>;
+
+  /** A cart by id, scoped to its owner. */
+  getCart(cartId: string, userId: string): Promise<Cart | null>;
+
+  createCart(userId: string, now: Date): Promise<Cart>;
+
+  /** Replaces the line array wholesale, which is how the cart service mutates it. */
+  saveCartItems(cartId: string, items: Cart['items'], now: Date): Promise<void>;
+
+  setCartStatus(cartId: string, status: Cart['status'], now: Date): Promise<void>;
 
   /**
-   * Find the open cart for a user.
+   * Returns a cancelled job's cart to `open`.
+   *
+   * Conditional on the current status so that a cancellation arriving after the
+   * user already started a new checkout cannot reopen the cart underneath it.
    */
-  findOpenCartByUserId(userId: string): Promise<Cart | null>;
-
-  /**
-   * Create a cart.
-   */
-  createCart(cart: Omit<Cart, 'id' | 'updatedAt'>): Promise<Cart>;
-
-  /**
-   * Update a cart.
-   */
-  updateCart(id: string, updates: Partial<Omit<Cart, 'id'>>): Promise<Cart | null>;
-
-  /**
-   * Reopen a cart (set status from 'checking_out' to 'open').
-   * Must be conditional: only update if status is 'checking_out'.
-   */
-  reopenCart(id: string): Promise<Cart | null>;
+  reopenCart(cartId: string, expected: Cart['status'], now: Date): Promise<void>;
 
   // -------------------------------------------------------------------------
   // Orders
   // -------------------------------------------------------------------------
 
-  /**
-   * Find an order by id.
-   */
-  findOrderById(id: string): Promise<Order | null>;
+  /** Scoped by user. Every order read in a request path goes through this. */
+  getOrder(orderId: string, userId: string): Promise<Order | null>;
+
+  createOrder(order: NewOrder): Promise<Order>;
+
+  /** Applies a patch and returns the updated document. */
+  updateOrder(orderId: string, patch: OrderPatch): Promise<Order | null>;
+
+  listOrders(userId: string, limit: number): Promise<Order[]>;
+
+  countOrders(userId: string, filter: { status: OrderStatus; since?: Date }): Promise<number>;
 
   /**
-   * Find orders by user id.
+   * Atomically claims an order for submission. **The replay guard.**
+   *
+   * Moves `awaiting_auth` → `placing` and `submissionSeq` 0 → 1, and returns
+   * the updated order, or null if either condition already failed. The whole
+   * point is that two concurrent authorizations cannot both receive an order:
+   * exactly one gets the document and the other gets null.
+   *
+   * This must be a single atomic compare-and-set in the store — a read followed
+   * by a write is not an implementation of it, however carefully it is written.
+   * In Postgres that is one statement:
+   *
+   * ```sql
+   * UPDATE orders SET status = 'placing', submission_seq = 1, ...
+   *  WHERE id = $1 AND status = 'awaiting_auth' AND submission_seq = 0
+   *  RETURNING *;
+   * ```
+   *
+   * A zero-row result is the contention case and must return null, not throw.
    */
-  findOrdersByUserId(userId: string): Promise<Order[]>;
+  claimForSubmission(orderId: string, patch: OrderPatch): Promise<Order | null>;
 
   /**
-   * Create an order.
+   * Cancels an order unless it has reached a point of no return.
+   *
+   * `placed`, `placing` and `uncertain` cannot be cancelled: the merchant may
+   * already hold the order, and a cancel that silently does nothing is worse
+   * than a refusal. Conditional in the store for the same reason as above.
    */
-  createOrder(order: Omit<Order, 'id' | 'createdAt' | 'updatedAt'>): Promise<Order>;
-
-  /**
-   * Update an order.
-   */
-  updateOrder(id: string, updates: Partial<Omit<Order, 'id' | 'createdAt'>>): Promise<Order | null>;
-
-  /**
-   * Claim an order for submission.
-   * This must be a single atomic compare-and-set operation.
-   * Updates status from 'awaiting_auth' to 'placing' and increments submission_seq.
-   * Returns null if the order is not in 'awaiting_auth' or submission_seq is not 0.
-   */
-  claimForSubmission(
-    id: string,
-    authorization: Order['authorization'],
-    payment: Order['payment']
-  ): Promise<Order | null>;
-
-  /**
-   * Cancel an order.
-   * Must be conditional: only update if status is not 'placed', 'placing', or 'uncertain'.
-   */
-  cancelOrder(id: string): Promise<Order | null>;
+  cancelOrder(orderId: string, userId: string, now: Date): Promise<Order | null>;
 
   // -------------------------------------------------------------------------
-  // Sources
+  // Catalog, read-only from checkout's point of view
   // -------------------------------------------------------------------------
 
-  /**
-   * Find a source by domain (stored as id).
-   */
-  findSourceByDomain(domain: string): Promise<Source | null>;
+  getProduct(productId: string): Promise<Product | null>;
+
+  /** Batch read. Order is not guaranteed; callers index by id. */
+  getProducts(productIds: readonly string[]): Promise<Product[]>;
+
+  /** A merchant's source record, keyed by domain. */
+  getSource(merchantDomain: string): Promise<Source | null>;
 
   // -------------------------------------------------------------------------
   // Coupons
   // -------------------------------------------------------------------------
 
-  /**
-   * Find coupons by merchant domain.
-   */
-  findCouponsByMerchantDomain(merchantDomain: string): Promise<Coupon[]>;
+  listCoupons(merchantDomain: string): Promise<Coupon[]>;
 
-  /**
-   * Create a coupon.
-   */
-  createCoupon(coupon: Omit<Coupon, 'id'>): Promise<Coupon>;
-
-  /**
-   * Update a coupon.
-   */
-  updateCoupon(id: string, updates: Partial<Omit<Coupon, 'id'>>): Promise<Coupon | null>;
+  /** Upserts the learning-loop counters for one code on one merchant. */
+  recordCouponOutcome(
+    merchantDomain: string,
+    code: string,
+    outcome: { applied: boolean; observedDiscount: number; subtotal: number; reason: string | null },
+    now: Date,
+  ): Promise<void>;
 
   // -------------------------------------------------------------------------
-  // Merchant Links
+  // Merchant links
   // -------------------------------------------------------------------------
 
-  /**
-   * Find a merchant link by user id and merchant domain.
-   */
-  findMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null>;
+  upsertMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<void>;
 
-  /**
-   * Create a merchant link.
-   */
-  createMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<MerchantLink>;
-
-  /**
-   * Update a merchant link.
-   */
-  updateMerchantLink(id: string, updates: Partial<Omit<MerchantLink, 'id'>>): Promise<MerchantLink | null>;
-
-  // -------------------------------------------------------------------------
-  // Products
-  // -------------------------------------------------------------------------
-
-  /**
-   * Find products by ids.
-   */
-  findProductsByIds(ids: string[]): Promise<Product[]>;
-
-  /**
-   * Find a product by id.
-   */
-  findProductById(id: string): Promise<Product | null>;
+  getMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null>;
 }

@@ -68,7 +68,9 @@ async function main(): Promise<void> {
   // ---- Taxonomy ----------------------------------------------------------
   log.info('writing the taxonomy', { nodes: CATEGORY_NODES.length });
   const categoryDocs: Array<CategoryDoc<string>> = CATEGORY_NODES.map((node) => ({
+    // The taxonomy node id is the slug. The row id is assigned by the database.
     id: node.id,
+    slug: node.id,
     level: node.level,
     parent: node.parent,
     l1: node.l1,

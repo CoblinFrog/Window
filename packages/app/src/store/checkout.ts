@@ -172,7 +172,7 @@ export const useCheckout = create<CheckoutState>((set, get) => ({
         jobIds: response.jobs.map((job) => job.jobId),
         jobs,
       });
-      for (const job of response.jobs) watch(job.jobId, set, get);
+      for (const job of response.jobs) void watch(job.jobId, set, get);
     } catch (error) {
       set({ phase: 'error', error: (error as Error).message });
     }
@@ -209,7 +209,7 @@ export const useCheckout = create<CheckoutState>((set, get) => ({
       mergeJob(updated, set, get);
       set({ authorizing: { ...get().authorizing, [jobId]: false } });
       // The job may still be `placing`; the watcher carries it the rest of the way.
-      if (!watchers.has(jobId) && !isTerminal(updated.status)) watch(jobId, set, get);
+      if (!watchers.has(jobId) && !isTerminal(updated.status)) void watch(jobId, set, get);
       return updated.status === 'placed' ? { kind: 'placed' } : { kind: 'running' };
     } catch (error) {
       set({ authorizing: { ...get().authorizing, [jobId]: false } });
@@ -372,6 +372,9 @@ function applyFrame(jobId: string, raw: string, set: Setter, get: Getter): void 
   switch (payload.event) {
     case 'state':
       if (job && payload.state) mergeJob({ ...job, status: payload.state }, set, get);
+      // A state arriving for a job we have not seen yet is not something to
+      // drop: it is the first thing we know about it.
+      else if (payload.state) void get().refresh(jobId);
       break;
     case 'step':
       if (payload.step) pushStep(jobId, payload.step, set, get);
@@ -385,12 +388,17 @@ function applyFrame(jobId: string, raw: string, set: Setter, get: Getter): void 
       }
       break;
     case 'quote_ready':
+      // The server signals that quoting finished; it does not necessarily carry
+      // the summary with it. Merging only when `quote` is present means the one
+      // event that ends the waiting state gets silently dropped, and the screen
+      // sits on "Working at the merchant" while the job is long since done.
       if (payload.quote) mergeJob(payload.quote, set, get);
+      else void get().refresh(jobId);
       break;
   }
 }
 
-function watch(jobId: string, set: Setter, get: Getter): void {
+async function watch(jobId: string, set: Setter, get: Getter): Promise<void> {
   stopWatcher(jobId);
   const watcher: Watcher = { source: null, timer: null, overdue: null, stopped: false };
   watchers.set(jobId, watcher);
@@ -428,7 +436,20 @@ function watch(jobId: string, set: Setter, get: Getter): void {
     return;
   }
 
-  const source = new EventSource(api.jobStreamUrl(jobId));
+  // The ticket is fetched over an authenticated POST first, so the stream URL
+  // carries a one-minute single-use credential rather than the session token.
+  let streamUrl: string;
+  try {
+    streamUrl = await api.jobStreamUrl(jobId);
+  } catch {
+    // No ticket, no stream. Polling returns the identical shape, and a job the
+    // user is waiting on must never be left with a dead transport.
+    startPolling();
+    return;
+  }
+  if (watcher.stopped) return;
+
+  const source = new EventSource(streamUrl);
   watcher.source = source;
   set({ transport: { ...get().transport, [jobId]: 'stream' } });
 
@@ -442,10 +463,10 @@ function watch(jobId: string, set: Setter, get: Getter): void {
 
   source.onerror = () => {
     if (watcher.stopped) return;
-    // EventSource cannot carry the bearer header the stream endpoint requires,
-    // and it reconnects forever on its own. Close it and take the poll path,
-    // which returns the identical shape — a job the user is waiting on must
-    // never be left with a dead transport.
+    // The ticket is single-use, so EventSource's own reconnect cannot succeed:
+    // it would replay a spent credential forever. Close it and take the poll
+    // path, which returns the identical shape — a job the user is waiting on
+    // must never be left with a dead transport.
     source.close();
     watcher.source = null;
     startPolling();

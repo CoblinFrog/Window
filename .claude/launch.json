@@ -4,8 +4,22 @@
     {
       "name": "window-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "web", "-w", "@window/app"],
+      "runtimeArgs": [
+        "run",
+        "web",
+        "-w",
+        "@window/app"
+      ],
       "port": 8081
+    },
+    {
+      "name": "mock-merchant",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "tsx",
+        "packages/server/src/scripts/serve-mock-merchant.ts"
+      ],
+      "port": 4545
     }
   ]
 }

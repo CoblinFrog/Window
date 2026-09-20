@@ -16,24 +16,24 @@
  */
 
 import { describe, it } from 'node:test';
-import { describeCheckoutRepositorySimple } from './repository.conformance.simple.js';
+import { describeCheckoutRepository } from './repository.conformance.js';
 import { SupabaseCheckoutRepository } from './repository.supabase.js';
 import { createClient } from '@supabase/supabase-js';
-import { SUPABASE_CONFIG } from '../config/supabase.js';
+import { env } from '../config/env.js';
 
 const url = process.env.TEST_SUPABASE_URL;
 const key = process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 if (!url || !key) {
-  describe('CheckoutRepository: supabase (simple)', () => {
+  describe('CheckoutRepository conformance: supabase', () => {
     it('skipped: set TEST_SUPABASE_URL and TEST_SUPABASE_SERVICE_ROLE_KEY to run', { skip: true }, () => {});
   });
-} else if (url === SUPABASE_CONFIG.url) {
-  describe('CheckoutRepository: supabase (simple)', () => {
+} else if (url === env.supabaseUrl) {
+  describe('CheckoutRepository conformance: supabase', () => {
     it('skipped: TEST_SUPABASE_URL points at the development project, which this suite would truncate', { skip: true }, () => {});
   });
 } else {
-  describeCheckoutRepositorySimple('supabase', async () => {
+  describeCheckoutRepository('supabase', async () => {
     const client = createClient(url, key, {
       auth: {
         autoRefreshToken: false,

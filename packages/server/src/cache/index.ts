@@ -105,6 +105,10 @@ export const cacheKeys = {
   ],
   rateLimit: (principal: string, bucket: string) => `rl:${bucket}:${principal}`,
   checkoutJobLock: (jobId: string) => `lock:checkout:${jobId}`,
+  /** Single-use SSE ticket. Deleted on redemption. */
+  streamTicket: (ticket: string) => `sse:ticket:${ticket}`,
+  /** Pending email-ownership challenge, keyed by the user it would claim. */
+  emailChallenge: (userId: string) => `claim:email:${userId}`,
   clusterDoc: (clusterId: string) => `cluster:${clusterId}`,
   session: (sessionId: string) => `session:${sessionId}`,
 };

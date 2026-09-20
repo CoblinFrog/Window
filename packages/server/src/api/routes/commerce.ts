@@ -11,12 +11,17 @@ import {
 } from '@window/shared';
 import { env } from '../../config/env.js';
 import type { AppContext } from '../context.js';
-import type { Order, Product, Source } from '../../db/supabase-collections.js';
+import type { Order } from '../../checkout/repository.js';
 import { CheckoutConflict } from '../../checkout/orchestrator.js';
-import { rateLimit } from '../middleware.js';
+import { mintStreamTicket, rateLimit } from '../middleware.js';
 import { requireAuthenticated } from '../auth.js';
-import { find, findOne, updateOne, insert } from '../../db/supabase-helpers.js';
-import type { MerchantLinkDoc } from '../../db/supabase-collections.js';
+import {
+  idParam,
+  merchantDomainSchema,
+  objectIdSchema,
+  safeRecord,
+  sanitizeRecord,
+} from '../validation.js';
 
 function conflictToApiError(error: CheckoutConflict): ApiError {
   const type =
@@ -30,7 +35,6 @@ function conflictToApiError(error: CheckoutConflict): ApiError {
 
 export function commerceRoutes(ctx: AppContext): Router {
   const router = Router();
-  const { collections } = ctx.db;
 
   // -------------------------------------------------------------------------
   // Cart
@@ -46,9 +50,13 @@ export function commerceRoutes(ctx: AppContext): Router {
     }
   });
 
+  // `variant` is the one place a request body becomes a document *key*: it is
+  // stored on the cart line and travels to the merchant agent. Unbounded and
+  // unfiltered, that is a write primitive into the document's own shape, and a
+  // `$`-prefixed key in a filter position is a query the caller gets to author.
   const addSchema = z.object({
-    productId: z.string(),
-    variant: z.record(z.string()).optional(),
+    productId: objectIdSchema,
+    variant: safeRecord().optional(),
     quantity: z.number().int().min(1).max(99).optional(),
   });
 
@@ -59,7 +67,10 @@ export function commerceRoutes(ctx: AppContext): Router {
       const parsed = addSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid cart item.');
 
-      await ctx.cart.addItem(user, parsed.data);
+      await ctx.cart.addItem(user, {
+        ...parsed.data,
+        ...(parsed.data.variant ? { variant: sanitizeRecord(parsed.data.variant) } : {}),
+      });
       res.json(await ctx.cart.view(user));
     } catch (error) {
       next(error);
@@ -68,7 +79,7 @@ export function commerceRoutes(ctx: AppContext): Router {
 
   const patchSchema = z.object({
     quantity: z.number().int().min(1).max(99).optional(),
-    variant: z.record(z.string()).optional(),
+    variant: safeRecord().optional(),
   });
 
   router.patch('/cart/items/:id', async (req, res, next) => {
@@ -78,7 +89,11 @@ export function commerceRoutes(ctx: AppContext): Router {
       const parsed = patchSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid cart patch.');
 
-      await ctx.cart.updateItem(user, req.params.id, parsed.data);
+      const lineId = idParam(req.params.id, 'cart line id');
+      await ctx.cart.updateItem(user, lineId, {
+        ...parsed.data,
+        ...(parsed.data.variant ? { variant: sanitizeRecord(parsed.data.variant) } : {}),
+      });
       res.json(await ctx.cart.view(user));
     } catch (error) {
       next(error);
@@ -89,7 +104,7 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      await ctx.cart.removeItem(user, req.params.id);
+      await ctx.cart.removeItem(user, idParam(req.params.id, 'cart line id'));
       res.json(await ctx.cart.view(user));
     } catch (error) {
       next(error);
@@ -101,11 +116,18 @@ export function commerceRoutes(ctx: AppContext): Router {
   // -------------------------------------------------------------------------
 
   async function summarize(order: Order): Promise<CheckoutJobSummary> {
-    const source = await findOne<Source>(collections.sources, { id: order.merchantDomain });
+    const source = await ctx.repository.getSource(order.merchantDomain);
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
-      jobId: order.agentRun?.jobId ?? order.id,
+      // The order id, always.
+      //
+      // `agentRun.jobId` is an internal audit identifier minted when quoting
+      // starts, so returning it here meant a job's public id *changed* the
+      // moment it began working. The client keys its job map by this field:
+      // every later update landed under a new key and the card the user was
+      // watching sat at "Not started" forever while the job completed.
+      jobId: order.id,
       orderId: order.id,
       merchantDomain: order.merchantDomain,
       merchantName: source?.displayName ?? order.merchantDomain,
@@ -195,11 +217,44 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!req.params.id) throw ApiError.validation('Invalid job id.');
-
-      const order = await findOne<Order>(collections.orders, { id: req.params.id, userId: user.id });
+      const order = await ctx.repository.getOrder(
+        idParam(req.params.id, 'job id'),
+        user.id,
+      );
       if (!order) throw ApiError.notFound('That checkout job');
       res.json(await summarize(order));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Issues a single-use ticket for a job's SSE stream.
+   *
+   * `EventSource` cannot set an Authorization header, so the stream URL has to
+   * carry its own credential — and a URL is the worst place in the system to
+   * put one: it lands in access logs, proxy logs, `Referer` headers and browser
+   * history. A ticket is the smallest credential that solves it: one job, one
+   * minute, one use.
+   */
+  router.post('/checkout/jobs/:id/stream-ticket', async (req, res, next) => {
+    try {
+      const user = req.currentUser;
+      const principal = req.principal;
+      if (!user || !principal) throw ApiError.unauthorized();
+      const jobId = idParam(req.params.id, 'job id');
+
+      // Scoped to a job this caller actually owns, so a ticket cannot be minted
+      // for somebody else's stream even by someone holding a valid session.
+      const order = await ctx.repository.getOrder(jobId, user.id);
+      if (!order) throw ApiError.notFound('That checkout job');
+
+      const { ticket, expiresAt } = await mintStreamTicket(
+        ctx.cache,
+        principal,
+        `/v1/checkout/jobs/${jobId}/stream`,
+      );
+      res.json({ ticket, expiresAt: expiresAt.toISOString() });
     } catch (error) {
       next(error);
     }
@@ -214,10 +269,8 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!req.params.id) throw ApiError.validation('Invalid job id.');
-
-      const orderId = req.params.id;
-      const order = await findOne<Order>(collections.orders, { id: orderId, userId: user.id });
+      const orderId = idParam(req.params.id, 'job id');
+      const order = await ctx.repository.getOrder(orderId, user.id);
       if (!order) throw ApiError.notFound('That checkout job');
 
       res.writeHead(200, {
@@ -255,7 +308,10 @@ export function commerceRoutes(ctx: AppContext): Router {
    * and nothing is placed. This is the single control that prevents an agent
    * from buying at a price the user never saw.
    */
-  router.post('/checkout/jobs/:id/authorize', async (req, res, next) => {
+  router.post(
+    '/checkout/jobs/:id/authorize',
+    rateLimit(ctx.cache, 'authorize'),
+    async (req, res, next) => {
     try {
       const user = req.currentUser;
       const principal = req.principal;
@@ -264,9 +320,7 @@ export function commerceRoutes(ctx: AppContext): Router {
 
       const parsed = authorizeSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('authorize requires the quoteHash.');
-      if (!req.params.id) throw ApiError.validation('Invalid job id.');
-
-      const order = await ctx.checkout.authorize(req.params.id, user, {
+      const order = await ctx.checkout.authorize(idParam(req.params.id, 'job id'), user, {
         quoteHash: parsed.data.quoteHash,
         // The user's authorization tap on the quote screen is the passkey
         // challenge. A missing assertion is refused by the payment rail.
@@ -278,19 +332,40 @@ export function commerceRoutes(ctx: AppContext): Router {
     } catch (error) {
       next(error instanceof CheckoutConflict ? conflictToApiError(error) : error);
     }
+    },
+  );
+
+  const inputSchema = z.object({
+    promptId: z.string().min(1).max(64),
+    // The value is typed into the merchant's own form by the agent, so it is
+    // bounded here rather than wherever it lands.
+    value: z.string().max(512),
   });
 
-  const inputSchema = z.object({ promptId: z.string().min(1), value: z.string() });
-
+  /**
+   * Answers a `request_user_input` prompt.
+   *
+   * The ownership lookup is the point of this handler. Being authenticated only
+   * established that the caller is *a* user; without the `userId` filter, any
+   * account could answer any other account's live checkout prompt — choosing a
+   * shipping address, picking a shipping option, or resolving a handoff on an
+   * order it has nothing to do with. Order ids are sequential enough to guess.
+   */
   router.post('/checkout/jobs/:id/input', async (req, res, next) => {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
       const parsed = inputSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid input response.');
+      const jobId = idParam(req.params.id, 'job id');
+
+      const order = await ctx.repository.getOrder(jobId, user.id);
+      // Indistinguishable from a job that does not exist, so this is not an
+      // oracle for which order ids are real.
+      if (!order) throw ApiError.notFound('That checkout job');
 
       const accepted = ctx.checkout.provideInput(
-        req.params.id,
+        jobId,
         parsed.data.promptId,
         parsed.data.value,
       );
@@ -312,8 +387,7 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!req.params.id) throw ApiError.validation('Invalid job id.');
-      const order = await ctx.checkout.cancel(req.params.id, user);
+      const order = await ctx.checkout.cancel(idParam(req.params.id, 'job id'), user);
       res.json(await summarize(order));
     } catch (error) {
       next(error instanceof CheckoutConflict ? conflictToApiError(error) : error);
@@ -325,13 +399,11 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
 
-      const orders = await find<Order>(collections.orders, { userId: user.id }, {
-        limit: 50,
-        orderBy: { column: 'createdAt', ascending: false },
-      });
+      const orders = await ctx.repository.listOrders(user.id, 50);
 
-      const productIds = orders.flatMap((o) => o.items.map((i) => i.productId));
-      const products = await find<Product>(collections.products, { id: { $in: productIds } }, { select: 'id,media' });
+      const products = await ctx.repository.getProducts(
+        orders.flatMap((o) => o.items.map((i) => i.productId)),
+      );
       const heroById = new Map(products.map((p) => [p.id, p.media.hero]));
 
       const response: OrdersResponse = {
@@ -377,36 +449,29 @@ export function commerceRoutes(ctx: AppContext): Router {
         if (!user || !principal) throw ApiError.unauthorized();
         requireAuthenticated(principal, 'link merchant accounts');
 
-        const domain = req.params.domain;
-        const source = await findOne(collections.sources, { id: domain });
+        // Validated as a bare hostname: it is interpolated into the link URL
+        // the client is told to open, and a path or scheme smuggled through a
+        // path parameter turns that into an open redirect on our own origin.
+        const parsedDomain = merchantDomainSchema.safeParse(req.params.domain);
+        if (!parsedDomain.success) throw ApiError.validation('Invalid merchant domain.');
+
+        const domain = parsedDomain.data.toLowerCase();
+        const source = await ctx.repository.getSource(domain);
         if (!source) throw ApiError.notFound(`Merchant ${domain}`);
 
         const now = new Date();
         const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
         const linkId = randomUUID();
 
-        const existingLink = await findOne<MerchantLinkDoc>(collections.merchantLinks, {
+        await ctx.repository.upsertMerchantLink({
           userId: user.id,
           merchantDomain: domain,
+          status: 'pending',
+          encryptedSession: null,
+          createdAt: now,
+          linkedAt: null,
+          expiresAt,
         });
-        if (existingLink) {
-          await updateOne<MerchantLinkDoc>(
-            collections.merchantLinks,
-            { id: existingLink.id },
-            { status: 'pending' as const, encryptedSession: null, createdAt: now, linkedAt: null, expiresAt },
-          );
-        } else {
-          await insert<MerchantLinkDoc>(collections.merchantLinks, {
-            id: linkId,
-            userId: user.id,
-            merchantDomain: domain,
-            status: 'pending' as const,
-            encryptedSession: null,
-            createdAt: now,
-            linkedAt: null,
-            expiresAt,
-          });
-        }
 
         res.json({
           merchantDomain: domain,

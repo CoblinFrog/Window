@@ -1,4 +1,5 @@
 import { EMBEDDING_VERSION } from '@window/shared';
+import { requireSecret } from './secrets.js';
 import { SUPABASE_CONFIG } from './supabase.js';
 
 function str(name: string, fallback: string): string {
@@ -12,6 +13,15 @@ function int(name: string, fallback: number): number {
   const n = Number.parseInt(v, 10);
   if (Number.isNaN(n)) throw new Error(`${name} must be an integer, got ${JSON.stringify(v)}`);
   return n;
+}
+
+function list(name: string, fallback: readonly string[]): readonly string[] {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  return v
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function bool(name: string, fallback: boolean): boolean {
@@ -57,8 +67,63 @@ export const env = {
   /** Checkout audit screenshots and transcripts. */
   auditDir: str('AUDIT_DIR', new URL('../../../../.data/audit', import.meta.url).pathname),
 
-  /** Internal-only endpoints (ranking debug) require this header value. */
-  internalToken: str('INTERNAL_TOKEN', 'dev-internal-token'),
+  /**
+   * Internal-only endpoints (ranking debug) require this header value. It is a
+   * real secret rather than a fixed default, because the endpoint behind it
+   * dumps per-user ranking state for any user id and rewrites the scoring
+   * weights for everybody. Production refuses to boot without one.
+   */
+  internalToken: requireSecret('INTERNAL_TOKEN'),
+
+  /**
+   * Origins permitted to call the API from a browser. A development web client
+   * runs on a different origin, so the two Expo defaults are allowed outside
+   * production; a deployment names its own.
+   */
+  corsOrigins: list(
+    'CORS_ORIGINS',
+    str('NODE_ENV', 'development') === 'production'
+      ? []
+      : ['http://localhost:8081', 'http://127.0.0.1:8081'],
+  ),
+
+  /**
+   * Number of reverse-proxy hops to trust when reading `X-Forwarded-For`.
+   *
+   * Express's `true` means "trust the whole chain", and the chain is written by
+   * the client. That makes `req.ip` attacker-chosen, and `req.ip` is the rate
+   * limit key on exactly the unauthenticated routes that mint credentials. A
+   * hop count trusts only the proxies actually in front of this process: 0 in
+   * development, 1 behind a single load balancer.
+   */
+  trustProxyHops: int('TRUST_PROXY_HOPS', 0),
+
+  /**
+   * Which checkout agent runs.
+   *
+   * `simulated` is the default and is named as a simulator so nobody mistakes a
+   * green checkout for a real one. `browser` drives the merchant's own checkout
+   * with Playwright — only meaningful where a field map exists for the merchant
+   * and its robots.txt permits the path.
+   */
+  checkoutAgent: str('CHECKOUT_AGENT', 'simulated') as 'simulated' | 'browser',
+  /** Headful, for watching a checkout run during development. */
+  checkoutHeadful: bool('CHECKOUT_HEADFUL', false),
+
+  /**
+   * Whether placing an order requires a claimed account.
+   *
+   * On by default, and not negotiable in production: an order is a charge
+   * against a person, and an unverified identity cannot be one. A demo running
+   * entirely on the simulated rail moves no money and has no such person, so it
+   * may turn this off to skip the sign-in step.
+   *
+   * This is a policy about who may transact. It is not the identity check —
+   * claiming an account still requires a verified email either way, and a
+   * client still cannot assert who it is.
+   */
+  checkoutRequiresAccount:
+    bool('CHECKOUT_REQUIRES_ACCOUNT', true) || str('NODE_ENV', 'development') === 'production',
 
   /** Simulated merchant latency for the checkout agent, in milliseconds. */
   agentStepDelayMs: int('AGENT_STEP_DELAY_MS', 120),
