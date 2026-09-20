@@ -104,8 +104,12 @@ export interface PaneViewProps {
    * no floor: every pane would offer another pane of neighbours forever.
    */
   onSimilar?: (() => void) | undefined;
-  /** The action rail, overlaid on the glass by the parent. */
-  rail?: React.ReactNode;
+  /**
+   * The action bar, built by the parent and rendered across the foot of the
+   * pane. It sits outside the glass and keeps its height whatever happens
+   * above it, so the controls are never the thing a short screen squeezes.
+   */
+  actions?: React.ReactNode;
   dataSaver?: boolean;
 }
 
@@ -121,7 +125,7 @@ export function PaneView({
   onBack,
   onSeller,
   onSimilar,
-  rail,
+  actions,
   dataSaver = false,
 }: PaneViewProps): React.ReactElement {
   const images = [card.media.hero, ...card.media.gallery];
@@ -207,7 +211,9 @@ export function PaneView({
           </View>
         ) : null}
 
-        <Scrim top right bottom={total > 1} />
+        {/* No right-hand gradient any more: it existed to carry the rail, and
+            the controls have moved off the photograph entirely. */}
+        <Scrim top right={false} bottom={total > 1} />
 
         <Pressable
           onPress={onBack}
@@ -218,8 +224,6 @@ export function PaneView({
         >
           <Icon name="back" size={26} />
         </Pressable>
-
-        {rail}
 
         {/* Gallery position, as dashes rather than dots-with-a-count: one per
             photograph the product has. Nothing appears until it is needed, so a
@@ -354,6 +358,8 @@ export function PaneView({
           </Text>
         ) : null}
       </View>
+
+      {actions}
     </View>
   );
 }
@@ -369,6 +375,8 @@ const styles = StyleSheet.create({
   // pane of glass laid on the black rather than as a full-bleed background.
   glass: {
     flex: 1,
+    // Shrinks to nothing before the flap or the action bar lose a pixel.
+    minHeight: 0,
     marginHorizontal: GLASS_MARGIN,
     marginTop: 14,
     marginBottom: 0,

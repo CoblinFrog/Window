@@ -16,7 +16,7 @@ import {
   type UpvoteReason,
 } from '@window/shared';
 import { api } from '../src/api/client.js';
-import { ActionRail } from '../src/components/ActionRail.js';
+import { ActionBar } from '../src/components/ActionBar.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
 import { ReasonPicker } from '../src/components/ReasonPicker.js';
@@ -362,11 +362,11 @@ export default function FeedScreen(): React.ReactElement {
                 // Back returns to the remembered pane rather than to wherever
                 // scrolling has since carried the cursor.
                 onBack={() => switchMode('left')}
-                // The rail belongs to the card's own glass, not to the stage:
-                // anchored to the stage it lands off the right edge on desktop,
-                // where the column is narrower than the window.
-                renderRail={(target) => (
-                  <ActionRail
+                // The controls belong to the card, not to the stage: anchored
+                // to the stage they land off the right edge on desktop, where
+                // the column is narrower than the window.
+                renderActions={(target: ProductCard) => (
+                  <ActionBar
                     card={target}
                     upvoted={upvoted.has(target.productId)}
                     inCart={cart.contains(target.productId)}

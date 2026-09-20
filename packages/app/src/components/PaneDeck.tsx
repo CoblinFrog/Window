@@ -46,8 +46,8 @@ export interface PaneDeckProps {
   onScroll(direction: 'next' | 'prev'): void;
   /** Back to the window screen: the control, and the rightward swipe. */
   onBack(): void;
-  /** The action rail for the card in view, built by the parent. */
-  renderRail(card: ProductCard): React.ReactNode;
+  /** The action bar for the card in view, built by the parent. */
+  renderActions(card: ProductCard): React.ReactNode;
   onSeller(card: ProductCard): void;
   onSimilar?: ((card: ProductCard) => void) | undefined;
   onGalleryAdvance(card: ProductCard, index: number): void;
@@ -65,7 +65,7 @@ export function PaneDeck({
   height,
   onScroll,
   onBack,
-  renderRail,
+  renderActions,
   onSeller,
   onSimilar,
   onGalleryAdvance,
@@ -184,7 +184,9 @@ export function PaneDeck({
                   // The rail is only built for the card in view. Off-screen
                   // neighbours get none: it is a live control, and a stack of
                   // them in a deck is one too many.
-                  rail={isCurrent ? renderRail(page) : null}
+                  // Only the card in view gets live controls; a neighbour half
+                  // on screen mid-drag is scenery, not something to press.
+                  actions={isCurrent ? renderActions(page) : null}
                   // Story-style: a strip down the left edge steps back through
                   // the photographs, the rest of the frame steps on.
                   onStepBack={() => onEdgeTap(-1)}
