@@ -4,6 +4,8 @@ import type {
   AddCartItemRequest,
   AuthorizeRequest,
   CartResponse,
+  ChatRequest,
+  ChatResponse,
   ClusterResponse,
   EventsRequest,
   EventsResponse,
@@ -269,6 +271,16 @@ export const api = {
   },
   search(q: string) {
     return request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}`);
+  },
+
+  // ---- Ask ---------------------------------------------------------------
+  /**
+   * One turn of the shopping assistant. Unlike the feed this is allowed to
+   * throw: the user is watching a spinner they opened themselves, so a failure
+   * has to be told to them rather than swallowed.
+   */
+  ask(body: ChatRequest, signal?: AbortSignal) {
+    return request<ChatResponse>('/v1/chat', { method: 'POST', body, signal });
   },
 
   // ---- Events ------------------------------------------------------------

@@ -303,7 +303,8 @@ export type RateLimitBucket =
   | 'merchantLinks'
   | 'bootstrap'
   | 'claim'
-  | 'authorize';
+  | 'authorize'
+  | 'chat';
 
 const BUCKETS: Record<RateLimitBucket, { limit: number; windowMs: number }> = {
   feed: { limit: RATE_LIMITS.feedPagesPerMinute, windowMs: 60_000 },
@@ -313,6 +314,10 @@ const BUCKETS: Record<RateLimitBucket, { limit: number; windowMs: number }> = {
   bootstrap: { limit: RATE_LIMITS.deviceBootstrapsPerHour, windowMs: 3_600_000 },
   claim: { limit: RATE_LIMITS.claimAttemptsPerHour, windowMs: 3_600_000 },
   authorize: { limit: RATE_LIMITS.authorizationsPerHour, windowMs: 3_600_000 },
+  // An ask costs two live storefront fetches and a model call, so it is
+  // limited far harder than a feed page — this is the one endpoint where a
+  // loop in a client would cost real money.
+  chat: { limit: RATE_LIMITS.asksPerMinute, windowMs: 60_000 },
 };
 
 /**

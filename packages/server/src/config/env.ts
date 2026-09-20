@@ -128,6 +128,16 @@ export const env = {
   /** Simulated merchant latency for the checkout agent, in milliseconds. */
   agentStepDelayMs: int('AGENT_STEP_DELAY_MS', 120),
 
+  /**
+   * The shopping assistant's model, and the ceiling on its single call.
+   *
+   * Haiku is the size these calls are: one structured extraction and two
+   * sentences of prose. Set `claude-opus-5` when instruction-following matters
+   * more than latency.
+   */
+  agentModel: str('AGENT_LLM_MODEL', 'claude-haiku-4-5'),
+  agentTimeoutMs: int('AGENT_LLM_TIMEOUT_MS', 20_000),
+
   logLevel: str('LOG_LEVEL', 'info') as 'debug' | 'info' | 'warn' | 'error',
 } as const;
 

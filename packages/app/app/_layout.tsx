@@ -3,6 +3,7 @@ import { StyleSheet, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { COLORS } from '@window/shared';
 import { setEventSession, startEventLoop } from '../src/store/events.js';
 import { setFeedSessionId } from '../src/store/feed.js';
@@ -47,7 +48,10 @@ export default function RootLayout(): React.ReactElement {
   useEffect(() => startEventLoop(), []);
 
   return (
-    <QueryClientProvider client={queryClient}>
+    // The feed itself stays edge-to-edge; the provider is here for the layers
+    // that anchor to a screen edge and would otherwise land under a notch.
+    <SafeAreaProvider>
+      <QueryClientProvider client={queryClient}>
       <View style={styles.root}>
         <StatusBar style="light" />
         <Stack
@@ -66,7 +70,8 @@ export default function RootLayout(): React.ReactElement {
           <Stack.Screen name="orders" options={{ presentation: 'modal' }} />
         </Stack>
       </View>
-    </QueryClientProvider>
+      </QueryClientProvider>
+    </SafeAreaProvider>
   );
 }
 

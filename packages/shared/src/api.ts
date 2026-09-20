@@ -458,3 +458,75 @@ export interface RankingDebugResponse {
   candidates: RankingDebugCandidate[];
   timingsMs: Record<string, number>;
 }
+
+// ---------------------------------------------------------------------------
+// Ask — the shopping assistant
+// ---------------------------------------------------------------------------
+
+/** One line of the conversation, oldest first. */
+export interface ChatTurnWire {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/**
+ * What earlier turns settled on. The client holds it and hands it back, which
+ * is what makes the conversation work without server-side session state — and
+ * what lets "under $50" resolve even when the model is unreachable.
+ */
+export interface StandingIntentWire {
+  item: string;
+  budgetMinor: number | null;
+  requirements: string[];
+}
+
+export interface ChatRequest {
+  /** What the shopper typed, verbatim. */
+  message: string;
+  sessionId: string;
+  /** The conversation so far, excluding `message`. Oldest first. */
+  history?: ChatTurnWire[];
+  /** The request earlier turns settled on, from the last response. */
+  standing?: StandingIntentWire | null;
+}
+
+/**
+ * One retrieved listing. Deliberately not a `ProductCard`: these come off a
+ * live Amazon or eBay search page and most were never ingested, so they have
+ * no cluster, no seller record and no media pipeline behind them. Giving them
+ * a `ProductCard` shape would promise the rest of the app things it cannot
+ * deliver — reviews sheets, variant pickers, add-to-cart.
+ */
+export interface ChatPickResponse {
+  productId: string;
+  title: string;
+  /** Minor units, and the currency it is quoted in. Never null on the wire. */
+  priceMinor: number;
+  currency: string;
+  url: string;
+  imageUrl: string | null;
+  sourceDomain: string | null;
+  /** Star rating out of 5 as the storefront showed it. */
+  rating: number | null;
+  reviewCount: number | null;
+  /** The same evidence as one line, ready to render. */
+  reviewNote: string | null;
+  /** Where that evidence can be checked. */
+  sources: Array<{ title: string; url: string }>;
+}
+
+export interface ChatResponse {
+  kind: 'answer' | 'clarify' | 'refused';
+  /** The assistant's message. Always set, even when `picks` is empty. */
+  message: string;
+  picks: ChatPickResponse[];
+  /**
+   * What this turn resolved the request to. The client sends it back with the
+   * next message so a follow-up builds on it. Null when nothing was settled.
+   */
+  standing: StandingIntentWire | null;
+  /** The enforced price ceiling, echoed so the client can render it. */
+  budgetMinor: number | null;
+  /** Non-price constraints read out of the ask. */
+  requirements: string[];
+}

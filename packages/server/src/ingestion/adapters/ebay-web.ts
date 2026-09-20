@@ -91,6 +91,10 @@ export function parseEbayBrowse(html: string, pageUrl: string): PageCandidates {
     const siblings = inside(elements, anchor);
     const image = siblings.find((el) => el.name === 'img' && (el.attrs['alt'] ?? '') !== '');
     const alt = image?.attrs['alt']?.replace(/ - Image \d+ of \d+$/, '') ?? null;
+    // Cards lazy-load: `src` holds a spacer gif until script runs, and the
+    // real thumbnail sits in `data-src`. Take that, and refuse the spacer.
+    const imageSrc = decodeEntities(image?.attrs['data-src'] ?? image?.attrs['src'] ?? '');
+    const imageHint = imageSrc !== '' && !/ebaystatic\.com\/cr\//.test(imageSrc) ? imageSrc : null;
 
     const priceEl = elements.find(
       (el) =>
@@ -108,6 +112,7 @@ export function parseEbayBrowse(html: string, pageUrl: string): PageCandidates {
       url: `https://www.ebay.com/itm/${id}`,
       priceHint: price?.minor ?? null,
       titleHint: alt,
+      imageHint,
       seenAt,
     });
   }

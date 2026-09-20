@@ -11,6 +11,9 @@ import { VaultHandle, type ShippingDetails } from '../checkout/vault.js';
 import type { CheckoutRepository } from '../checkout/repository.js';
 import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
 import { connectDatabase, type DatabaseHandle } from '../db/index.js';
+import type { AgentLlm } from '../agent/llm.js';
+import { agentLlm } from '../agent/llm-api.js';
+import type { ChatDeps } from '../agent/shop-chat.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import type { EmbeddingProvider } from '../embedding/provider.js';
 import { EventCollector } from '../events/collector.js';
@@ -29,6 +32,14 @@ export interface AppContext {
   cache: KeyValueCache;
   vectors: VectorSearch;
   embedder: EmbeddingProvider;
+  /** The shopping assistant's model. One cheap, fast call per ask. */
+  llm: AgentLlm;
+  /**
+   * Retrieval seam for the assistant. Left unset in production, where the
+   * agent goes to the live storefronts; tests substitute their own so an ask
+   * costs no network.
+   */
+  askSearch?: ChatDeps['search'];
   classifier: CategoryClassifier;
   media: MediaPipeline;
   ranking: RankingService;
@@ -64,6 +75,15 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
   const cache = await createCache();
   const vectors = await createVectorSearch(db.collections.products);
   const embedder = localEmbeddingProvider();
+  // Small and fast on purpose: the ask does retrieval in code and asks the
+  // model only to judge titles and write two sentences. The API when a key is
+  // configured, the `claude` CLI when not — the CLI spawns a subprocess per
+  // call, which is the difference between a 3-second answer and a 30-second one.
+  const llm = agentLlm({
+    model: env.agentModel,
+    timeoutMs: env.agentTimeoutMs,
+    cli: { model: 'haiku', effort: 'low', timeoutMs: env.agentTimeoutMs },
+  });
 
   const classifier = new CategoryClassifier(embedder);
   await classifier.init();
@@ -141,6 +161,7 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     cache,
     vectors,
     embedder,
+    llm,
     classifier,
     media: mediaPipeline(),
     ranking,

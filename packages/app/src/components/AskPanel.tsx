@@ -1,0 +1,723 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+import { Image } from 'expo-image';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, {
+  Easing,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { COLORS, ICON, MOTION, SPACING, TYPE, type ChatResponse } from '@window/shared';
+import { Icon } from './Icon.js';
+
+/**
+ * Ask — the shopping assistant, pulled down from the top edge.
+ *
+ * It is a separate primitive from `Sheet` rather than a variant of it. A sheet
+ * is a modal that takes over: it dims the screen, traps focus, and is dismissed
+ * before anything else happens. This is the opposite gesture in every sense —
+ * it comes from the top, it is pulled open by degrees rather than presented,
+ * and the feed stays legible underneath because the answer is *about* what you
+ * would otherwise be scrolling. Forcing both behaviours through one component
+ * would have meant a flag on every rule in it.
+ *
+ * The gesture lives on a strip along the top edge, which is what keeps it from
+ * fighting the feed: the feed's own vertical pan means "previous card", and a
+ * pull that begins anywhere but the top edge still means that.
+ *
+ * Opening is progressive. The panel tracks the finger down, and only past a
+ * commitment threshold does it snap open and take the keyboard — so a hesitant
+ * drag peeks at the prompt and lets go without ever stealing focus.
+ */
+
+const EASING = Easing.bezier(
+  MOTION.easing[0],
+  MOTION.easing[1],
+  MOTION.easing[2],
+  MOTION.easing[3],
+);
+
+/** The top-edge strip that owns the pull. Comfortably past the 44px floor. */
+const GRAB_STRIP_HEIGHT = 56;
+/**
+ * The strip is inset from both sides rather than spanning the edge. Single
+ * mode puts its back button in the top-left corner, and a full-width pull zone
+ * would eat it — the one control that gets you out of an enlarged card.
+ */
+const GRAB_STRIP_INSET = 60;
+/** How far the finger travels for a full open. */
+const OPEN_TRAVEL = 180;
+/** Past this fraction of the travel, or a firm flick, the pull commits. */
+const COMMIT_FRACTION = 0.4;
+const COMMIT_VELOCITY = 600;
+/** The panel never takes more than this much of the screen. */
+const MAX_HEIGHT_FRACTION = 0.82;
+/**
+ * The option square. Wide enough to judge a product by and narrow enough that
+ * the next one is visibly there — a rail that shows exactly one option reads
+ * as a carousel nobody knows to swipe.
+ */
+const PICK_WIDTH = 168;
+
+/** One line of the visible transcript. Assistant lines keep their full reply. */
+interface Turn {
+  role: 'user' | 'assistant';
+  text: string;
+  reply: ChatResponse | null;
+}
+
+export interface AskPanelProps {
+  /** Runs one turn. Rejects on failure; the panel renders the reason. */
+  onAsk(
+    ask: {
+      message: string;
+      history: Array<{ role: 'user' | 'assistant'; text: string }>;
+      standing: ChatResponse['standing'];
+    },
+    signal: AbortSignal,
+  ): Promise<ChatResponse>;
+  /**
+   * Tapping a pick. The answer's listings become the feed, opened on this one
+   * — the app keeps the shopper rather than handing them to the storefront.
+   */
+  onOpenPick(picks: ChatResponse['picks'], productId: string): boolean;
+  /** Told to the parent so it can stand down its own keyboard handling. */
+  onOpenChange?(open: boolean): void;
+  reducedMotion?: boolean;
+}
+
+export function AskPanel({
+  onAsk,
+  onOpenPick,
+  onOpenChange,
+  reducedMotion = false,
+}: AskPanelProps): React.ReactElement {
+  const { height: viewportHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const maxHeight = Math.round(viewportHeight * MAX_HEIGHT_FRACTION);
+  // The panel is the one surface pinned to the top edge, so it is the one that
+  // has to clear the notch. The prompt is unusable underneath it, and the pull
+  // zone has to start below it or the system gesture takes the drag first.
+  const topInset = insets.top;
+
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const input = useRef<TextInput>(null);
+  const transcript = useRef<ScrollView>(null);
+  const inFlight = useRef<AbortController | null>(null);
+
+  // The most recent answer, which is where the conversation currently stands.
+  // Only the standing request reads from it — every answer's options stay
+  // tappable, but "cheaper" has to refine the latest one, not an older one.
+  const latest = [...turns].reverse().find((turn) => turn.role === 'assistant')?.reply ?? null;
+
+  // 0 closed, 1 open. The drag writes it directly from the UI thread so the
+  // panel tracks the finger through a busy JS frame.
+  const progress = useSharedValue(0);
+  // Where the drag started from. A shared value rather than the `open` state
+  // because the gesture worklet cannot read React state without a round trip
+  // to JS, which is the round trip this whole design exists to avoid.
+  const openRef = useSharedValue(0);
+  // The panel's own height, measured once it has content. Until then the peek
+  // uses the travel distance, which is close enough for an empty prompt.
+  const height = useSharedValue(GRAB_STRIP_HEIGHT + OPEN_TRAVEL);
+
+  const settle = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      onOpenChange?.(next);
+      if (next) {
+        // Focus follows the commitment, never the peek.
+        requestAnimationFrame(() => input.current?.focus());
+      }
+    },
+    [onOpenChange],
+  );
+
+  const animateTo = useCallback(
+    (target: 0 | 1) => {
+      openRef.value = target;
+      progress.value = withTiming(target, {
+        duration: reducedMotion ? 0 : MOTION.sheetMs,
+        easing: EASING,
+      });
+    },
+    [progress, openRef, reducedMotion],
+  );
+
+  const close = useCallback(() => {
+    inFlight.current?.abort();
+    inFlight.current = null;
+    setAsking(false);
+    animateTo(0);
+    settle(false);
+    input.current?.blur();
+  }, [animateTo, settle]);
+
+  const openPanel = useCallback(() => {
+    animateTo(1);
+    settle(true);
+  }, [animateTo, settle]);
+
+  // Escape closes on web, like every other layer in the app.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !open) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      close();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, close]);
+
+  // A panel torn down mid-request must not leave the fetch running.
+  useEffect(() => () => inFlight.current?.abort(), []);
+
+  const submit = useCallback(() => {
+    const message = draft.trim();
+    if (message === '' || asking) return;
+
+    inFlight.current?.abort();
+    const controller = new AbortController();
+    inFlight.current = controller;
+
+    // The transcript that goes up is the one from before this message, and the
+    // standing request is whatever the last answer settled on. Both are read
+    // from state here rather than tracked separately, so what the server sees
+    // is exactly what the user can see on screen.
+    const history = turns.map((turn) => ({ role: turn.role, text: turn.text }));
+    const standing = latest?.standing ?? null;
+
+    setTurns((previous) => [...previous, { role: 'user', text: message, reply: null }]);
+    setDraft('');
+    setAsking(true);
+    setError(null);
+
+    void onAsk({ message, history, standing }, controller.signal)
+      .then((next) => {
+        if (controller.signal.aborted) return;
+        setTurns((previous) => [
+          ...previous,
+          { role: 'assistant', text: next.message, reply: next },
+        ]);
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(
+          (cause as Error)?.message ?? 'Could not reach the assistant. Try again in a moment.',
+        );
+      })
+      .finally(() => {
+        if (controller.signal.aborted) return;
+        setAsking(false);
+        inFlight.current = null;
+      });
+  }, [draft, asking, onAsk, turns, latest]);
+
+  /** Start over. The feed keeps whatever the last answer put there. */
+  const reset = useCallback(() => {
+    inFlight.current?.abort();
+    inFlight.current = null;
+    setAsking(false);
+    setTurns([]);
+    setError(null);
+    setDraft('');
+    input.current?.focus();
+  }, []);
+
+  const openPick = useCallback(
+    (picks: ChatResponse['picks'], productId: string) => {
+      // The panel only closes if the feed actually took the picks; otherwise
+      // the shopper would be dropped onto the old feed with no explanation.
+      if (onOpenPick(picks, productId)) close();
+    },
+    [onOpenPick, close],
+  );
+
+  // The pull. Two detectors need it — the top-edge strip that opens the panel
+  // and the handle on the panel's own bottom edge that drags it shut — and a
+  // gesture instance belongs to one detector, so the rule is built twice from
+  // one definition rather than written twice.
+  const makePull = useCallback(
+    () =>
+      Gesture.Pan()
+        // Only a deliberate vertical drag; a tap or a horizontal swipe is not
+        // ours, and the feed's mode switch still needs the horizontal one.
+        .activeOffsetY([-8, 8])
+        .failOffsetX([-20, 20])
+        .onUpdate((event) => {
+          const from = openRef.value;
+          progress.value = Math.min(1, Math.max(0, from + event.translationY / OPEN_TRAVEL));
+        })
+        .onEnd((event) => {
+          // A firm upward flick always closes, however far down the finger got.
+          const flungShut = event.velocityY < -COMMIT_VELOCITY;
+          const committed =
+            progress.value > COMMIT_FRACTION || event.velocityY > COMMIT_VELOCITY;
+          const target = flungShut ? 0 : committed ? 1 : 0;
+          openRef.value = target;
+          progress.value = withTiming(
+            target,
+            { duration: reducedMotion ? 0 : MOTION.sheetMs, easing: EASING },
+            (finished) => {
+              'worklet';
+              if (finished) runOnJS(settle)(target === 1);
+            },
+          );
+        }),
+    [progress, openRef, reducedMotion, settle],
+  );
+  const pullOpen = useMemo(makePull, [makePull]);
+  const pullShut = useMemo(makePull, [makePull]);
+
+  const panelStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -height.value * (1 - progress.value) }],
+  }));
+
+  // The scrim only darkens what the panel does not already cover, and it fades
+  // in late: a peek should not dim the feed the user is still reading.
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.5, 1], [0, 0, 0.55]),
+  }));
+
+  const handleStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.3], [1, 0]),
+  }));
+
+  return (
+    <View style={styles.layer} pointerEvents="box-none">
+      {/* Below the panel, above the feed. Tapping it puts the panel away. */}
+      <Animated.View style={[styles.scrim, scrimStyle]} pointerEvents={open ? 'auto' : 'none'}>
+        <Pressable
+          style={styles.scrimPress}
+          onPress={close}
+          accessibilityRole="button"
+          accessibilityLabel="Close ask"
+        />
+      </Animated.View>
+
+      <Animated.View
+        style={[styles.panel, { maxHeight }, panelStyle]}
+        // A shut panel is parked off-screen above, where it is invisible but
+        // would still take a Tab press or a screen-reader swipe. Neither should
+        // land in a prompt nobody has opened.
+        pointerEvents={open ? 'auto' : 'none'}
+        accessibilityElementsHidden={!open}
+        importantForAccessibility={open ? 'auto' : 'no-hide-descendants'}
+        onLayout={(event) => {
+          // Remeasured as answers arrive, which is what makes the panel grow
+          // downward into its content rather than scrolling inside a fixed box.
+          const measured = event.nativeEvent.layout.height;
+          if (measured > 0) height.value = measured;
+        }}
+      >
+        <View style={[styles.prompt, { paddingTop: topInset + SPACING.screenMargin }]}>
+          <TextInput
+            ref={input}
+            style={styles.input}
+            value={draft}
+            onChangeText={setDraft}
+            onSubmitEditing={submit}
+            placeholder={
+              turns.length === 0
+                ? 'Ask for anything — “quiet mechanical keyboard under $80”'
+                : 'Cheaper? In white? Ask a follow-up'
+            }
+            placeholderTextColor={COLORS.textSecondary}
+            returnKeyType="search"
+            editable={!asking}
+            accessibilityLabel="Ask the shopping assistant"
+            multiline={false}
+          />
+          <Pressable
+            onPress={asking ? close : submit}
+            disabled={!asking && draft.trim() === ''}
+            style={styles.submit}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={asking ? 'Cancel' : 'Ask'}
+          >
+            {asking ? (
+              <ActivityIndicator color={COLORS.textSecondary} />
+            ) : (
+              <Icon
+                name="check"
+                size={ICON.glyph}
+                color={draft.trim() === '' ? COLORS.textSecondary : COLORS.textPrimary}
+              />
+            )}
+          </Pressable>
+        </View>
+
+        {turns.length > 0 || error !== null || asking ? (
+          <ScrollView
+            ref={transcript}
+            style={styles.answer}
+            contentContainerStyle={styles.answerContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            // The newest turn is the one being read, and it is at the bottom.
+            onContentSizeChange={() => transcript.current?.scrollToEnd({ animated: !reducedMotion })}
+          >
+            {turns.map((turn, index) =>
+              turn.role === 'user' ? (
+                <Text key={`u${index}`} style={styles.said} accessibilityLabel={`You asked: ${turn.text}`}>
+                  {turn.text}
+                </Text>
+              ) : (
+                <AnswerTurn
+                  key={`a${index}`}
+                  reply={turn.reply as ChatResponse}
+                  onOpenPick={openPick}
+                />
+              ),
+            )}
+
+            {asking ? <Text style={styles.thinking}>Searching Amazon and eBay…</Text> : null}
+            {error !== null ? <Text style={styles.error}>{error}</Text> : null}
+          </ScrollView>
+        ) : null}
+
+        {/* The panel's own bottom edge: drag it back up, or tap to close. */}
+        <GestureDetector gesture={pullShut}>
+          <View style={styles.footer}>
+            <View style={styles.handle} />
+            {turns.length > 0 ? (
+              <Pressable
+                onPress={reset}
+                hitSlop={8}
+                style={styles.restart}
+                accessibilityRole="button"
+                accessibilityLabel="Start a new conversation"
+              >
+                <Text style={styles.restartLabel}>New</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              onPress={close}
+              hitSlop={8}
+              style={styles.collapse}
+              accessibilityRole="button"
+              accessibilityLabel="Close ask"
+            >
+              <Icon name="close" size={ICON.glyph} color={COLORS.textSecondary} />
+            </Pressable>
+          </View>
+        </GestureDetector>
+      </Animated.View>
+
+      {/* The pull zone. It stays mounted at the top edge whatever the panel is
+          doing, because when the panel is shut it is entirely off-screen and
+          this strip is the only thing left to grab. Rendered last so it is not
+          buried, and inset so the back button in Single mode still gets its
+          corner. */}
+      <GestureDetector gesture={pullOpen}>
+        <View
+          style={[styles.grabStrip, { top: topInset }]}
+          // Rendered last so a shut panel cannot bury it — which means that
+          // once the panel is open this strip lies directly over the prompt.
+          // It stands down there: the footer handle, the scrim and Escape are
+          // how an open panel closes.
+          pointerEvents={open ? 'none' : 'auto'}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel="Ask the shopping assistant"
+          accessibilityHint="Pull down, or activate, to open the prompt"
+          onAccessibilityTap={openPanel}
+        >
+          <Animated.View style={[styles.handle, handleStyle]} />
+        </View>
+      </GestureDetector>
+    </View>
+  );
+}
+
+/**
+ * One answer in the transcript: what was said, the constraints in force, and
+ * the listings it found.
+ *
+ * Every answer stays usable, not just the newest. An earlier turn is not a
+ * stale record — those listings are as live as the ones below them, and
+ * "the second one you showed me" is a normal way to shop a conversation. So
+ * the rails scroll and the options open however far back you go; tapping one
+ * seeds the feed from *that* turn's picks, not the latest.
+ */
+function AnswerTurn({
+  reply,
+  onOpenPick,
+}: {
+  reply: ChatResponse;
+  onOpenPick(picks: ChatResponse['picks'], productId: string): void;
+}): React.ReactElement {
+  // An option is a picture. One without an image cannot be judged here and
+  // would open as a black card in the feed, so it is not offered at all.
+  const options = reply.picks.filter((pick) => pick.imageUrl !== null);
+  const constraints = [
+    reply.budgetMinor !== null ? `under $${(reply.budgetMinor / 100).toFixed(2)}` : null,
+    ...reply.requirements,
+  ].filter((part): part is string => part !== null);
+
+  return (
+    <View>
+      <Text style={styles.message}>{reply.message}</Text>
+
+      {constraints.length > 0 ? (
+        <Text style={styles.constraints}>{constraints.join(' · ')}</Text>
+      ) : null}
+
+      {options.length > 0 ? (
+        /* A horizontal rail: options sit side by side to be compared at a
+           glance, and the transcript stays short enough to scroll. */
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.rail}
+          keyboardShouldPersistTaps="handled"
+        >
+          {options.map((pick) => (
+            <PickRow
+              key={pick.productId}
+              pick={pick}
+              onPress={() => onOpenPick(reply.picks, pick.productId)}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * One option, led by its picture.
+ *
+ * The product is the interface here as much as it is in the feed, so the image
+ * is the option rather than an icon beside it: a square big enough to judge
+ * the thing by, with the words underneath it. A row of 64px thumbnails asked
+ * the shopper to choose between five paragraphs.
+ *
+ * Tapping does not leave for the storefront. It hands the answer to the feed
+ * and opens this listing there, which is the whole point — the app is where
+ * the scrolling happens, and a link out is the end of the session.
+ */
+function PickRow({
+  pick,
+  onPress,
+}: {
+  pick: ChatResponse['picks'][number];
+  onPress(): void;
+}): React.ReactElement {
+  const price = `$${(pick.priceMinor / 100).toFixed(2)}`;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={styles.pick}
+      accessibilityRole="button"
+      accessibilityLabel={`${pick.title}, ${price} on ${pick.sourceDomain ?? 'the store'}`}
+      accessibilityHint="Opens this listing in the feed"
+    >
+      <Image
+        source={{ uri: pick.imageUrl ?? undefined }}
+        style={styles.shot}
+        contentFit="cover"
+        transition={0}
+        accessibilityIgnoresInvertColors
+      />
+
+      <Text style={styles.pickPrice}>
+        {price}
+        <Text style={styles.pickDomain}>
+          {pick.sourceDomain !== null ? `  ${pick.sourceDomain}` : ''}
+        </Text>
+      </Text>
+      <Text style={styles.pickTitle} numberOfLines={2}>
+        {pick.title}
+      </Text>
+      {pick.reviewNote !== null ? (
+        <Text style={styles.pickReview} numberOfLines={1}>
+          {pick.reviewNote}
+        </Text>
+      ) : null}
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  layer: {
+    ...StyleSheet.absoluteFillObject,
+    // Above the feed and the rail, below a sheet: a sheet is modal and this
+    // is not, so a sheet opened from a pick still covers this.
+    zIndex: 90,
+  },
+  scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000000' },
+  scrimPress: { flex: 1 },
+  panel: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: COLORS.sheet,
+    // Sharp edges read as glass, same as the sheet.
+    overflow: 'hidden',
+  },
+  prompt: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: SPACING.screenMargin,
+    paddingRight: 4,
+    minHeight: ICON.minTarget,
+  },
+  input: {
+    flex: 1,
+    color: COLORS.textPrimary,
+    fontSize: TYPE.sizes.body,
+    lineHeight: TYPE.lineHeights.body,
+    paddingVertical: 10,
+    // RN web draws a focus ring that fights the app's own focus treatment.
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' as never } : null),
+  },
+  submit: {
+    width: ICON.minTarget,
+    height: ICON.minTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // React Native does not default `flexShrink` to 1 the way the web does, so
+  // without this the answers push the footer handle out of the capped panel.
+  answer: { flexGrow: 0, flexShrink: 1 },
+  answerContent: { paddingBottom: 8 },
+  /** What the shopper said, set apart from what the assistant answered. */
+  said: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    fontWeight: TYPE.weights.semibold,
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 16,
+  },
+  message: {
+    color: COLORS.textPrimary,
+    fontSize: TYPE.sizes.body,
+    lineHeight: TYPE.lineHeights.body,
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 12,
+  },
+  constraints: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 4,
+  },
+  thinking: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 12,
+  },
+  error: {
+    color: COLORS.accent,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 12,
+  },
+  rail: {
+    paddingHorizontal: SPACING.screenMargin,
+    paddingTop: 14,
+    gap: 12,
+  },
+  pick: { width: PICK_WIDTH },
+  shot: {
+    width: PICK_WIDTH,
+    height: PICK_WIDTH,
+    backgroundColor: COLORS.backdrop,
+  },
+  pickTitle: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    marginTop: 2,
+  },
+  pickPrice: {
+    color: COLORS.textPrimary,
+    fontSize: TYPE.sizes.price,
+    lineHeight: TYPE.lineHeights.price,
+    fontWeight: TYPE.weights.semibold,
+    marginTop: 8,
+  },
+  pickDomain: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    fontWeight: TYPE.weights.regular,
+  },
+  pickReview: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    marginTop: 4,
+  },
+  grabStrip: {
+    position: 'absolute',
+    top: 0,
+    left: GRAB_STRIP_INSET,
+    right: GRAB_STRIP_INSET,
+    height: GRAB_STRIP_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingTop: 10,
+  },
+  footer: {
+    height: GRAB_STRIP_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.hairline,
+  },
+  handle: {
+    width: 36,
+    height: 3,
+    backgroundColor: COLORS.hairline,
+  },
+  restart: {
+    position: 'absolute',
+    right: ICON.minTarget + 4,
+    height: ICON.minTarget,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  restartLabel: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.sizes.small,
+    lineHeight: TYPE.lineHeights.small,
+    fontWeight: TYPE.weights.semibold,
+  },
+  collapse: {
+    position: 'absolute',
+    right: 4,
+    width: ICON.minTarget,
+    height: ICON.minTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});

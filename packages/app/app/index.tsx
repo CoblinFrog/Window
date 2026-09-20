@@ -12,11 +12,13 @@ import {
   SPACING,
   TYPE,
   paneToRender,
+  type ChatResponse,
   type ProductCard,
   type UpvoteReason,
 } from '@window/shared';
 import { api } from '../src/api/client.js';
 import { ActionBar } from '../src/components/ActionBar.js';
+import { AskPanel } from '../src/components/AskPanel.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
 import { ReasonPicker } from '../src/components/ReasonPicker.js';
@@ -29,7 +31,7 @@ import { useZoom, type TileRect } from '../src/hooks/useZoom.js';
 import { useKeyboardControls, useSnappedWheel } from '../src/hooks/useKeyboard.js';
 import { useCart } from '../src/store/cart.js';
 import { emit, emitDwell } from '../src/store/events.js';
-import { useFeed } from '../src/store/feed.js';
+import { feedSessionId, useFeed } from '../src/store/feed.js';
 import { useSession } from '../src/store/session.js';
 
 /**
@@ -60,6 +62,7 @@ export default function FeedScreen(): React.ReactElement {
   const [reasonFor, setReasonFor] = useState<ProductCard | null>(null);
   const [upvoted, setUpvoted] = useState<Set<string>>(new Set());
   const [showSwipeHint, setShowSwipeHint] = useState(true);
+  const [askOpen, setAskOpen] = useState(false);
 
   const patchCard = feed.patchCard;
   const card = feed.buffer[feed.cursor] ?? null;
@@ -291,10 +294,42 @@ export default function FeedScreen(): React.ReactElement {
 
   const prev = useCallback(() => step('scroll_prev'), [step]);
 
+  // ---- Ask ---------------------------------------------------------------
+  const ask = useCallback(
+    (
+      turn: {
+        message: string;
+        history: Array<{ role: 'user' | 'assistant'; text: string }>;
+        standing: ChatResponse['standing'];
+      },
+      signal: AbortSignal,
+    ) => api.ask({ ...turn, sessionId: feedSessionId() }, signal),
+    [],
+  );
+
+  /**
+   * Tapping an answer's listing. The picks become the feed and it opens on the
+   * one that was tapped, so the answer turns into scrolling instead of a trip
+   * to Amazon. The dwell for the card we are leaving is flushed first: the
+   * buffer is about to be replaced, and an unflushed dwell would be attributed
+   * to whatever lands in its place.
+   */
+  const openPick = useCallback(
+    (picks: ChatResponse['picks'], productId: string) => {
+      flushDwell();
+      dwellCard.current = null;
+      return feed.seedFromPicks(picks, productId);
+    },
+    [feed, flushDwell],
+  );
+
   // ---- Gestures ----------------------------------------------------------
   // Owned by the two layouts. See the note at the top of this file.
 
-  const sheetOpen = reviewsFor !== null || sellerFor !== null || menuFor !== null || reasonFor !== null;
+  // The ask panel counts as covering the feed: while it is open the arrow keys
+  // belong to the person typing in it, not to the feed underneath.
+  const sheetOpen =
+    reviewsFor !== null || sellerFor !== null || menuFor !== null || reasonFor !== null || askOpen;
 
   useKeyboardControls(
     {
@@ -307,6 +342,8 @@ export default function FeedScreen(): React.ReactElement {
       onCart: () => card && addToCart(card),
       onPlayPause: () => undefined,
       onEscape: () => {
+        // The panel closes itself on Escape; the feed must not also act on it.
+        if (askOpen) return;
         const anySheetOpen =
           reviewsFor !== null || sellerFor !== null || menuFor !== null || reasonFor !== null;
         if (anySheetOpen) {
@@ -515,6 +552,16 @@ export default function FeedScreen(): React.ReactElement {
           }}
         />
       ) : null}
+
+      {/* Pulled down from the top edge, over the feed. Mounted outside the
+          column because on desktop the column is centred and the pull belongs
+          to the top of the screen, not to the top of the card. */}
+      <AskPanel
+        onAsk={ask}
+        onOpenPick={openPick}
+        onOpenChange={setAskOpen}
+        reducedMotion={reducedMotion}
+      />
 
       {reasonFor ? (
         <ReasonPicker

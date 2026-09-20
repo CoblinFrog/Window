@@ -98,6 +98,16 @@ export interface DiscoveredListing {
   priceHint: number | null;
   /** Title-ish label from the listing surface, when one was attached to the link. */
   titleHint?: string | null;
+  /**
+   * Card thumbnail from the listing surface, when the surface showed one. It
+   * is the search page's own image, not the detail page's hero — good enough
+   * to render a card, which is what lets the chat answer skip a detail fetch.
+   */
+  imageHint?: string | null;
+  /** Star rating out of 5, when the card showed one. */
+  ratingHint?: number | null;
+  /** How many ratings that average is over, when the card showed it. */
+  reviewCountHint?: number | null;
   seenAt: Date;
 }
 

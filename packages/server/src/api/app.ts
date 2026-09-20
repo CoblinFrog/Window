@@ -14,6 +14,7 @@ import {
   tracing,
 } from './middleware.js';
 import { catalogRoutes } from './routes/catalog.js';
+import { chatRoutes } from './routes/chat.js';
 import { commerceRoutes } from './routes/commerce.js';
 import { eventRoutes } from './routes/events.js';
 import { feedRoutes } from './routes/feed.js';
@@ -67,6 +68,7 @@ export function createApp(ctx: AppContext): Express {
   guarded.use(authenticate(ctx.db.collections, ctx.cache));
   guarded.use('/feed', feedRoutes(ctx));
   guarded.use('/events', eventRoutes(ctx));
+  guarded.use('/chat', chatRoutes(ctx));
   guarded.use(catalogRoutes(ctx));
   guarded.use(profileRoutes(ctx));
   guarded.use(commerceRoutes(ctx));

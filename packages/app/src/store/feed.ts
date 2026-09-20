@@ -10,9 +10,11 @@ import {
   type CursorAction,
   type CursorState,
   type FeedMode,
+  type ChatPickResponse,
   type ProductCard,
 } from '@window/shared';
 import { api } from '../api/client.js';
+import { picksToCards } from './pickCard.js';
 
 /**
  * The feed buffer and the shared cursor.
@@ -34,7 +36,6 @@ export interface FeedState extends CursorState {
   offline: boolean;
   rankingConfigVersion: string;
   explorationProductIds: Set<string>;
-
   dispatch(action: CursorAction): void;
   ensureBuffer(mode: FeedMode): Promise<void>;
   reset(): Promise<void>;
@@ -48,6 +49,16 @@ export interface FeedState extends CursorState {
   swapDeadListing(productId: string): void;
   /** Replace a buffered card in place — e.g. with a live-refreshed detail. */
   patchCard(card: ProductCard): void;
+  /**
+   * Replace the buffer with the assistant's own picks and open `productId` in
+   * Single mode. The one sanctioned exception to the append-only buffer rule:
+   * the shopper tapped a specific listing, so continuing to scroll the old
+   * ranked list would answer a question they have moved on from.
+   *
+   * Addressed by id rather than by position, because a pick the feed cannot
+   * render is dropped on the way in and every index after it would shift.
+   */
+  seedFromPicks(picks: readonly ChatPickResponse[], productId: string): boolean;
 }
 
 type FeedPageDegradation = 'cache' | 'topic_popularity' | 'global_popularity' | null;
@@ -87,6 +98,11 @@ export function resetCatalogRotation(): void {
 
 export function setFeedSessionId(id: string): void {
   sessionId = id;
+}
+
+/** The current feed session, for calls that report against the same session. */
+export function feedSessionId(): string {
+  return sessionId;
 }
 
 /**
@@ -208,6 +224,31 @@ export const useFeed = create<FeedState>((set, get) => ({
       explorationProductIds: new Set<string>(),
     });
     await get().ensureBuffer(get().mode);
+  },
+
+  seedFromPicks(picks, productId) {
+    const cards = picksToCards(picks);
+    if (cards.length === 0) return false;
+    // A pick with no image never became a card, so the tapped one may not be
+    // here. Opening the answer at its start is the honest fallback.
+    const found = cards.findIndex((card) => card.productId === productId);
+    const cursor = found === -1 ? 0 : found;
+    set({
+      ...INITIAL,
+      // Single, not Window: they tapped one listing, so they get that listing
+      // full-bleed and can keep scrolling through the rest of the answer.
+      mode: 'single',
+      cursor,
+      buffer: cards,
+      // Picks are not catalog rows, so they never enter the seen-set — the
+      // server would not recognise these ids, and a later real row for the
+      // same product must not be suppressed by one of these.
+      seen: [],
+      loading: false,
+      degraded: null,
+      explorationProductIds: new Set<string>(),
+    });
+    return true;
   },
 
   setOffline(offline) {

@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
-    "start": "node dist/main.js",
+    "start": "node --env-file-if-exists=.env dist/main.js",
     "seed": "tsx --env-file-if-exists=.env src/scripts/seed.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "smoke": "tsx --env-file-if-exists=.env src/scripts/smoke.ts",
@@ -18,9 +18,11 @@
     "prune": "tsx --env-file-if-exists=.env src/scripts/prune-media.ts",
     "reset:onboarding": "tsx --env-file-if-exists=.env src/scripts/reset-onboarding.ts",
     "ingest:listings": "tsx --env-file-if-exists=.env src/scripts/ingest-listings.ts",
-    "fill": "tsx --env-file-if-exists=.env src/scripts/fill-catalog.ts"
+    "fill": "tsx --env-file-if-exists=.env src/scripts/fill-catalog.ts",
+    "demo:chat": "node --import tsx --env-file-if-exists=.env scripts/demo-chat.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "@supabase/supabase-js": "^2.116.0",
     "@window/shared": "*",
     "express": "^5.1.0",

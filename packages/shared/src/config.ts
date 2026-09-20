@@ -493,6 +493,8 @@ export const RATE_LIMITS = {
   eventBatchesPerMinute: 600,
   checkoutQuotesPerHour: 20,
   merchantLinksPerDay: 5,
+  /** An ask is two live storefront fetches plus a model call. */
+  asksPerMinute: 10,
   /**
    * Credential paths, limited per IP rather than per principal: there is no
    * principal yet when they are called, which is exactly why they are the ones

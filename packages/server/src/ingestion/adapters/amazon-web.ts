@@ -100,6 +100,30 @@ export function parseAmazonSearch(html: string, pageUrl: string): PageCandidates
     const title = titleEl ? elementText(html, titleEl) : '';
     if (title === '') continue;
 
+    // The card thumbnail. Badge and rating sprites carry the same class, so
+    // the pick is the first `s-image` that declares no small fixed size —
+    // the product shot is laid out responsively and sets neither dimension.
+    const imageEl = children.find(
+      (el) =>
+        el.name === 'img' &&
+        hasClass(el, 's-image') &&
+        el.attrs['width'] === undefined &&
+        el.attrs['height'] === undefined,
+    );
+    const imageHint = imageEl ? (decodeEntities(imageEl.attrs['src'] ?? '') || null) : null;
+
+    // Rating and count are on the card already — the star sprite's alt text
+    // ("4.2 out of 5 stars.") and the ratings link's own label. Reading them
+    // here is what lets a caller show review evidence without a detail fetch.
+    const starEl = children.find((el) => hasClass(el, 'a-icon-alt'));
+    const stars = starEl ? /([\d.]+)\s+out of\s+5/i.exec(elementText(html, starEl)) : null;
+    const ratingHint = stars !== null ? Number.parseFloat(stars[1] as string) : null;
+    const countEl = children.find((el) => /^[\d,]+ ratings?$/.test(el.attrs['aria-label'] ?? ''));
+    const reviewCountHint =
+      countEl !== undefined
+        ? Number.parseInt((countEl.attrs['aria-label'] as string).replace(/[^\d]/g, ''), 10)
+        : null;
+
     seenAsins.add(asin);
     items.push({
       sourceDomain: 'amazon.com',
@@ -107,6 +131,10 @@ export function parseAmazonSearch(html: string, pageUrl: string): PageCandidates
       url: `https://www.amazon.com/dp/${asin}`,
       priceHint: price?.minor ?? null,
       titleHint: title,
+      imageHint,
+      ratingHint: ratingHint !== null && Number.isFinite(ratingHint) ? ratingHint : null,
+      reviewCountHint:
+        reviewCountHint !== null && Number.isFinite(reviewCountHint) ? reviewCountHint : null,
       seenAt,
     });
   }
