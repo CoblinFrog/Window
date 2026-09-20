@@ -127,30 +127,45 @@ export function useKeyboardControls(
  * wheel was quiet for long enough beforehand, and the tail behind it is
  * discarded.
  *
- * That alone is too strict, and shipping it broke scrolling. A wheel spun
- * continuously never falls quiet, so after the first page it never turned
- * another — the feed simply stopped responding while the user kept scrolling.
- * A gesture that has not ended still has to be able to ask for more.
+ * What counts as the next gesture is the whole question, and it must not be a
+ * duration. Paging again after the scroll had run for some interval made the
+ * feed move twice for one flick simply because that flick was a hard one — the
+ * length of a gesture became the number of pages, which is not something
+ * anyone is aiming with.
  *
- * What separates the two is the shape of the deltas, not their timing.
- * Momentum only ever decays, and it decays proportionally, so a delta that
- * holds steady or grows is a hand still on the wheel; a delta that jumps is a
- * hand pushing again into the tail of its own flick. Neither can happen while
- * a flick coasts. Only once the deltas say the input is live does a held
- * scroll page again, and then no faster than `WHEEL_REPEAT_MS`.
+ * So there are exactly two ways to turn another page, and both mean "again"
+ * rather than "still": the wheel falls quiet, or the deltas spike. Momentum
+ * only ever decays, so a delta that jumps well above the one before it is a
+ * hand shoving into the tail of its own flick — a second gesture that never
+ * paused. Neither can happen while a flick coasts, however long it coasts for.
  *
- * Replaying realistic timings: flicks of every strength up to 2.5 s turn one
- * page, a held scroll turns one roughly every 400 ms, a mouse wheel turns one
- * per notch, and a flick the user pushes again mid-tail turns two.
+ * A quiet gap is necessary but not sufficient, because the settle runs on this
+ * same thread and a long frame swallows the events that should have arrived
+ * during it. On the clock alone that stall is indistinguishable from the user
+ * stopping, and a hard flick across three of them pages four times — which is
+ * exactly the length-dependent double scroll this is supposed to prevent. The
+ * deltas tell them apart: a flick coasting through a stall comes back decayed
+ * by every frame it missed, where a genuinely new gesture comes back larger.
+ *
+ * The cost is that a scroll held at a constant speed is one gesture and pages
+ * once, and to go further you lift, pause, or push. That is the rule working,
+ * not failing.
  */
 /** Quiet the wheel must fall for one gesture to have ended. */
 const WHEEL_IDLE_GAP_MS = 100;
-/** A scroll the deltas say is still being driven pages again, no faster than this. */
-const WHEEL_REPEAT_MS = 400;
-/** Consecutive non-decaying events before the input counts as live. */
-const WHEEL_LIVE_RUN = 2;
-/** A delta this much above the last is a fresh push, not a tail. */
-const WHEEL_SPIKE = 1.5;
+/**
+ * Across that quiet the delta must not have kept decaying. Momentum always
+ * does; a hand starting again does not. The margin is tight because the two
+ * are only a couple of percent apart per event near the end of a tail.
+ */
+const WHEEL_STILL_COASTING = 0.99;
+/**
+ * A delta this many times the last one is a fresh push rather than a tail.
+ * High enough that the wobble of a hand held on a trackpad never reaches it.
+ */
+const WHEEL_SPIKE = 2;
+/** ...and this much above it, so the test still holds for small deltas. */
+const WHEEL_SPIKE_FLOOR = 8;
 /** Below this a wheel event is noise, not intent. */
 const WHEEL_MIN_DELTA = 12;
 
@@ -161,14 +176,8 @@ export function useSnappedWheel(
 ): void {
   /** When the previous wheel event arrived, burst or not. */
   const lastEventAt = useRef(0);
-  /** When a page was last turned. */
-  const lastActionAt = useRef(0);
-  /** The previous event's magnitude, for reading the decay curve. */
+  /** The previous event's magnitude, for telling a push from a tail. */
   const lastDelta = useRef(0);
-  /** Consecutive events that did not decay. */
-  const liveRun = useRef(0);
-  /** Whether the deltas say a hand is still driving this. */
-  const live = useRef(false);
   const next = useRef(onNext);
   const prev = useRef(onPrev);
   next.current = onNext;
@@ -190,26 +199,16 @@ export function useSnappedWheel(
         return;
       }
 
-      // Read the decay curve. Coasting momentum falls away proportionally on
-      // every event; anything that holds, grows, or jumps is a hand.
-      if (delta > lastDelta.current * WHEEL_SPIKE + 5) {
-        live.current = true;
-        liveRun.current = WHEEL_LIVE_RUN;
-      } else if (delta > lastDelta.current * 0.99) {
-        liveRun.current += 1;
-        if (liveRun.current >= WHEEL_LIVE_RUN) live.current = true;
-      } else {
-        liveRun.current = 0;
-      }
+      const previous = lastDelta.current;
       lastDelta.current = delta;
 
-      const opensGesture = sincePrevious > WHEEL_IDLE_GAP_MS;
-      const stillDriven = live.current && now - lastActionAt.current > WHEEL_REPEAT_MS;
-      if (!opensGesture && !stillDriven) return;
-
-      lastActionAt.current = now;
-      live.current = false;
-      liveRun.current = 0;
+      // Quiet before it, and not still coasting through it: a gesture that had
+      // really ended. Or a spike: momentum only decays, so a jump is a hand
+      // pushing again without having paused.
+      const opensGesture =
+        sincePrevious > WHEEL_IDLE_GAP_MS && delta > previous * WHEEL_STILL_COASTING;
+      const pushedAgain = delta > previous * WHEEL_SPIKE + WHEEL_SPIKE_FLOOR;
+      if (!opensGesture && !pushedAgain) return;
 
       if (event.deltaY > 0) next.current();
       else prev.current();
