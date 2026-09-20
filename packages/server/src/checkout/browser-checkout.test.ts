@@ -325,3 +325,89 @@ describe('shopify field map', () => {
     }
   });
 });
+
+/**
+ * A storefront behind a password gate.
+ *
+ * Shopify development stores are always password-protected, so a staging store
+ * is unreachable until the agent signs in with the store's own password. This
+ * is the demo path: a private store, dummy products, a real checkout.
+ */
+describe('storefront password gate', () => {
+  const PASSWORD = 'let-me-in-please';
+  let merchant: MockMerchant;
+  let browser: PlaywrightCheckoutBrowser;
+  let vault: VaultHandle;
+
+  before(async () => {
+    merchant = await startMockMerchant(0, { shopifyShaped: true, storefrontPassword: PASSWORD });
+    browser = new PlaywrightCheckoutBrowser({ headless: true, allowUncheckedHosts: true });
+    vault = new VaultHandle(FAKE);
+  });
+
+  after(async () => {
+    delete process.env.DEMO_STOREFRONT_PASSWORD;
+    vault.dispose();
+    await browser.close();
+    await merchant.close();
+  });
+
+  function agentFor(): BrowserCheckoutAgent {
+    const base = fieldMapFor('shopify.checkout')!;
+    return new BrowserCheckoutAgent(browser, {
+      fieldMapFor: () => ({
+        ...base,
+        storefront: {
+          path: '/password',
+          passwordField: 'input[name="password"]',
+          submit: 'button[type="submit"]',
+          secretEnv: 'DEMO_STOREFRONT_PASSWORD',
+        },
+      }),
+      vault,
+      originFor: () => merchant.origin,
+    });
+  }
+
+  const quoteInput = () => ({
+    session: { jobId: 'job_gate', merchantDomain: 'shopify.checkout', toolCalls: [], screenshots: [] },
+    merchantDomain: 'shopify.checkout',
+    items: [
+      {
+        productId: 'p1',
+        title: 'Field Notebook',
+        url: merchant.origin,
+        variant: {},
+        quantity: 1,
+        expectedUnitPrice: 6400,
+        currency: 'USD',
+      },
+    ],
+    coupons: [],
+    allowStacking: false,
+  });
+
+  it('refuses to run when the gate password is not configured', async () => {
+    delete process.env.DEMO_STOREFRONT_PASSWORD;
+    // Better to abort than to drive blindly into a password page and report
+    // whatever totals it fails to find there.
+    await assert.rejects(
+      () => agentFor().quote(quoteInput()),
+      (error: unknown) => (error as Error).message.includes('DEMO_STOREFRONT_PASSWORD'),
+    );
+  });
+
+  it('signs in past the gate and quotes the checkout behind it', async () => {
+    process.env.DEMO_STOREFRONT_PASSWORD = PASSWORD;
+    const steps: string[] = [];
+
+    const quote = await agentFor().quote({ ...quoteInput(), onStep: (s) => steps.push(s) });
+
+    assert.equal(quote.subtotal, 6400);
+    assert.equal(quote.total, 6304);
+    assert.ok(steps.includes('storefront gate passed'));
+    // The password is a credential: it may appear in no step, anywhere.
+    assert.ok(!steps.join(' ').includes(PASSWORD), 'the password must never reach the step log');
+    assert.equal(merchant.orderPlaced(), false);
+  });
+});

@@ -171,6 +171,16 @@ export interface CheckoutPage {
   isFilledWith(selector: string, reference: string): Promise<boolean>;
   /** Whether a field is empty. Used to prove the agent left payment alone. */
   isEmpty(selector: string): Promise<boolean>;
+  /**
+   * Signs in past a storefront password gate.
+   *
+   * Deliberately not `type`. `type` refuses any field that looks like a
+   * credential, and that refusal must stay absolute — it is what stops a page
+   * talking the agent into filling a card number. This is the one configured,
+   * non-user credential the agent is permitted to enter, so it gets its own
+   * method: narrow, unreachable from the normal fill loop, and never logged.
+   */
+  submitStorefrontPassword(field: string, submit: string, password: string): Promise<void>;
   screenshot(): Promise<Buffer>;
   close(): Promise<void>;
 }
@@ -226,6 +236,16 @@ export interface FieldMap {
   placeOrder: string;
   /** Where a coupon code goes, when the merchant takes one. */
   coupon?: { input: string; apply: string };
+  /**
+   * A storefront password gate to pass before anything else.
+   *
+   * Shopify development stores are always password-protected and the page
+   * cannot be disabled, so a staging store is unreachable until the agent signs
+   * in with the store's own password. The password itself is never in the map —
+   * it is a credential, read from the environment at the moment it is typed and
+   * never logged, echoed in a step, or written to the audit record.
+   */
+  storefront?: { path: string; passwordField: string; submit: string; secretEnv: string };
 }
 
 export class BrowserCheckoutAgent implements CheckoutAgent {
@@ -295,7 +315,9 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
 
     try {
       input.signal?.throwIfAborted();
-      await page.navigate(`${this.originOf(input.merchantDomain)}${map.checkoutPath}`);
+      const origin = this.originOf(input.merchantDomain);
+      await this.passStorefrontGate(page, map, origin, input.onStep);
+      await page.navigate(`${origin}${map.checkoutPath}`);
       input.onStep?.('navigate: checkout opened');
 
       // Delivery details, by reference. The agent does not know what it typed.
@@ -405,7 +427,9 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
 
     try {
       input.signal?.throwIfAborted();
-      await page.navigate(`${this.originOf(input.merchantDomain)}${map.checkoutPath}`);
+      const origin = this.originOf(input.merchantDomain);
+      await this.passStorefrontGate(page, map, origin, input.onStep);
+      await page.navigate(`${origin}${map.checkoutPath}`);
 
       const held = new Set(this.config.vault?.availableFields() ?? []);
       for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
@@ -442,6 +466,35 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
     } finally {
       await page.close();
     }
+  }
+
+/**
+   * Signs in past a storefront password gate, if the merchant has one.
+   *
+   * Runs before every other navigation on the page. The password is read at the
+   * moment it is typed; the step log records that a gate was passed and never
+   * what passed it.
+   */
+  private async passStorefrontGate(page: CheckoutPage, map: FieldMap, origin: string, onStep?: (step: string) => void): Promise<void> {
+    if (!map.storefront) return;
+
+    const password = process.env[map.storefront.secretEnv];
+    if (!password) {
+      throw new AgentAbort(
+        'not_configured',
+        `${map.storefront.secretEnv} is not set, and this storefront is behind a password gate. ` +
+          'Set it to the store\'s storefront password.',
+        false,
+      );
+    }
+
+    await page.navigate(`${origin}${map.storefront.path}`);
+    await page.submitStorefrontPassword(
+      map.storefront.passwordField,
+      map.storefront.submit,
+      password,
+    );
+    onStep?.('storefront gate passed');
   }
 
   /** Reads the totals off the merchant's own page. */

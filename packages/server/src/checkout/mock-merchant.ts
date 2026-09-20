@@ -28,7 +28,12 @@ export interface MockMerchant {
 
 export async function startMockMerchant(
   port = 0,
-  options: { disallowCheckout?: boolean; shopifyShaped?: boolean } = {},
+  options: {
+    disallowCheckout?: boolean;
+    shopifyShaped?: boolean;
+    /** Requires this storefront password before anything else is served. */
+    storefrontPassword?: string;
+  } = {},
 ): Promise<MockMerchant> {
   let placed = false;
 
@@ -54,6 +59,22 @@ export async function startMockMerchant(
       res.writeHead(303, { location: '/confirmation' });
       res.end();
       return;
+    }
+
+    // The storefront gate, as a development store presents it.
+    if (options.storefrontPassword) {
+      const unlocked = (req.headers.cookie ?? '').includes('storefront_digest=ok');
+
+      if (url.pathname === '/password' && req.method === 'POST') {
+        res.writeHead(303, { 'set-cookie': 'storefront_digest=ok; Path=/', location: '/checkouts' });
+        res.end();
+        return;
+      }
+      if (!unlocked) {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(page(PASSWORD_GATE));
+        return;
+      }
     }
 
     if (url.pathname === '/whoami') {
@@ -250,4 +271,15 @@ const SHOPIFY_CHECKOUT = `
   </div>
 
   <button type="submit" id="checkout-pay-button">Pay now</button>
+</form>`;
+
+/** A storefront password gate, shaped like the one a dev store presents. */
+const PASSWORD_GATE = `
+<h1>Opening soon</h1>
+<form method="POST" action="/password">
+  <div class="card">
+    <label for="sp">Enter store password</label>
+    <input id="sp" name="password" type="password">
+    <button type="submit">Enter</button>
+  </div>
 </form>`;

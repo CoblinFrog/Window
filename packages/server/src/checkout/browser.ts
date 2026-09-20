@@ -227,6 +227,20 @@ class PlaywrightCheckoutPage implements CheckoutPage {
     return actual.length > 0 && actual === expected;
   }
 
+  /**
+   * Enters a storefront password and submits it.
+   *
+   * Bypasses `assertFillable` by construction rather than by exception: the
+   * guard still refuses every credential field the *agent* can reach, and this
+   * path is only reachable from a configured field map. The value is used once
+   * and never returned, logged or screenshotted.
+   */
+  async submitStorefrontPassword(field: string, submit: string, password: string): Promise<void> {
+    await this.page.locator(field).first().fill(password);
+    await this.page.locator(submit).first().click();
+    await this.page.waitForLoadState('domcontentloaded').catch(() => undefined);
+  }
+
   async isEmpty(selector: string): Promise<boolean> {
     const actual = await this.page
       .locator(selector)

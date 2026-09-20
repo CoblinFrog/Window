@@ -100,12 +100,33 @@ const SHOPIFY_STORES = (process.env.SHOPIFY_CHECKOUT_DOMAINS ?? '')
   .map((entry) => entry.trim().toLowerCase())
   .filter((entry) => entry.length > 0);
 
+/**
+ * The storefront gate, when one is configured.
+ *
+ * Development stores are always password-protected and the page cannot be
+ * disabled; live stores have no gate at all. Rather than guess which a store
+ * is, the gate exists exactly when a password has been supplied for it — so a
+ * live store needs no configuration and a dev store needs one variable.
+ */
+function storefrontGate(): FieldMap['storefront'] {
+  if (!process.env.SHOPIFY_STOREFRONT_PASSWORD) return undefined;
+  return {
+    path: '/password',
+    passwordField: 'input[name="password"]',
+    submit: 'form[action*="password"] button[type="submit"]',
+    secretEnv: 'SHOPIFY_STOREFRONT_PASSWORD',
+  };
+}
+
 export function fieldMapFor(merchantDomain: string): FieldMap | null {
   const direct = MAPS[merchantDomain];
   if (direct) return direct;
 
   if (SHOPIFY_STORES.includes(merchantDomain.toLowerCase())) {
-    return MAPS['shopify.checkout'] ?? null;
+    const base = MAPS['shopify.checkout'];
+    if (!base) return null;
+    const gate = storefrontGate();
+    return gate ? { ...base, storefront: gate } : base;
   }
   return null;
 }
