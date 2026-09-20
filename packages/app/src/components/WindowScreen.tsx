@@ -22,6 +22,7 @@ import {
   TYPE,
   WINDOW,
   formatMoney,
+  imageUri,
   planPane,
   stretchDelay,
   type PaneTileSource,
@@ -340,7 +341,10 @@ function WindowTile({
   }));
 
   const hero = card.media.hero;
-  const uri = dataSaver ? (hero.avif[0] ?? hero.webp[0]) : (hero.avif[1] ?? hero.avif[0]);
+  // The shared helper, which prefers the listing's own image over our
+  // derivatives — a real listing's photograph lives at the source until the
+  // media pipeline has caught up with it, and often never moves.
+  const uri = imageUri(hero, dataSaver);
 
   return (
     <Animated.View style={[{ marginBottom: tile.gapBelow }, animated]} onLayout={onLayout}>

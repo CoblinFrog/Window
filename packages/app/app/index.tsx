@@ -14,6 +14,7 @@ import {
   type ProductCard,
   type UpvoteReason,
 } from '@window/shared';
+import { api } from '../src/api/client.js';
 import { ActionRail } from '../src/components/ActionRail.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
@@ -217,8 +218,16 @@ export default function FeedScreen(): React.ReactElement {
   );
 
   const tapTile = useCallback(
-    (index: number, _card: ProductCard, rect: TileRect | null) => {
+    (index: number, card: ProductCard, rect: TileRect | null) => {
       zoom.zoomIn(rect, () => feed.dispatch({ kind: 'tap_tile', index }));
+      // A tap is also the moment to ask the source for the freshest copy of
+      // this listing; the refreshed detail patches the card in place when it
+      // lands. It is deliberately not awaited — the zoom has already started
+      // and must not wait on the network to finish.
+      void api
+        .product(card.productId, { live: true })
+        .then((detail) => feed.patchCard(detail))
+        .catch(() => undefined);
     },
     [feed, zoom],
   );

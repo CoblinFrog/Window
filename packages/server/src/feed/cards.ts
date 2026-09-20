@@ -101,6 +101,7 @@ export function toProductCard(
       currency: candidate.shipping?.currency ?? candidate.price.currency,
       free: (candidate.shipping?.amount ?? 0) === 0,
     },
+    sourceUrl: candidate.source.url ?? null,
     merchant: {
       domain: candidate.source.domain,
       displayName: context.merchantNames.get(candidate.source.domain) ?? candidate.source.domain,
@@ -159,22 +160,28 @@ export async function buildCardContext(
     qualityTopDecile?: number;
   },
 ): Promise<CardContext> {
-  const sellerIds = [...new Set(candidates.map((c) => c.sellerId))];
+  const sellerIds = [...new Set(candidates.map((c) => c.sellerId).filter((id): id is string => id != null))];
+  // `!= null` rather than `!== null`: an unclustered product reaches here as
+  // `undefined` as readily as `null`, and only the loose check excludes both.
   const clusterIds = [
     ...new Set(
       candidates
         .map((c) => c.clusterId)
-        .filter((id): id is string => id !== null),
+        .filter((id): id is string => id != null),
     ),
   ];
 
+  // An `$in` list is rendered into the query verbatim, so a nullish id becomes
+  // the literal "undefined" and Postgres rejects the whole statement rather
+  // than the one bad entry. Both lists are already de-duplicated above.
   const [sellers, clusters] = await Promise.all([
-    find<Seller>(deps.sellers, { id: { $in: candidates.map((c) => c.sellerId) } }),
-    find<Cluster>(deps.clusters, { id: { $in: candidates.map((c) => c.clusterId).filter(Boolean) } }),
+    sellerIds.length > 0
+      ? find<Seller>(deps.sellers, { id: { $in: sellerIds } })
+      : Promise.resolve([] as Seller[]),
+    clusterIds.length > 0
+      ? find<Cluster>(deps.clusters, { id: { $in: clusterIds } })
+      : Promise.resolve([] as Cluster[]),
   ]);
-
-  void sellerIds;
-  void clusterIds;
 
   const scores = candidates.map((c) => c.quality.score).sort((a, b) => a - b);
   const topDecile =

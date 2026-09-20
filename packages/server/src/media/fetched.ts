@@ -56,7 +56,11 @@ export class FetchedMediaPipeline implements MediaPipeline {
 
     if (existsSync(metaPath)) {
       try {
-        return JSON.parse(await readFile(metaPath, 'utf8')) as MediaImage;
+        const cached = JSON.parse(await readFile(metaPath, 'utf8')) as MediaImage;
+        // Entries written before the source url was recorded are completed
+        // here instead of being re-fetched: the key is derived from that same
+        // url, so it is the origin these bytes came from by construction.
+        return cached.sourceUrl ? cached : { ...cached, sourceUrl: input.sourceUrl };
       } catch {
         // A corrupt cache entry is re-fetched rather than trusted.
       }
@@ -110,6 +114,10 @@ export class FetchedMediaPipeline implements MediaPipeline {
       // The blurhash is computed from the real image so the placeholder is the
       // actual colours of the actual product, which is the entire point of it.
       blurhash: await this.blurhashFor(bytes, probe.width, probe.height),
+      // Kept so a client can load the origin's own copy rather than ours. The
+      // bytes are still stored: this pipeline is what measured them, and the
+      // local derivative remains the fallback when the origin blocks hotlinking.
+      sourceUrl: input.sourceUrl,
     };
 
     await writeFile(metaPath, JSON.stringify(image));

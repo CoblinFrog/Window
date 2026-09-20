@@ -25,7 +25,8 @@ import {
  */
 
 export interface ReviewSample {
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   sourceDomain: string;
   verifiedPurchase: boolean | null;
@@ -105,15 +106,16 @@ export function reviewCredibility(
     return { factor: QUALITY_PARAMS.credibility.max, penalties };
   }
 
-  const normalised = reviews.map((r) => (r.rating / r.ratingScale) * 5);
+  const rated = reviews.filter((r) => r.rating !== null);
+  const normalised = rated.map((r) => ((r.rating ?? 0) / r.ratingScale) * 5);
 
   // 1. A distribution bimodal at 5 and 1 with a hollow middle.
   const buckets = [0, 0, 0, 0, 0];
   for (const rating of normalised) {
     buckets[clamp(Math.round(rating) - 1, 0, 4)] = (buckets[clamp(Math.round(rating) - 1, 0, 4)] as number) + 1;
   }
-  const extremes = ((buckets[0] as number) + (buckets[4] as number)) / reviews.length;
-  const middle = ((buckets[1] as number) + (buckets[2] as number) + (buckets[3] as number)) / reviews.length;
+  const extremes = normalised.length === 0 ? 0 : ((buckets[0] as number) + (buckets[4] as number)) / normalised.length;
+  const middle = normalised.length === 0 ? 1 : ((buckets[1] as number) + (buckets[2] as number) + (buckets[3] as number)) / normalised.length;
   if (extremes > 0.85 && middle < 0.1) {
     const amount = CREDIBILITY_PENALTIES.bimodal * clamp((extremes - 0.85) / 0.15, 0, 1);
     penalties.push({
@@ -232,7 +234,9 @@ export function reviewAdjusted(
   categoryPriorRating: number,
   credibilityFactor: number,
 ): number {
-  const normalised = reviews.map((r) => (r.rating / r.ratingScale) * 5);
+  const normalised = reviews
+    .filter((r) => r.rating !== null)
+    .map((r) => ((r.rating ?? 0) / r.ratingScale) * 5);
   const smoothed = bayesianSmooth(
     normalised.reduce((s, r) => s + r, 0),
     normalised.length,
@@ -263,15 +267,16 @@ export function corpusDepth(reviews: readonly ReviewSample[]): number {
 export function sentimentConsistency(reviews: readonly ReviewSample[], now: Date): number {
   if (reviews.length < 4) return 0.5;
 
-  const normalised = reviews.map((r) => (r.rating / r.ratingScale) * 5);
+  const rated = reviews.filter((r) => r.rating !== null);
+  const normalised = rated.map((r) => ((r.rating ?? 0) / r.ratingScale) * 5);
   // Spread: a standard deviation of 2 on a 5-point scale is maximal disagreement.
-  const spread = clamp(1 - stdev(normalised) / 2, 0, 1);
+  const spread = normalised.length === 0 ? 0.5 : clamp(1 - stdev(normalised) / 2, 0, 1);
 
   // Cross-source agreement.
   const bySource = new Map<string, number[]>();
-  for (const review of reviews) {
+  for (const review of rated) {
     const list = bySource.get(review.sourceDomain) ?? [];
-    list.push((review.rating / review.ratingScale) * 5);
+    list.push(((review.rating ?? 0) / review.ratingScale) * 5);
     bySource.set(review.sourceDomain, list);
   }
   const sourceMeans = [...bySource.values()].filter((v) => v.length >= 3).map(mean);
@@ -279,13 +284,13 @@ export function sentimentConsistency(reviews: readonly ReviewSample[], now: Date
 
   // Temporal trend: the last 90 days against everything before.
   const cutoff = now.getTime() - 90 * 24 * 60 * 60 * 1000;
-  const recent = reviews.filter((r) => r.postedAt.getTime() >= cutoff);
-  const older = reviews.filter((r) => r.postedAt.getTime() < cutoff);
+  const recent = rated.filter((r) => r.postedAt.getTime() >= cutoff);
+  const older = rated.filter((r) => r.postedAt.getTime() < cutoff);
   let temporal = 0.7;
   if (recent.length >= 3 && older.length >= 3) {
     const delta =
-      mean(recent.map((r) => (r.rating / r.ratingScale) * 5)) -
-      mean(older.map((r) => (r.rating / r.ratingScale) * 5));
+      mean(recent.map((r) => ((r.rating ?? 0) / r.ratingScale) * 5)) -
+      mean(older.map((r) => ((r.rating ?? 0) / r.ratingScale) * 5));
     // A decline is penalised; an improvement is not rewarded symmetrically,
     // because a product getting better is not evidence its reviews are consistent.
     temporal = delta < 0 ? clamp(1 + delta / 1.5, 0, 1) : clamp(0.8 + delta / 5, 0, 1);

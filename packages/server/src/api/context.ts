@@ -9,6 +9,8 @@ import type { EmbeddingProvider } from '../embedding/provider.js';
 import { EventCollector } from '../events/collector.js';
 import { FeedService } from '../feed/service.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
+import { AdapterVerifier, refreshProduct, type RefreshOutcome } from '../ingestion/live.js';
+import { IngestionPipeline } from '../ingestion/pipeline.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline, type MediaPipeline } from '../media/pipeline.js';
 import { RankingService } from '../ranking/service.js';
@@ -24,6 +26,9 @@ export interface AppContext {
   media: MediaPipeline;
   ranking: RankingService;
   feed: FeedService;
+  ingest: IngestionPipeline;
+  /** Re-fetch a product's listing from its source URL and upsert the result. */
+  refreshProduct(product: import('../db/supabase-collections.js').Product): Promise<RefreshOutcome>;
   cart: CartService;
   checkout: CheckoutOrchestrator;
   events: EventCollector;
@@ -55,7 +60,30 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
 
   const ranking = new RankingService({ collections: db.collections, vectors, config });
   const feed = new FeedService({ collections: db.collections, ranking, vectors, cache });
-  const cart = new CartService({ collections: db.collections });
+
+  // Supabase has no `distinct`, so the brand dictionary is deduplicated here.
+  // The pipeline only needs the set of known brands, not their counts.
+  const { data: brandRows } = await db.collections.products.select('brand');
+  const brandDictionary = [
+    ...new Set(
+      ((brandRows ?? []) as Array<{ brand?: unknown }>)
+        .map((row) => row.brand)
+        .filter((brand): brand is string => typeof brand === 'string' && brand !== ''),
+    ),
+  ];
+  const ingest = new IngestionPipeline({
+    collections: db.collections,
+    embedder,
+    classifier,
+    media: mediaPipeline(),
+    brandDictionary,
+    onProductUpserted: (product) => vectors.onProductUpserted?.(product),
+  });
+  const refreshDeps = { collections: db.collections, pipeline: ingest };
+  const cart = new CartService({
+    collections: db.collections,
+    verifier: new AdapterVerifier(refreshDeps),
+  });
   const coupons = new CouponStore(db.collections.coupons);
   const checkout = new CheckoutOrchestrator({ collections: db.collections, cache, coupons });
   const events = new EventCollector({ collections: db.collections, cache, config });
@@ -76,6 +104,8 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     media: mediaPipeline(),
     ranking,
     feed,
+    ingest,
+    refreshProduct: (product) => refreshProduct(refreshDeps, product),
     cart,
     checkout,
     events,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import {
   COLORS,
@@ -8,6 +8,7 @@ import {
   TYPE,
   formatMoney,
   formatTimeRemaining,
+  imageUri,
   type ProductCard,
 } from '@window/shared';
 import { Icon } from './Icon.js';
@@ -87,8 +88,9 @@ export function PaneView({
   const image = images[Math.min(galleryIndex, images.length - 1)] ?? card.media.hero;
 
   // Data saver serves 480 px images; everything else takes the 1080 px variant,
-  // which is under the 120 KB per-card budget at typical compression.
-  const sourceUri = dataSaver ? (image.avif[0] ?? image.webp[0]) : (image.avif[1] ?? image.avif[0]);
+  // which is under the 120 KB per-card budget at typical compression. The
+  // helper prefers the listing's own image over our derivatives.
+  const sourceUri = imageUri(image, dataSaver);
 
   const badges = card.badges;
   const timeRemaining = badges.endsAt ? formatTimeRemaining(badges.endsAt) : null;
@@ -165,9 +167,28 @@ export function PaneView({
           </Text>
         </Pressable>
 
-        <Text style={styles.title} numberOfLines={2}>
-          {card.title}
-        </Text>
+        {/* The title opens the listing it came from. Expanding the truncation
+            moves to a long press so the tap can carry the link; a card with no
+            source url keeps plain, unlinked text. */}
+        <Pressable
+          onPress={() => {
+            if (card.sourceUrl) void Linking.openURL(card.sourceUrl);
+          }}
+          disabled={!card.sourceUrl}
+          accessibilityRole={card.sourceUrl ? 'link' : 'text'}
+          accessibilityLabel={
+            card.sourceUrl
+              ? `${card.title}. Opens the listing on ${card.merchant.displayName}.`
+              : card.title
+          }
+        >
+          <Text
+            style={[styles.title, card.sourceUrl ? styles.titleLink : null]}
+            numberOfLines={2}
+          >
+            {card.title}
+          </Text>
+        </Pressable>
 
         <View style={styles.priceRow}>
           <View style={styles.priceGroup}>
@@ -311,6 +332,9 @@ const styles = StyleSheet.create({
     lineHeight: TYPE.lineHeights.subhead,
     fontWeight: TYPE.weights.bold,
   },
+  // The only cue that the title leaves the app. Underline rather than a colour
+  // shift, which would not survive being drawn over arbitrary photography.
+  titleLink: { textDecorationLine: 'underline' },
   priceRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',

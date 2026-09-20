@@ -13,6 +13,7 @@ import {
   formatMoney,
   type FeedMode,
   type ProductCard,
+  imageUri,
   type SellerResponse,
 } from '@window/shared';
 import { api } from '../api/client.js';
@@ -248,7 +249,7 @@ function ListingTile({
   item: ProductCard;
   reducedMotion: boolean;
 }): React.ReactElement | null {
-  const uri = item.media.hero.avif[0] ?? item.media.hero.webp[0];
+  const uri = imageUri(item.media.hero, true);
   if (!uri) return null;
   const price = formatMoney(item.price);
 

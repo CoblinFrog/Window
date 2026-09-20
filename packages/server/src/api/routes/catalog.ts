@@ -13,10 +13,12 @@ import {
   type UpvoteReason,
 } from '@window/shared';
 import type { AppContext } from '../context.js';
+import { logger } from '../../lib/logger.js';
 import { buildCardContext, toProductCard } from '../../feed/cards.js';
 import { cautionText } from '../../ingestion/quality.js';
 import { riskFlagText } from '../../ingestion/risk.js';
 import type { VectorCandidate } from '../../vector/types.js';
+import type { Product } from '../../db/supabase-collections.js';
 import { findOne, find, count } from '../../db/supabase-helpers.js';
 
 function validateId(value: string, what: string): string {
@@ -29,16 +31,62 @@ export function catalogRoutes(ctx: AppContext): Router {
   const { collections } = ctx.db;
 
   async function merchantNames(): Promise<Map<string, string>> {
-    const { data: sources } = await collections.sources.select('id,displayName');
-    return new Map((sources || []).map((s: { id: string; displayName: string }) => [s.id, s.displayName]));
+    // `display_name` is the column; the camelCase spelling selected nothing and
+    // the error went unread, so every merchant silently fell back to its domain.
+    const sources = await find<{ id: string; displayName: string }>(collections.sources, {}, {
+      select: 'id,displayName',
+    });
+    return new Map(sources.map((s) => [s.id, s.displayName]));
   }
 
-  /** Full product detail. Unlike the card, this carries specs and the source URL. */
+  /**
+   * Full product detail. Unlike the card, this carries specs and the source URL.
+   *
+   * `?live=1` re-fetches the listing at its source URL — but a tap cannot wait
+   * on a marketplace round-trip, so the refresh races a deadline. Sources that
+   * answer fast land in the response; slow ones keep refreshing in the
+   * background and the stored row answers now. Either way the next read is
+   * current, because a completed refresh upserts the stored document.
+   */
+  const LIVE_REFRESH_DEADLINE_MS = 800;
+
   router.get('/products/:id', async (req, res, next) => {
     try {
       const id = validateId(req.params.id, 'Product id');
-      const { data: product } = await collections.products.select('*').eq('id', id).single();
+      // Through `findOne` so the row arrives in the application's own shape:
+      // the raw builder returns snake_case columns with dates left as strings,
+      // and this handler calls `.toISOString()` on `crawl.lastCrawledAt`.
+      let product = await findOne<Product>(collections.products, { id });
       if (!product) throw ApiError.notFound('That product');
+
+      if (req.query.live === '1' || req.query.live === 'true') {
+        const refresh = ctx.refreshProduct(product);
+        // A late failure must not surface as an unhandled rejection once the
+        // response has already gone out.
+        const outcome = await Promise.race([
+          refresh.catch((error: unknown) => {
+            logger.warn('background live refresh failed', {
+              productId: id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return 'unavailable' as const;
+          }),
+          new Promise<'pending'>((resolve) =>
+            setTimeout(() => resolve('pending'), LIVE_REFRESH_DEADLINE_MS),
+          ),
+        ]);
+        if (outcome === 'refreshed' || outcome === 'removed') {
+          // Through `findOne`, not the raw builder: the query builder returns
+          // the row in snake_case, so a product re-read here arrived without
+          // `sellerId`/`clusterId` and the seller lookup below was handed
+          // `undefined`, failing the whole request with a uuid parse error.
+          const fresh = await findOne<Product>(collections.products, { id });
+          if (fresh) product = fresh;
+        }
+        if (outcome === 'removed' && (product === null || product.status === 'dead')) {
+          throw ApiError.notFound('That product');
+        }
+      }
 
       const names = await merchantNames();
 
@@ -96,7 +144,14 @@ export function catalogRoutes(ctx: AppContext): Router {
           bidCount: product.auction.bidCount,
         } : null,
         canAddToCart: product.sourceType !== 'auction',
-        warning: riskFlagText(product.risk) || cautionText(product.quality) || null,
+        // `cautionText` takes one caution, not the whole quality block; passing
+        // the block read `.theme` off `undefined` and threw on every product
+        // whose risk carried no flag. The first caution is the one the card
+        // shows, matching how the feed projects it.
+        warning:
+          riskFlagText(product.risk) ||
+          (product.quality.cautions?.[0] ? cautionText(product.quality.cautions[0]) : null) ||
+          null,
         isExploration: false,
         explorationTopic: null,
         specs: product.specs,
