@@ -285,7 +285,7 @@ export const RETURNING_USER = {
  * retires the `drop` oldest, so the catalog stays around `size`.
  */
 export const CATALOG_WINDOW = {
-  size: 20,
+  size: 48,
   /** Cursor index that triggers a rotation, counted from zero. */
   threshold: 10,
   add: 8,

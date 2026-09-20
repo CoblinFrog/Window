@@ -221,6 +221,41 @@ export class IngestionPipeline {
     const clusterId = reusableClusterId ?? crypto.randomUUID();
     const clusterExists = reusableClusterId !== null;
 
+    // One storefront, one listing per product. Clustering already decides what
+    // "the same product" means, so a match that is already stocked from this
+    // same domain under a different listing id is a duplicate: the two tiles
+    // would be the same object at the same shop, which reads as a broken feed
+    // rather than as choice. A different domain is a genuine second offer and
+    // is what the cluster exists to hold.
+    if (match.cluster !== null && existing === null) {
+      const sameSite = await find<Product>(
+        collections.products,
+        { clusterId, 'source.domain': raw.sourceDomain, status: 'active' },
+        { select: 'id,source', limit: 1 },
+      );
+      if (sameSite.length > 0) {
+        await this.recordRejection(
+          raw,
+          'duplicate_listing',
+          `already stocked from ${raw.sourceDomain}`,
+          now,
+          seller.id,
+        );
+        log.debug('listing rejected as a duplicate of one already stocked', {
+          domain: raw.sourceDomain,
+          sourceId: raw.sourceId,
+          clusterId,
+        });
+        return {
+          status: 'rejected',
+          productId: null,
+          clusterId,
+          rejectReason: 'duplicate_listing',
+          matchStrength: match.strength,
+        };
+      }
+    }
+
     // The corpus is resolved now because the quality score reads it, but it is
     // written after the cluster row exists; see `persistReviews`.
     const storedReviews = await this.computeReviews(raw, clusterId, now);
@@ -843,6 +878,7 @@ export class IngestionPipeline {
       reviews: {
         count: ratings.count,
         meanRating: ratings.meanRating,
+        ratedCount: ratings.ratedCount,
         perSource: ratings.perSource,
         summary,
         themes,

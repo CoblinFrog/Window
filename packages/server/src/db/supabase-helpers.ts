@@ -291,6 +291,12 @@ function applyFilters(query: any, filters: Record<string, any>): any {
     if (value === null || value === undefined) query = query.is(key, null);
     else if (typeof value === 'object' && '$ne' in value) query = query.neq(key, value.$ne);
     else if (typeof value === 'object' && '$in' in value) query = query.in(key, value.$in);
+    else if (typeof value === 'object' && '$nin' in value) {
+      // PostgREST spells "not in" as a negated `in`, and an empty exclusion
+      // list must not become `not.in.()`, which it rejects.
+      const excluded = value.$nin as unknown[];
+      if (excluded.length > 0) query = query.not(key, 'in', `(${excluded.map(quoteValue).join(',')})`);
+    }
     else if (typeof value === 'object' && '$nin' in value) query = query.not(key, 'in', `(${value.$nin.join(',')})`);
     else if (typeof value === 'object' && '$gt' in value) query = query.gt(key, value.$gt);
     else if (typeof value === 'object' && '$gte' in value) query = query.gte(key, value.$gte);

@@ -124,7 +124,9 @@ export function toProductCard(
     },
     reviews: {
       count: cluster?.reviews.count ?? 0,
-      meanRating: cluster && cluster.reviews.count > 0 ? cluster.reviews.meanRating : null,
+      // Gated on the rated count, not the review count: a cluster can hold
+      // forty reviews and not one score.
+      meanRating: cluster && cluster.reviews.ratedCount > 0 ? cluster.reviews.meanRating : null,
     },
     upvotes: cluster?.engagement.upvotes ?? 0,
     otherOffers,

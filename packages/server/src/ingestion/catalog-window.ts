@@ -20,12 +20,29 @@ import { createWebIngestion, persistWebListings } from './web-persistence.js';
 
 const log = logger.child('catalog-window');
 
-/** Topics used when the caller has no interests of its own yet. */
+/**
+ * Topics used when the caller has no interests of its own yet.
+ *
+ * Deliberately wide. One storefront search returns one shelf, and now that a
+ * product already stocked from a site is rejected rather than stored twice, a
+ * narrow seed list stops producing new listings long before the window is full
+ * — four terms cannot fill forty-eight slots. Spreading the seeds across
+ * unrelated categories is also what lets the grid assemble coherent panes,
+ * since a pane needs four items from one L2 inside a price band.
+ */
 export const DEFAULT_WINDOW_TOPICS = [
   'wireless headphones',
   'mechanical keyboard',
   'smart watch',
   'portable speaker',
+  'running shoes',
+  'coffee grinder',
+  'desk lamp',
+  'backpack',
+  'cast iron skillet',
+  'yoga mat',
+  'sunglasses',
+  'water bottle',
 ];
 
 export interface RotationStats {
@@ -129,7 +146,14 @@ export async function fillCatalog(
   const topics = [...(options.topics ?? [])].filter((t) => t.trim() !== '');
   const seeds = topics.length > 0 ? topics : DEFAULT_WINDOW_TOPICS;
 
-  const listings = await expandFromWeb(seeds, options.count * 3, { llm: claudeCli() });
+  // Every seed is searched. `expandFromWeb` caps itself at three queries by
+  // default, which is right when it is guessing queries from a few anchor
+  // titles and wrong here, where each seed is a deliberate, distinct shelf —
+  // leaving it at three meant nine of twelve topics were never looked at.
+  const listings = await expandFromWeb(seeds, options.count * 3, {
+    llm: claudeCli(),
+    maxQueries: seeds.length,
+  });
   log.info('collected candidate listings', { seeds, found: listings.length });
   if (listings.length === 0) {
     return { added: 0, attempted: 0, reasons: { nothing_collected: 1 }, ids: [] };
