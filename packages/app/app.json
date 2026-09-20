@@ -8,11 +8,6 @@
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "backgroundColor": "#000000",
-    "splash": {
-      "backgroundColor": "#000000",
-      "resizeMode": "contain",
-      "image": "./assets/icon.png"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -40,7 +35,16 @@
       "apiUrl": "http://localhost:4000"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/icon.png",
+          "imageWidth": 180,
+          "resizeMode": "contain",
+          "backgroundColor": "#000000"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false

@@ -52,9 +52,18 @@ rather than as a failure.
 
 ### What Expo Go cannot show you
 
-It runs the app inside its own shell, so the icon and splash are Expo's rather
-than this app's, and the whole thing stops when the Mac does. It is for trying
-the app, not for handing to someone else.
+It runs the app inside its own shell, so the home-screen icon and the native
+splash are Expo's rather than this app's, and the whole thing stops when the Mac
+does. It is for trying the app, not for handing to someone else.
+
+The splash is worth spelling out, because it looks like a bug. Expo Go is a
+prebuilt binary and `expo-splash-screen`'s config plugin only writes native
+assets at build time, so there is no way to give it this app's splash — and the
+top-level `splash` key that used to do it in app.json was removed from the
+schema in SDK 57, which means a project carrying one is configuring nothing at
+all. What you do see is the app's own first screen: `app/index.tsx` shows the
+mark while the session bootstraps, which is a gap that was already there and
+already black. That one renders everywhere, Expo Go and the web included.
 
 ## Distributing it: TestFlight, and why not yet
 

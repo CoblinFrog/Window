@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
+import icon from '../assets/icon.png';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import { Redirect, useRouter } from 'expo-router';
@@ -515,7 +516,21 @@ export default function FeedScreen(): React.ReactElement {
       </View>
     );
   }
-  if (session.status !== 'ready') return <View style={styles.centre} />;
+  // The startup mark.
+  //
+  // Not the native splash. Expo Go is a prebuilt shell with a splash of its
+  // own, and `expo-splash-screen` only writes native assets at build time, so
+  // on a phone running this through Expo Go there is no way to show one. This
+  // gap is the app's own, already black and already waiting on the session
+  // bootstrap, so putting the mark here adds no delay and is the one startup
+  // screen every platform shows — Expo Go and the web included.
+  if (session.status !== 'ready') {
+    return (
+      <View style={styles.centre}>
+        <Image source={icon} style={styles.bootMark} contentFit="contain" accessibilityLabel="Window" />
+      </View>
+    );
+  }
   if (!session.onboarded) return <Redirect href="/onboarding" />;
   if (feed.buffer.length === 0) {
     return (
@@ -784,6 +799,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     gap: 12,
   },
+  bootMark: { width: 120, height: 120 },
   plain: { color: COLORS.textPrimary, fontSize: TYPE.sizes.body },
   action: { color: COLORS.accent, fontSize: TYPE.sizes.body, fontWeight: TYPE.weights.semibold },
   // A floating pill in the top right. Every other corner is spoken for: the
