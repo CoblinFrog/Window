@@ -359,24 +359,36 @@ function WindowTile({
         )}`}
         accessibilityState={{ selected }}
       >
-        <Image
-          source={{ uri }}
-          placeholder={{ blurhash: hero.blurhash }}
-          // The blurhash paints immediately and the photograph replaces it
-          // without a fade: a cross-fade here reads as the page loading twice.
-          transition={0}
-          // `contain`, not `cover`. The tile was sized from this photograph's
-          // own aspect ratio precisely so nothing has to be cropped out of it —
-          // cropping would throw away the reason for the masonry layout.
-          contentFit="contain"
-          style={{
-            width: tile.imageWidth,
-            height: tile.imageHeight,
-            borderRadius: RADIUS.tileImage,
-          }}
-          recyclingKey={card.productId}
-          cachePolicy="memory-disk"
-        />
+        {/* The rounding lives on this wrapper, which clips, rather than on the
+            image itself. A radius set on the image only rounds the box it is
+            given, and `contain` leaves the painted photograph smaller than that
+            box whenever the declared dimensions and the real file disagree — so
+            the corners stayed square and the leftover band read as a slab of
+            padding above the caption. Clipping the container rounds whatever
+            actually gets painted. */}
+        <View
+          style={[
+            styles.imageFrame,
+            { width: tile.imageWidth, height: tile.imageHeight },
+          ]}
+        >
+          <Image
+            source={{ uri }}
+            placeholder={{ blurhash: hero.blurhash }}
+            // The blurhash paints immediately and the photograph replaces it
+            // without a fade: a cross-fade here reads as the page loading twice.
+            transition={0}
+            // `cover`, so the photograph fills the frame and is clipped to its
+            // corners. The frame was already sized from this photograph's own
+            // aspect ratio, so there is nothing to crop when the metadata is
+            // right — and when it is wrong, a hairline crop is a better answer
+            // than white bands wedged between the image and its caption.
+            contentFit="cover"
+            style={StyleSheet.absoluteFill}
+            recyclingKey={card.productId}
+            cachePolicy="memory-disk"
+          />
+        </View>
 
         {/* The flap: the name and the verdict, tucked under the photograph. Its
             spacing comes from the shared tokens the layout planner measures
@@ -415,6 +427,11 @@ const styles = StyleSheet.create({
     gap: WINDOW.columnGap,
   },
   column: { alignItems: 'center' },
+  imageFrame: {
+    borderRadius: RADIUS.tileImage,
+    overflow: 'hidden',
+    backgroundColor: COLORS.hairlineLight,
+  },
   card: {
     backgroundColor: COLORS.card,
     borderRadius: RADIUS.tile,
