@@ -201,8 +201,17 @@ export interface FieldMap {
   origin?: string;
   /** Where the checkout form lives, relative to the merchant origin. */
   checkoutPath: string;
-  /** Vault field → CSS selector on the merchant's form. */
+  /** Vault field → CSS selector for a text input on the merchant's form. */
   fields: Partial<Record<VaultField, string>>;
+  /**
+   * Vault field → CSS selector for a `<select>`.
+   *
+   * Country and state are dropdowns on most real checkouts, and typing into a
+   * `<select>` silently does nothing — the field stays on its default and the
+   * parcel goes to the wrong country. They need a different call, so they are a
+   * different map rather than a guess made at runtime.
+   */
+  selectFields?: Partial<Record<VaultField, string>>;
   /** Optional shipping-method select and the value to choose. */
   shipping?: { selector: string; value: string };
   /** Where the totals are read from. */
@@ -305,6 +314,15 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
         input.onStep?.(`type: ${field} into ${selector}`);
       }
 
+      for (const [field, selector] of Object.entries(map.selectFields ?? {}) as Array<
+        [VaultField, string]
+      >) {
+        input.signal?.throwIfAborted();
+        if (!held.has(field)) continue;
+        await page.select(selector, referenceFor(field));
+        input.onStep?.(`select: ${field} into ${selector}`);
+      }
+
       if (map.shipping) {
         await page.select(map.shipping.selector, map.shipping.value);
         input.onStep?.(`select: shipping ${map.shipping.value}`);
@@ -393,6 +411,12 @@ export class BrowserCheckoutAgent implements CheckoutAgent {
       for (const [field, selector] of Object.entries(map.fields) as Array<[VaultField, string]>) {
         if (!held.has(field)) continue;
         await page.type(selector, referenceFor(field));
+      }
+      for (const [field, selector] of Object.entries(map.selectFields ?? {}) as Array<
+        [VaultField, string]
+      >) {
+        if (!held.has(field)) continue;
+        await page.select(selector, referenceFor(field));
       }
       if (map.shipping) await page.select(map.shipping.selector, map.shipping.value);
       input.onStep?.('type: delivery details restored');

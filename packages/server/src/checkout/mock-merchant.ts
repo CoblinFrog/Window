@@ -28,7 +28,7 @@ export interface MockMerchant {
 
 export async function startMockMerchant(
   port = 0,
-  options: { disallowCheckout?: boolean } = {},
+  options: { disallowCheckout?: boolean; shopifyShaped?: boolean } = {},
 ): Promise<MockMerchant> {
   let placed = false;
 
@@ -76,7 +76,7 @@ export async function startMockMerchant(
     }
 
     res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(page(CHECKOUT));
+    res.end(page(options.shopifyShaped ? SHOPIFY_CHECKOUT : CHECKOUT));
   });
 
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
@@ -180,3 +180,74 @@ const CONFIRMATION = `
 <div class="card">
   <div>Thank you. Your order number is <strong id="order-number">NW-4417-2290</strong>.</div>
 </div>`;
+
+/**
+ * A Shopify-shaped checkout.
+ *
+ * Same field names, same totals attributes and the same pay-button id that
+ * Shopify's one-page checkout uses, so the Shopify field map can be tested
+ * without a store. This proves the *map* is well-formed and that the driver can
+ * drive that shape — it does not prove anything about Shopify's live DOM, which
+ * only a real store can.
+ */
+const SHOPIFY_CHECKOUT = `
+<h1>Northwind Supply</h1>
+<div class="muted">Shopify-shaped checkout fixture</div>
+
+<form method="POST" action="/place-order">
+  <div class="card">
+    <strong>Contact</strong>
+    <label for="s-email">Email</label>
+    <input id="s-email" name="email" autocomplete="email">
+  </div>
+
+  <div class="card">
+    <strong>Delivery</strong>
+    <div class="row">
+      <div>
+        <label for="s-first">First name</label>
+        <input id="s-first" name="firstName" autocomplete="given-name">
+      </div>
+      <div>
+        <label for="s-last">Last name</label>
+        <input id="s-last" name="lastName" autocomplete="family-name">
+      </div>
+    </div>
+
+    <label for="s-country">Country/Region</label>
+    <select id="s-country" name="countryCode">
+      <option value="US">United States</option>
+      <option value="CA">Canada</option>
+    </select>
+
+    <label for="s-a1">Address</label>
+    <input id="s-a1" name="address1" autocomplete="address-line1">
+    <label for="s-a2">Apartment, suite, etc. (optional)</label>
+    <input id="s-a2" name="address2" autocomplete="address-line2">
+
+    <div class="row">
+      <div><label for="s-city">City</label><input id="s-city" name="city"></div>
+      <div>
+        <label for="s-zone">State</label>
+        <select id="s-zone" name="zone">
+          <option value="WA">Washington</option>
+          <option value="CA">California</option>
+        </select>
+      </div>
+      <div><label for="s-zip">ZIP code</label><input id="s-zip" name="postalCode"></div>
+    </div>
+
+    <label for="s-phone">Phone</label>
+    <input id="s-phone" name="phone" autocomplete="tel">
+  </div>
+
+  <div class="card">
+    <div class="totals"><span>Subtotal</span><span data-checkout-subtotal-price-target>$64.00</span></div>
+    <div class="totals"><span>Shipping</span><span data-checkout-total-shipping-price-target>$0.00</span></div>
+    <div class="totals"><span>Tax</span><span data-checkout-tax-price-target>$5.44</span></div>
+    <div class="totals"><span>Discount</span><span data-checkout-discount-amount-target>-$6.40</span></div>
+    <div class="totals grand"><span>Total</span><span data-checkout-payment-due-target>$63.04</span></div>
+  </div>
+
+  <button type="submit" id="checkout-pay-button">Pay now</button>
+</form>`;

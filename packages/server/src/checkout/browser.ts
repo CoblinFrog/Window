@@ -150,8 +150,26 @@ class PlaywrightCheckoutPage implements CheckoutPage {
     await this.page.locator(selector).first().fill(value);
   }
 
+  /**
+   * Chooses an option, resolving a vault reference the same way `type` does.
+   *
+   * A country dropdown holds the user's data as surely as a text field, so it
+   * gets the same treatment: the plaintext exists for one call and is never
+   * returned. Matching is by value first and label second, because a country
+   * select stores `US` and displays `United States`.
+   */
   async select(selector: string, value: string): Promise<void> {
-    await this.page.locator(selector).first().selectOption(value);
+    const resolved = this.config.vault ? this.config.vault.resolve(value) : value;
+    if (resolved.includes('{{ref:')) {
+      throw new VaultViolation(
+        `Refusing to select an unresolved reference in "${selector}".`,
+      );
+    }
+
+    const option = this.page.locator(selector).first();
+    await option.selectOption({ value: resolved }).catch(async () => {
+      await option.selectOption({ label: resolved });
+    });
   }
 
   /**

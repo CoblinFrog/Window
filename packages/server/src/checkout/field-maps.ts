@@ -43,10 +43,71 @@ const MAPS: Record<string, FieldMap> = {
     },
     placeOrder: '#place-order',
   },
+
+  /**
+   * Shopify's one-page checkout.
+   *
+   * Written against the `name` attributes rather than ids or classes, because
+   * Shopify generates ids per render (`TextField12`) and themes rewrite
+   * classes, while the form field names are part of how the checkout submits
+   * and are stable across themes and stores.
+   *
+   * A store must permit `/checkouts/` in its own robots.txt for the agent to
+   * drive it. Shopify's default disallows it — see `robotsAllows` — so this map
+   * only ever applies to a store whose owner has opted in, which in practice
+   * means your own. That is the whole point: consent is a per-store fact, not
+   * something the map can assume on the store's behalf.
+   */
+  'shopify.checkout': {
+    checkoutPath: '/checkouts',
+    fields: {
+      'contact.email': 'input[name="email"]',
+      'ship.firstName': 'input[name="firstName"]',
+      'ship.lastName': 'input[name="lastName"]',
+      'ship.line1': 'input[name="address1"]',
+      'ship.line2': 'input[name="address2"]',
+      'ship.city': 'input[name="city"]',
+      'ship.postal': 'input[name="postalCode"]',
+      'ship.phone': 'input[name="phone"]',
+    },
+    // Country and state are dropdowns. `ship.country` holds an ISO code and
+    // `ship.region` a state code, which is what Shopify's option values use.
+    selectFields: {
+      'ship.country': 'select[name="countryCode"]',
+      'ship.region': 'select[name="zone"]',
+    },
+    totals: {
+      subtotal: '[data-checkout-subtotal-price-target]',
+      shipping: '[data-checkout-total-shipping-price-target]',
+      tax: '[data-checkout-tax-price-target]',
+      discount: '[data-checkout-discount-amount-target]',
+      total: '[data-checkout-payment-due-target]',
+    },
+    placeOrder: '#checkout-pay-button',
+  },
 };
 
+/**
+ * Stores that run Shopify's checkout, pointed at the shared map.
+ *
+ * Add a domain here once its robots.txt permits `/checkouts/`. Nothing else is
+ * needed: the selectors are identical across Shopify stores, which is the
+ * reason one map covers a million merchants and the reason this list is the
+ * only thing that changes per store.
+ */
+const SHOPIFY_STORES = (process.env.SHOPIFY_CHECKOUT_DOMAINS ?? '')
+  .split(',')
+  .map((entry) => entry.trim().toLowerCase())
+  .filter((entry) => entry.length > 0);
+
 export function fieldMapFor(merchantDomain: string): FieldMap | null {
-  return MAPS[merchantDomain] ?? null;
+  const direct = MAPS[merchantDomain];
+  if (direct) return direct;
+
+  if (SHOPIFY_STORES.includes(merchantDomain.toLowerCase())) {
+    return MAPS['shopify.checkout'] ?? null;
+  }
+  return null;
 }
 
 /** Where a mapped merchant is actually reached. */

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { PlaywrightCheckoutBrowser, RobotsDisallowed } from './browser.js';
 import { startMockMerchant, type MockMerchant } from './mock-merchant.js';
-import { VaultHandle, VaultViolation, referenceFor, scrubValues } from './vault.js';
+import { VAULT_FIELDS, VaultHandle, VaultViolation, referenceFor, scrubValues } from './vault.js';
 import type { CheckoutPage } from './agent.js';
 
 /**
@@ -280,5 +280,35 @@ describe('vault', () => {
     vault.dispose();
     // A job that has ended cannot have its details read back out of memory.
     assert.throws(() => vault.resolve(referenceFor('ship.line1')), /disposed/);
+  });
+});
+
+describe('vault reference pattern', () => {
+  it('resolves every field name the vault can hold', () => {
+    // Field names contain digits (`line1`) and capitals (`firstName`). The
+    // pattern has silently failed on both; an unmatched reference is typed
+    // into the merchant's form verbatim, so this walks the whole set.
+    const vault = new VaultHandle(FAKE);
+    try {
+      for (const field of VAULT_FIELDS) {
+        const resolved = vault.resolve(referenceFor(field));
+        assert.ok(
+          !resolved.includes('{{ref:'),
+          `${field} must resolve, not pass through as a literal`,
+        );
+      }
+    } finally {
+      vault.dispose();
+    }
+  });
+
+  it('derives first and last name from a single display name', () => {
+    const vault = new VaultHandle(FAKE);
+    try {
+      assert.equal(vault.resolve(referenceFor('ship.firstName')), 'Dale');
+      assert.equal(vault.resolve(referenceFor('ship.lastName')), 'Cooper');
+    } finally {
+      vault.dispose();
+    }
   });
 });

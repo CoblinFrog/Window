@@ -8,6 +8,8 @@ import { fixtureProduct, fixtureSource } from './repository.conformance.js';
 import { PlaywrightCheckoutBrowser } from './browser.js';
 import { startMockMerchant, type MockMerchant } from './mock-merchant.js';
 import { BrowserCheckoutAgent, type FieldMap } from './agent.js';
+import { fieldMapFor } from './field-maps.js';
+import { referenceFor } from './vault.js';
 import { SimulatedPaymentRail } from './payments.js';
 import { VaultHandle } from './vault.js';
 import type { Cart } from './repository.js';
@@ -219,6 +221,107 @@ describe('checkout button → browser agent', () => {
       assert.equal(local.orderPlaced(), false);
     } finally {
       await local.close();
+    }
+  });
+});
+
+/**
+ * The Shopify field map, against a Shopify-shaped page.
+ *
+ * This proves the map is well-formed and that the driver can drive that shape:
+ * split names, `<select>` country and state, Shopify's totals attributes and
+ * its pay-button id. It proves nothing about Shopify's live DOM — only a real
+ * store can do that, and this is what makes the difference between the two
+ * clear rather than assumed.
+ */
+describe('shopify field map', () => {
+  let merchant: MockMerchant;
+  let browser: PlaywrightCheckoutBrowser;
+  let vault: VaultHandle;
+
+  before(async () => {
+    merchant = await startMockMerchant(0, { shopifyShaped: true });
+    browser = new PlaywrightCheckoutBrowser({ headless: true, allowUncheckedHosts: true });
+    vault = new VaultHandle(FAKE);
+  });
+
+  after(async () => {
+    vault.dispose();
+    await browser.close();
+    await merchant.close();
+  });
+
+  it('fills a Shopify-shaped checkout and reads its totals', async () => {
+    const map = fieldMapFor('shopify.checkout');
+    assert.ok(map, 'the shared Shopify map must exist');
+
+    const agent = new BrowserCheckoutAgent(browser, {
+      fieldMapFor: () => map,
+      vault,
+      originFor: () => merchant.origin,
+    });
+
+    const quote = await agent.quote({
+      session: { jobId: 'job_shopify', merchantDomain: 'shopify.checkout', toolCalls: [], screenshots: [] },
+      merchantDomain: 'shopify.checkout',
+      items: [
+        {
+          productId: 'p1',
+          title: 'Field Notebook',
+          url: merchant.origin,
+          variant: {},
+          quantity: 1,
+          expectedUnitPrice: 6400,
+          currency: 'USD',
+        },
+      ],
+      coupons: [],
+      allowStacking: false,
+    });
+
+    // Read off the fixture's own totals, in minor units.
+    assert.equal(quote.subtotal, 6400);
+    assert.equal(quote.tax, 544);
+    assert.equal(quote.discount, 640);
+    assert.equal(quote.total, 6304);
+    assert.equal(merchant.orderPlaced(), false, 'quoting must place nothing');
+  });
+
+  it('splits a single display name across first and last name fields', async () => {
+    const page = await browser.newContext({
+      merchantDomain: 'shopify.checkout',
+      sessionHandle: null,
+      vault,
+    });
+    try {
+      await page.navigate(`${merchant.origin}/checkouts`);
+      await page.type('input[name="firstName"]', referenceFor('ship.firstName'));
+      await page.type('input[name="lastName"]', referenceFor('ship.lastName'));
+
+      assert.ok(await page.isFilledWith('input[name="firstName"]', referenceFor('ship.firstName')));
+      assert.ok(await page.isFilledWith('input[name="lastName"]', referenceFor('ship.lastName')));
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('chooses country and state from their dropdowns', async () => {
+    const page = await browser.newContext({
+      merchantDomain: 'shopify.checkout',
+      sessionHandle: null,
+      vault,
+    });
+    try {
+      await page.navigate(`${merchant.origin}/checkouts`);
+      // Typing into a <select> silently does nothing and the parcel goes to the
+      // default country, so these must go through selectOption.
+      await page.select('select[name="countryCode"]', referenceFor('ship.country'));
+      await page.select('select[name="zone"]', referenceFor('ship.region'));
+
+      assert.ok(await page.isFilledWith('select[name="countryCode"]', referenceFor('ship.country')));
+      assert.ok(await page.isFilledWith('select[name="zone"]', referenceFor('ship.region')));
+    } finally {
+      await page.close();
     }
   });
 });

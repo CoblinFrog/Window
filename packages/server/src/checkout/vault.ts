@@ -26,6 +26,16 @@ const log = logger.child('checkout.vault');
 /** A field the agent may ask to be typed, by name only. */
 export type VaultField =
   | 'ship.name'
+  /**
+   * Split name parts.
+   *
+   * Most real checkouts ask for given and family names separately — Shopify,
+   * Stripe and every carrier label do — so holding only a single display name
+   * means guessing at the split inside the driver, on a field that goes on a
+   * parcel. They are derived once, here, where the derivation is visible.
+   */
+  | 'ship.firstName'
+  | 'ship.lastName'
   | 'ship.line1'
   | 'ship.line2'
   | 'ship.city'
@@ -37,6 +47,8 @@ export type VaultField =
 
 export const VAULT_FIELDS: readonly VaultField[] = [
   'ship.name',
+  'ship.firstName',
+  'ship.lastName',
   'ship.line1',
   'ship.line2',
   'ship.city',
@@ -57,7 +69,11 @@ export const VAULT_FIELDS: readonly VaultField[] = [
  * class gets wrong quietly.
  */
 function referencePattern(): RegExp {
-  return /\{\{ref:([a-z0-9._-]+)\}\}/g;
+  // The class covers every character a field name may contain: digits for
+  // `line1`, capitals for `firstName`. It has been wrong about both, in the
+  // same silent way — an unmatched reference is not an error, it is a literal
+  // `{{ref:...}}` typed into a merchant's form.
+  return /\{\{ref:([A-Za-z0-9._-]+)\}\}/g;
 }
 
 export function referenceFor(field: VaultField): string {
@@ -70,7 +86,10 @@ export function isReference(text: string): boolean {
 }
 
 export interface ShippingDetails {
+  /** Full display name. `firstName`/`lastName` are derived when not supplied. */
   name: string;
+  firstName?: string;
+  lastName?: string;
   line1: string;
   line2?: string;
   city: string;
@@ -98,6 +117,15 @@ export class VaultHandle {
 
   constructor(details: ShippingDetails) {
     this.put('ship.name', details.name);
+
+    // A single space is a poor name parser and a good default: everything
+    // before the last space is given names, the remainder is the family name.
+    // A user who supplies the parts explicitly overrides it, which is the only
+    // way to be right about names in general.
+    const trimmed = details.name.trim();
+    const cut = trimmed.lastIndexOf(' ');
+    this.put('ship.firstName', details.firstName ?? (cut > 0 ? trimmed.slice(0, cut) : trimmed));
+    this.put('ship.lastName', details.lastName ?? (cut > 0 ? trimmed.slice(cut + 1) : ''));
     this.put('ship.line1', details.line1);
     if (details.line2) this.put('ship.line2', details.line2);
     this.put('ship.city', details.city);
