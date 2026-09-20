@@ -1,0 +1,83 @@
+{
+  "jobId": "job_3d91c818-4c82-4162",
+  "orderId": "9a86d179-4cc6-416a-81f1-e914ef4798b6",
+  "userId": "507f1f77bcf86cd799439011",
+  "merchantDomain": "shop.test",
+  "phase": "placement",
+  "writtenAt": "2026-09-19T22:24:35.968Z",
+  "quote": {
+    "subtotal": 1000,
+    "shipping": 599,
+    "tax": 88,
+    "discount": 0,
+    "total": 1687,
+    "currency": "USD",
+    "generatedAt": "2026-09-19T22:24:35.968Z",
+    "expiresAt": "2026-09-19T22:34:35.968Z",
+    "hash": "9db5f72e24baac1d65a6408cdeedf457dd27577ab4dc6b8262c3769de2b79a63"
+  },
+  "authorization": {
+    "authorizedAt": "2026-09-19T22:24:35.968Z",
+    "userAgentHash": "9f86d081884c7d659a2feaa0c55ad015",
+    "quoteHash": "9db5f72e24baac1d65a6408cdeedf457dd27577ab4dc6b8262c3769de2b79a63"
+  },
+  "toolCalls": [
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/cart"
+      },
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "cart opened"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "[data-add=\"prod_1\"]"
+      },
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "added Keyboard"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "job-job_3d91c818-4c82-4162-quote-de59a559"
+    },
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/checkout"
+      },
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "checkout opened"
+    },
+    {
+      "tool": "type",
+      "args": {
+        "selector": "#payment",
+        "text": "<redacted:16>"
+      },
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "payment method attached"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "#place-order"
+      },
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "order submitted"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-19T22:24:35.968Z",
+      "result": "job-job_3d91c818-4c82-4162-placed-b3eb908f"
+    }
+  ],
+  "screenshots": [
+    "job-job_3d91c818-4c82-4162-quote-de59a559",
+    "job-job_3d91c818-4c82-4162-placed-b3eb908f"
+  ]
+}

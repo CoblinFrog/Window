@@ -1,0 +1,83 @@
+{
+  "jobId": "job_247a27af-e802-4241",
+  "orderId": "3ffbe025-7c80-4eb9-8182-a03c1d58b9ac",
+  "userId": "507f1f77bcf86cd799439011",
+  "merchantDomain": "shop.test",
+  "phase": "placement",
+  "writtenAt": "2026-09-20T00:45:47.214Z",
+  "quote": {
+    "subtotal": 1000,
+    "shipping": 599,
+    "tax": 88,
+    "discount": 0,
+    "total": 1687,
+    "currency": "USD",
+    "generatedAt": "2026-09-20T00:45:47.212Z",
+    "expiresAt": "2026-09-20T00:55:47.212Z",
+    "hash": "d4e6f6cc9ad30f0315e47e3f28fa4e1276dd89f1eb401de548e3688e536f0aed"
+  },
+  "authorization": {
+    "authorizedAt": "2026-09-20T00:45:47.213Z",
+    "userAgentHash": "9f86d081884c7d659a2feaa0c55ad015",
+    "quoteHash": "d4e6f6cc9ad30f0315e47e3f28fa4e1276dd89f1eb401de548e3688e536f0aed"
+  },
+  "toolCalls": [
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/cart"
+      },
+      "at": "2026-09-20T00:45:47.212Z",
+      "result": "cart opened"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "[data-add=\"prod_1\"]"
+      },
+      "at": "2026-09-20T00:45:47.212Z",
+      "result": "added Keyboard"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-20T00:45:47.212Z",
+      "result": "job-job_247a27af-e802-4241-quote-8087b0a5"
+    },
+    {
+      "tool": "navigate",
+      "args": {
+        "url": "https://shop.test/checkout"
+      },
+      "at": "2026-09-20T00:45:47.214Z",
+      "result": "checkout opened"
+    },
+    {
+      "tool": "type",
+      "args": {
+        "selector": "#payment",
+        "text": "<redacted:16>"
+      },
+      "at": "2026-09-20T00:45:47.214Z",
+      "result": "payment method attached"
+    },
+    {
+      "tool": "click",
+      "args": {
+        "selector": "#place-order"
+      },
+      "at": "2026-09-20T00:45:47.214Z",
+      "result": "order submitted"
+    },
+    {
+      "tool": "screenshot",
+      "args": {},
+      "at": "2026-09-20T00:45:47.214Z",
+      "result": "job-job_247a27af-e802-4241-placed-68e7cfd9"
+    }
+  ],
+  "screenshots": [
+    "job-job_247a27af-e802-4241-quote-8087b0a5",
+    "job-job_247a27af-e802-4241-placed-68e7cfd9"
+  ]
+}

@@ -9,6 +9,7 @@ import type { CollectionSet, User } from '../db/supabase-collections.js';
 import { findOne, insert, updateOne } from '../db/supabase-helpers.js';
 import { createBloom, serializeBloom } from '../lib/bloom.js';
 import { requireSecret } from '../config/secrets.js';
+import { env } from '../config/env.js';
 
 /**
  * Identity.
@@ -226,8 +227,17 @@ export async function revokeSessions(collections: CollectionSet, userId: string)
   return next;
 }
 
-/** Anonymous principals cannot place orders or link merchant accounts. */
+/**
+ * Anonymous principals cannot place orders or link merchant accounts.
+ *
+ * Unless `CHECKOUT_REQUIRES_ACCOUNT=false`, which a demo on the simulated rail
+ * may set: there is no charge and no person to charge, so the sign-in step buys
+ * nothing. The flag is refused in production, where both of those stop being
+ * true. It does not weaken identity — claiming an account still needs a
+ * verified email, and a client still cannot assert who it is.
+ */
 export function requireAuthenticated(principal: Principal, action: string): void {
+  if (!env.checkoutRequiresAccount) return;
   if (principal.isAnonymous) throw ApiError.anonymousNotAllowed(action);
 }
 

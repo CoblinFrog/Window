@@ -110,6 +110,21 @@ export const env = {
   /** Headful, for watching a checkout run during development. */
   checkoutHeadful: bool('CHECKOUT_HEADFUL', false),
 
+  /**
+   * Whether placing an order requires a claimed account.
+   *
+   * On by default, and not negotiable in production: an order is a charge
+   * against a person, and an unverified identity cannot be one. A demo running
+   * entirely on the simulated rail moves no money and has no such person, so it
+   * may turn this off to skip the sign-in step.
+   *
+   * This is a policy about who may transact. It is not the identity check —
+   * claiming an account still requires a verified email either way, and a
+   * client still cannot assert who it is.
+   */
+  checkoutRequiresAccount:
+    bool('CHECKOUT_REQUIRES_ACCOUNT', true) || str('NODE_ENV', 'development') === 'production',
+
   /** Simulated merchant latency for the checkout agent, in milliseconds. */
   agentStepDelayMs: int('AGENT_STEP_DELAY_MS', 120),
 

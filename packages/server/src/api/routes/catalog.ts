@@ -288,7 +288,14 @@ export function catalogRoutes(ctx: AppContext): Router {
       const [items, total, cluster] = await Promise.all([
         find(collections.reviews, filter, { skip: offset, limit, orderBy: sortSpec }),
         count(collections.reviews, filter),
-        findOne(collections.clusters, { id }, { select: 'reviews.asOf' }),
+        // The whole `reviews` column: it is jsonb, and PostgREST does not read
+        // a dotted path in `select` — asking for `reviews.asOf` returns a row
+        // without it, which then reads as undefined.
+        findOne<{ reviews?: { asOf?: Date | string | null } }>(
+          collections.clusters,
+          { id },
+          { select: 'reviews' },
+        ),
       ]);
 
       const response: ReviewsResponse = {
@@ -310,7 +317,10 @@ export function catalogRoutes(ctx: AppContext): Router {
         })),
         total,
         nextOffset: offset + items.length < total ? offset + items.length : null,
-        asOf: cluster?.reviews.asOf ? cluster.reviews.asOf.toISOString() : null,
+        // Guarded at every step: a cluster with no reviews yet is an ordinary
+        // state, not a 500. The optional chain stopped at `cluster`, so a row
+        // that existed without a reviews block crashed the request.
+        asOf: toIsoOrNull(cluster?.reviews?.asOf),
       };
       res.json(response);
     } catch (error) {
@@ -433,4 +443,10 @@ export function catalogRoutes(ctx: AppContext): Router {
   });
 
   return router;
+}
+
+/** A date that may arrive as a `Date`, an ISO string, or not at all. */
+function toIsoOrNull(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }

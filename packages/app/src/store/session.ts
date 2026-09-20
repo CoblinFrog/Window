@@ -76,6 +76,8 @@ export interface SessionState {
   deviceUserId: string | null;
   userId: string | null;
   isAnonymous: boolean;
+  /** Mirrors the server's policy on whether ordering needs an account. */
+  requiresAccount: boolean;
   onboarded: boolean;
   session: FeedSessionResponse | null;
   error: string | null;
@@ -99,6 +101,7 @@ export const useSession = create<SessionState>((set, get) => ({
   deviceUserId: null,
   userId: null,
   isAnonymous: true,
+  requiresAccount: true,
   onboarded: false,
   session: null,
   error: null,
@@ -133,6 +136,7 @@ export const useSession = create<SessionState>((set, get) => ({
         deviceUserId: bootstrap.deviceUserId,
         userId: bootstrap.userId,
         isAnonymous: bootstrap.isAnonymous,
+        requiresAccount: bootstrap.requiresAccount ?? true,
         onboarded: bootstrap.onboarded,
         session,
       });

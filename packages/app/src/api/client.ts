@@ -150,6 +150,8 @@ export interface DeviceBootstrap {
   deviceUserId: string;
   userId: string;
   isAnonymous: boolean;
+  /** Whether this deployment requires a claimed account to place orders. */
+  requiresAccount?: boolean;
   onboarded: boolean;
 }
 

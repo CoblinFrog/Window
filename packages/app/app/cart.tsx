@@ -138,7 +138,10 @@ export default function CartScreen(): React.ReactElement {
   // with "an anonymous principal cannot place orders" — which is true, and
   // useless to the person reading it — the button says what it needs and goes
   // and gets it.
-  const needsAccount = session.isAnonymous;
+  // Mirrors the server's policy. `session.requiresAccount` comes from the
+  // bootstrap response, so a demo running without the requirement does not send
+  // the user to a sign-in screen the server will not ask for.
+  const needsAccount = session.isAnonymous && session.requiresAccount;
 
   const openBid = useCallback(() => {
     if (auctionBlock?.sourceUrl) void Linking.openURL(auctionBlock.sourceUrl);

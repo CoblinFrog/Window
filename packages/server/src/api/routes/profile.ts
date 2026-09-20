@@ -642,6 +642,8 @@ export function authRoutes(ctx: AppContext): Router {
         deviceUserId: user.deviceUserId,
         userId: user.id,
         isAnonymous: principal.isAnonymous,
+        /** Whether this deployment requires a claimed account to order. */
+        requiresAccount: env.checkoutRequiresAccount,
         onboarded: user.onboarding !== null,
       });
     } catch (error) {
