@@ -85,7 +85,17 @@ export function pickToCard(pick: ChatPickResponse): ProductCard {
       // is none behind a pick, and inventing one would be worse than silence.
       caution: null,
     },
-    media: { hero: heroFrom(pick.imageUrl), galleryCount: pick.imageUrl === null ? 0 : 1, gallery: [], video: null },
+    media: {
+      hero: heroFrom(pick.imageUrl),
+      // Zero, not one. `galleryCount` counts the images *besides* the hero —
+      // the feed draws `1 + galleryCount` ticks — so counting the hero here
+      // put two ticks on a pick that has exactly one photograph. A search card
+      // ships that one image and nothing else, and a single-image listing is
+      // meant to show no indicator at all.
+      galleryCount: 0,
+      gallery: [],
+      video: null,
+    },
     reviews: { count: pick.reviewCount ?? 0, meanRating: pick.rating },
     upvotes: 0,
     otherOffers: null,

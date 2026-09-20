@@ -54,6 +54,17 @@ describe('pickToCard', () => {
     assert.equal(card.media.video, null);
   });
 
+  it('counts one photograph, so the feed draws no gallery indicator', () => {
+    // `galleryCount` is the images BESIDES the hero, and the feed renders
+    // `1 + galleryCount` ticks. Counting the hero here showed two ticks on a
+    // pick that has exactly one picture.
+    const card = pickToCard(pick());
+    assert.equal(card.media.galleryCount, 0);
+    assert.equal(card.media.gallery.length, 0);
+    // What PaneView's galleryLength() computes, and its no-indicator rule.
+    assert.equal(Math.max(1 + card.media.gallery.length, 1 + card.media.galleryCount), 1);
+  });
+
   it('never claims free shipping it cannot verify', () => {
     // The search card says nothing about shipping, and this is the one wrong
     // guess here that would cost the shopper money.
