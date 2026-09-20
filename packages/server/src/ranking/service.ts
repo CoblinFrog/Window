@@ -1,4 +1,3 @@
-import { ObjectId } from 'mongodb';
 import {
   DEFAULT_RANKING_CONFIG,
   L1_IDS,
@@ -9,7 +8,8 @@ import {
   type RankingDebugCandidate,
   type RankingDebugResponse,
 } from '@window/shared';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
+import { find, findOne } from '../db/supabase-helpers.js';
 import { bloomHas, deserializeBloom } from '../lib/bloom.js';
 import { logger } from '../lib/logger.js';
 import type { VectorCandidate, VectorSearch } from '../vector/types.js';
@@ -69,7 +69,7 @@ export interface RankingDeps {
  */
 export class RankingService {
   private config: RankingConfig;
-  private categoryCache: Map<string, CategoryDoc<ObjectId>> | null = null;
+  private categoryCache: Map<string, CategoryDoc<string>> | null = null;
   private categoryCacheAt = 0;
 
   constructor(private readonly deps: RankingDeps) {
@@ -86,15 +86,15 @@ export class RankingService {
     return this.config;
   }
 
-  private async categories(): Promise<Map<string, CategoryDoc<ObjectId>>> {
+  private async categories(): Promise<Map<string, CategoryDoc<string>>> {
     // The taxonomy changes nightly at most; re-reading 1,638 documents on every
     // feed page would be the single largest cost in the pipeline.
     const ttlMs = 60_000;
     if (this.categoryCache && Date.now() - this.categoryCacheAt < ttlMs) {
       return this.categoryCache;
     }
-    const docs = await this.deps.collections.categories.find({}).toArray();
-    this.categoryCache = new Map(docs.map((d) => [d._id, d]));
+    const docs = await find(this.deps.collections.categories, {});
+    this.categoryCache = new Map(docs.map((d) => [d.id, d]));
     this.categoryCacheAt = Date.now();
     return this.categoryCache;
   }
@@ -118,7 +118,7 @@ export class RankingService {
     // Seeded per session so a retry of the same page is stable, which matters
     // because the client may re-request after a 429.
     const explorationRandom = seededRandom(
-      `${user._id.toHexString()}:${request.sessionId}:${request.seenIds.length}:explore`,
+      `${user.id}:${request.sessionId}:${request.seenIds.length}:explore`,
     );
 
     const injects = request.injectExploration !== false;
@@ -169,7 +169,7 @@ export class RankingService {
         priceMax: bounds.max,
         excludeIds: [
           ...suppressed.products,
-          ...request.seenIds.filter(ObjectId.isValid).map((id) => new ObjectId(id)),
+          ...request.seenIds,
         ],
         excludeBrands: suppressed.brands,
         excludeSellerIds: suppressed.sellers,
@@ -192,7 +192,7 @@ export class RankingService {
     const seen = deserializeBloom(user.seenFilter);
     const eligible: VectorCandidate[] = [];
     for (const candidate of candidates) {
-      if (bloomHas(seen, candidate._id.toHexString())) {
+      if (bloomHas(seen, candidate.id)) {
         filteredBy.seen_bloom = (filteredBy.seen_bloom as number) + 1;
         continue;
       }
@@ -257,7 +257,7 @@ export class RankingService {
       for (const position of [...slotPositions].reverse()) {
         const card = await this.explorationCard(explorationTopic, user, now, placed);
         if (!card) continue;
-        placed.add(card._id.toHexString());
+        placed.add(card.id);
 
         const index = Math.min(position, items.length);
         items = [...items.slice(0, index), card, ...items.slice(index)];
@@ -311,23 +311,24 @@ export class RankingService {
     exclude: ReadonlySet<string> = new Set(),
   ): Promise<VectorCandidate | null> {
     const seen = deserializeBloom(user.seenFilter);
-    const docs = await this.deps.collections.products
-      .find({
+    const docs = await find(
+      this.deps.collections.products,
+      {
         'category.l1': topic,
         status: 'active',
         'stock.inStock': true,
         'risk.tier': { $in: ['clear', 'watch'] },
-        _id: { $nin: user.suppressions.products },
-      })
-      .sort({ 'quality.score': -1, 'engagement.ctrSmoothed': -1 })
-      // Deep enough that a returning user does not exhaust the topic's best
-      // products and start silently getting no exploration card at all.
-      .limit(120)
-      .toArray();
+        id: { $nin: user.suppressions.products },
+      },
+      {
+        limit: 120,
+        orderBy: [{ column: 'quality.score', ascending: false }, { column: 'engagement.ctrSmoothed', ascending: false }],
+      },
+    );
 
     for (const doc of docs) {
-      if (exclude.has(doc._id.toHexString())) continue;
-      if (bloomHas(seen, doc._id.toHexString())) continue;
+      if (exclude.has(doc.id)) continue;
+      if (bloomHas(seen, doc.id)) continue;
       if (doc.auction && doc.auction.endsAt.getTime() <= now.getTime()) continue;
       return { ...(doc as unknown as VectorCandidate), vectorScore: 0.5 };
     }
@@ -343,9 +344,9 @@ export class RankingService {
     timings: Record<string, number>,
     filteredBy: Record<string, number>,
   ): RankingDebugResponse {
-    const selectedIds = new Set(selection.selected.map((c) => c._id.toHexString()));
+    const selectedIds = new Set(selection.selected.map((c) => c.id));
     const candidates: RankingDebugCandidate[] = eligible.slice(0, 200).map((candidate) => {
-      const key = candidate._id.toHexString();
+      const key = candidate.id;
       const breakdown = selection.breakdowns.get(key);
       return {
         productId: key,
@@ -365,7 +366,7 @@ export class RankingService {
     });
 
     return {
-      userId: request.user._id.toHexString(),
+      userId: request.user.id,
       mode: request.mode,
       rankingConfigVersion: this.config.version,
       stages: {

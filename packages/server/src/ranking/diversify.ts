@@ -52,14 +52,14 @@ export function selectPage(
   const lambda = config.diversification.lambda;
 
   const remaining = new Map<string, VectorCandidate>();
-  for (const candidate of candidates) remaining.set(candidate._id.toHexString(), candidate);
+  for (const candidate of candidates) remaining.set(candidate.id, candidate);
 
   // The terms that do not depend on what has already been placed are computed
   // once; only the penalty is recomputed as the page fills.
   const staticScores = new Map<string, ScoreBreakdown>();
   for (const candidate of candidates) {
     staticScores.set(
-      candidate._id.toHexString(),
+      candidate.id,
       scoreCandidate(candidate, context, { placed: [], config }, stalenessCeilingMs),
     );
   }
@@ -70,7 +70,7 @@ export function selectPage(
   while (selected.length < count && remaining.size > 0) {
     const slice = [...remaining.values()]
       .map((candidate) => {
-        const key = candidate._id.toHexString();
+        const key = candidate.id;
         const base = staticScores.get(key) as ScoreBreakdown;
         const redundancy =
           selected.length === 0
@@ -164,8 +164,8 @@ function enforceDiversityGuardrail(
       .filter((c) => !present.has(c.category.l2))
       .sort(
         (a, b) =>
-          ((staticScores.get(b._id.toHexString()) as ScoreBreakdown).score) -
-          ((staticScores.get(a._id.toHexString()) as ScoreBreakdown).score),
+          ((staticScores.get(b.id) as ScoreBreakdown).score) -
+          ((staticScores.get(a.id) as ScoreBreakdown).score),
       )[0];
     if (!novel) break;
 
@@ -180,7 +180,7 @@ function enforceDiversityGuardrail(
     for (let i = 0; i < selected.length; i++) {
       const candidate = selected[i] as VectorCandidate;
       if (candidate.category.l2 !== crowded) continue;
-      const score = (staticScores.get(candidate._id.toHexString()) as ScoreBreakdown).score;
+      const score = (staticScores.get(candidate.id) as ScoreBreakdown).score;
       if (score < worstScore) {
         worstScore = score;
         worstIndex = i;
@@ -189,10 +189,10 @@ function enforceDiversityGuardrail(
     if (worstIndex === -1) break;
 
     const displaced = selected[worstIndex] as VectorCandidate;
-    breakdowns.delete(displaced._id.toHexString());
+    breakdowns.delete(displaced.id);
     selected[worstIndex] = novel;
-    const base = staticScores.get(novel._id.toHexString()) as ScoreBreakdown;
-    breakdowns.set(novel._id.toHexString(), {
+    const base = staticScores.get(novel.id) as ScoreBreakdown;
+    breakdowns.set(novel.id, {
       ...base,
       mmrScore: base.score,
       reason: 'diversity_guardrail',

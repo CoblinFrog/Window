@@ -153,7 +153,7 @@ export class Tier3BrowserAdapter implements SourceAdapter {
   private readonly config: Tier3Config;
 
   constructor(private readonly source: SourceDoc<string>, deps: Tier3Deps = {}) {
-    this.domain = source._id;
+    this.domain = source.id;
     this.driver = deps.driver ?? null;
     this.vision = deps.vision ?? null;
     this.now = deps.now ?? (() => new Date());

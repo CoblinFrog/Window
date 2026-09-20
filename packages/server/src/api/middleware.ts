@@ -4,8 +4,9 @@ import { ApiError, RATE_LIMITS } from '@window/shared';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
 import { resolveDeviceUser, verifyToken, type Principal } from './auth.js';
+import { findOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('api');
 
@@ -76,7 +77,7 @@ export function authenticate(collections: CollectionSet) {
         throw ApiError.unauthorized('Expected "Authorization: Bearer <token>".');
       }
       const principal = verifyToken(raw);
-      const user = await collections.users.findOne({ _id: principal.userId });
+      const user = await findOne(collections.users, { id: principal.userId });
       if (!user) {
         // The token is well-formed but its user is gone: an account deleted
         // while a client still holds a token. Treated as unauthenticated rather
@@ -84,7 +85,7 @@ export function authenticate(collections: CollectionSet) {
         throw ApiError.unauthorized('This identity no longer exists.');
       }
       req.principal = principal;
-      req.currentUser = user;
+      req.currentUser = user as User;
       next();
     } catch (error) {
       next(error);
@@ -101,7 +102,7 @@ export async function bootstrapDevice(
   return {
     user,
     principal: {
-      userId: user._id,
+      userId: user.id,
       deviceUserId,
       isAnonymous: user.auth === null,
     },
@@ -126,7 +127,7 @@ export function rateLimit(cache: KeyValueCache, bucket: RateLimitBucket) {
   const { limit, windowMs } = BUCKETS[bucket];
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const principal = req.principal?.userId.toHexString() ?? req.ip ?? 'anonymous';
+      const principal = req.principal?.userId ?? req.ip ?? 'anonymous';
       const key = cacheKeys.rateLimit(principal, bucket);
       const { count, resetAt } = await cache.incr(key, windowMs);
 

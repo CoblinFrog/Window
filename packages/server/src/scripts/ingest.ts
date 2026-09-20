@@ -1,4 +1,3 @@
-import { ObjectId, type AnyBulkWriteOperation } from 'mongodb';
 import {
   QUALITY_WEIGHTS,
   clamp,
@@ -10,9 +9,8 @@ import {
   type SourceDoc,
 } from '@window/shared';
 import { env } from '../config/env.js';
-import { connectDatabase } from '../db/client.js';
-import type { Category, Product } from '../db/collections.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { connectDatabase } from '../db/supabase-client.js';
+import type { Category, Product } from '../db/supabase-collections.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
@@ -25,6 +23,7 @@ import {
 } from '../ingestion/shopify.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline } from '../media/pipeline.js';
+import { count, deleteMany, find, updateOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('ingest');
 
@@ -100,49 +99,44 @@ async function main(): Promise<void> {
   const now = new Date();
   const db = await connectDatabase();
   const { collections } = db;
-  await ensureIndexes(db.db);
 
   if (options.fresh) {
     // Only the real listings are cleared; the synthetic catalog is left alone
     // so the two can coexist and be compared.
     const domains = STORES.map((s) => s.domain);
-    const removed = await collections.products.deleteMany({ 'source.domain': { $in: domains } });
-    log.info('cleared previous real listings', { removed: removed.deletedCount });
+    const removed = await deleteMany(collections.products, { 'source.domain': { $in: domains } });
+    log.info('cleared previous real listings', { removed: removed.length });
   }
 
   // Each storefront is registered as a tier-2 source so the crawl control plane
   // and the merchant name on every card have something real to point at.
-  await collections.sources.bulkWrite(
-    options.stores.map((store) => {
-      const source: SourceDoc<string> = {
-        _id: store.domain,
-        displayName: store.displayName,
-        tier: 2,
-        sourceType: 'new',
-        crawlPolicy: {
-          rps: options.requestsPerSecond,
-          concurrency: 1,
-          allowedHours: [0, 24],
-          proxyPool: 'none',
-          backoff: 'exponential',
-        },
-        stalenessCeilingHours: 12,
-        extractors: { listing: 'shopify:products.json', detail: 'shopify:products.json' },
-        health: { errorRate: 0, circuitOpen: false, circuitOpenedAt: null, lastSuccessAt: null, window: [] },
-        checkout: {
-          supported: true,
-          guestCheckout: true,
-          blocksAgents: false,
-          protocol: null,
-          stackableCoupons: false,
-        },
-        status: 'active',
-      };
-      return {
-        updateOne: { filter: { _id: store.domain }, update: { $set: source as never }, upsert: true },
-      };
-    }),
-  );
+  for (const store of options.stores) {
+    const source: SourceDoc<string> = {
+      id: store.domain,
+      displayName: store.displayName,
+      tier: 2,
+      sourceType: 'new',
+      crawlPolicy: {
+        rps: options.requestsPerSecond,
+        concurrency: 1,
+        allowedHours: [0, 24],
+        proxyPool: 'none',
+        backoff: 'exponential',
+      },
+      stalenessCeilingHours: 12,
+      extractors: { listing: 'shopify:products.json', detail: 'shopify:products.json' },
+      health: { errorRate: 0, circuitOpen: false, circuitOpenedAt: null, lastSuccessAt: null, window: [] },
+      checkout: {
+        supported: true,
+        guestCheckout: true,
+        blocksAgents: false,
+        protocol: null,
+        stackableCoupons: false,
+      },
+      status: 'active',
+    };
+    await updateOne(collections.sources, { id: store.domain }, source);
+  }
 
   const embedder = localEmbeddingProvider();
   const classifier = new CategoryClassifier(embedder);
@@ -152,9 +146,8 @@ async function main(): Promise<void> {
   // gathered as we go. A brand is never guessed, so a vendor string only
   // becomes a brand once a store has asserted it.
   const brands = new Set<string>();
-  for (const product of await collections.products
-    .find({ brand: { $ne: null } }, { projection: { brand: 1 }, limit: 5000 })
-    .toArray()) {
+  const products = await find(collections.products, { brand: { $ne: null } }, { select: 'brand', limit: 5000 });
+  for (const product of products) {
     if (product.brand) brands.add(product.brand);
   }
 
@@ -248,7 +241,7 @@ async function main(): Promise<void> {
     await bootstrapCoOccurrence(collections);
   }
 
-  const real = await collections.products.countDocuments({
+  const real = await count(collections.products, {
     'source.domain': { $in: STORES.map((s) => s.domain) },
     status: 'active',
   });
@@ -272,13 +265,13 @@ async function seedEngagement(
   domains: string[],
 ): Promise<void> {
   const random = mulberry32(hashString('real-engagement'));
-  const cursor = collections.products.find(
-    { 'source.domain': { $in: domains }, status: 'active', 'engagement.impressions': 0 },
-    { projection: { _id: 1, quality: 1 } },
-  );
+  const products = await find(collections.products, {
+    'source.domain': { $in: domains },
+    status: 'active',
+    'engagement.impressions': 0,
+  }, { select: 'id,quality' });
 
-  const operations: Array<AnyBulkWriteOperation<Product>> = [];
-  for await (const product of cursor) {
+  for (const product of products) {
     const quality = product.quality?.score ?? 0.5;
     const impressions = Math.floor(80 + random() * 400);
     const rate = clamp(0.03 + quality * 0.03 + (random() - 0.5) * 0.02, 0.004, 0.12);
@@ -299,29 +292,22 @@ async function seedEngagement(
       1,
     );
 
-    operations.push({
-      updateOne: {
-        filter: { _id: product._id },
-        update: {
-          $set: {
-            engagement: {
-              impressions,
-              interactions,
-              ctrSmoothed: Math.round(rate * 10000) / 10000,
-              cartAdds,
-            },
-            'quality.engagement': Math.round(term * 1000) / 1000,
-            'quality.score': Math.round(nextScore * 1000) / 1000,
-          },
-        },
+    await updateOne(collections.products, { id: product.id }, {
+      engagement: {
+        impressions,
+        interactions,
+        ctrSmoothed: Math.round(rate * 10000) / 10000,
+        cartAdds,
+      },
+      quality: {
+        ...(product.quality || {}),
+        engagement: Math.round(term * 1000) / 1000,
+        score: Math.round(nextScore * 1000) / 1000,
       },
     });
   }
 
-  if (operations.length > 0) {
-    await collections.products.bulkWrite(operations);
-    log.info('engagement primed for real listings', { products: operations.length });
-  }
+  log.info('engagement primed for real listings', { products: products.length });
 }
 
 /** Same nightly recompute the seeder runs; real products shift the centroids. */
@@ -330,39 +316,35 @@ async function recomputeCentroids(
   now: Date,
 ): Promise<void> {
   for (const level of [3, 2, 1] as const) {
-    const nodes = await collections.categories.find({ level }).toArray();
-    const operations: Array<AnyBulkWriteOperation<Category>> = [];
+    const nodes = await find(collections.categories, { level });
 
     for (const node of nodes) {
       const field = level === 1 ? 'category.l1' : level === 2 ? 'category.l2' : 'category.l3';
-      const members = await collections.products
-        .find(
-          { [field]: node._id, status: 'active' },
-          { projection: { embedding: 1 }, sort: { 'engagement.ctrSmoothed': -1 }, limit: 500 },
-        )
-        .toArray();
+      const members = await find(collections.products, {
+        [field]: node.id,
+        status: 'active',
+      }, {
+        select: 'embedding',
+        orderBy: { column: 'engagement->>ctrSmoothed', ascending: false },
+        limit: 500,
+      });
       if (members.length === 0) continue;
 
-      const productCount = await collections.products.countDocuments({
-        [field]: node._id,
+      const productCount = await count(collections.products, {
+        [field]: node.id,
         status: 'active',
       });
 
-      operations.push({
-        updateOne: {
-          filter: { _id: node._id },
-          update: {
-            $set: {
-              centroid: meanVector(members.map((m) => m.embedding)),
-              centroidComputedAt: now,
-              memberCount: Math.min(members.length, 500),
-              'engagement.productCount': productCount,
-            },
-          },
+      await updateOne(collections.categories, { id: node.id }, {
+        centroid: meanVector(members.map((m) => m.embedding)),
+        centroidComputedAt: now,
+        memberCount: Math.min(members.length, 500),
+        engagement: {
+          ...(node.engagement || {}),
+          productCount,
         },
       });
     }
-    if (operations.length > 0) await collections.categories.bulkWrite(operations);
   }
   log.info('centroids recomputed');
 }
@@ -370,24 +352,20 @@ async function recomputeCentroids(
 async function bootstrapCoOccurrence(
   collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
 ): Promise<void> {
-  const nodes = await collections.categories.find({ level: 1 }).toArray();
-  const byId = new Map(nodes.map((n) => [n._id, n]));
-  const operations: Array<AnyBulkWriteOperation<Category>> = [];
+  const nodes = await find(collections.categories, { level: 1 });
+  const byId = new Map(nodes.map((n) => [n.id, n]));
 
   for (const node of nodes) {
     if (!node.centroid) continue;
     const pairs: Array<{ topic: string; lift: number }> = [];
     for (const other of nodes) {
-      if (other._id === node._id || !other.centroid) continue;
-      const similarity = cosine(node.centroid, (byId.get(other._id) as CategoryDoc<ObjectId>).centroid as number[]);
-      pairs.push({ topic: other._id, lift: Math.round(clamp(1 + similarity * 2.5, 0.2, 4) * 100) / 100 });
+      if (other.id === node.id || !other.centroid) continue;
+      const similarity = cosine(node.centroid, (byId.get(other.id) as CategoryDoc<string>).centroid as number[]);
+      pairs.push({ topic: other.id, lift: Math.round(clamp(1 + similarity * 2.5, 0.2, 4) * 100) / 100 });
     }
     pairs.sort((a, b) => b.lift - a.lift);
-    operations.push({
-      updateOne: { filter: { _id: node._id }, update: { $set: { coOccurrence: pairs.slice(0, 8) } } },
-    });
+    await updateOne(collections.categories, { id: node.id }, { coOccurrence: pairs.slice(0, 8) });
   }
-  if (operations.length > 0) await collections.categories.bulkWrite(operations);
   log.info('co-occurrence refreshed');
 }
 

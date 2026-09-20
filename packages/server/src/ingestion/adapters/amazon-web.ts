@@ -486,7 +486,7 @@ export class AmazonWebAdapter implements WebSourceAdapter {
   private readonly now: () => Date;
 
   constructor(source: SourceDoc<string>, options: Partial<AmazonWebOptions> = {}) {
-    this.domain = source._id;
+    this.domain = source.id;
     this.terms = options.terms ?? AMAZON_WEB_DEFAULT_TERMS;
     this.pagesPerTerm = options.pagesPerTerm ?? 1;
     this.tld = options.tld ?? 'com';

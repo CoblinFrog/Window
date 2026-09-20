@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { ObjectId } from 'mongodb';
 import { cosine, normalize } from '@window/shared';
 import { recommendListings, sessionVector } from './recommend.js';
 import type { VectorCandidate, VectorQuery, VectorSearch } from '../vector/types.js';
+
+/** Supabase ids are opaque strings; the tests only need them to be distinct. */
+let idCounter = 0;
+const nextId = (): string => `product-${(idCounter += 1)}`;
 
 /**
  * A VectorSearch that actually ranks: cosine over a hand-built catalog, so the
@@ -22,7 +25,7 @@ function fakeIndex(
       if (captured) captured.query = query;
       return catalog
         .map((doc) => ({
-          _id: new ObjectId(),
+          id: nextId(),
           title: doc.title,
           price: { amount: doc.price, currency: 'USD' },
           source: { url: doc.url },
@@ -90,7 +93,10 @@ describe('recommendListings', () => {
     });
     assert.equal(results.length, 3);
     const first = results[0]!;
-    assert.match(first.productId, /^[0-9a-f]{24}$/);
+    // Supabase ids are opaque strings rather than Mongo's 24-hex ObjectId;
+    // what matters is that the candidate's id is carried through unchanged.
+    assert.equal(typeof first.productId, 'string');
+    assert.ok(first.productId.length > 0);
     assert.ok(first.score >= results[1]!.score, 'sorted by similarity');
     assert.equal(first.currency, 'USD');
     assert.ok(first.url!.startsWith('https://'));

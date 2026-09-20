@@ -1,6 +1,5 @@
 import type { SourceDoc } from '@window/shared';
-import { connectDatabase } from '../db/client.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { connectDatabase } from '../db/supabase-client.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
@@ -9,6 +8,7 @@ import { AmazonPaapiAdapter, fromEnv as amazonFromEnv } from '../ingestion/adapt
 import type { CrawlContext, RawListing, SourceAdapter } from '../ingestion/types.js';
 import { logger } from '../lib/logger.js';
 import { mediaPipeline } from '../media/pipeline.js';
+import { count, deleteMany, updateOne } from '../db/supabase-helpers.js';
 import { bootstrapCoOccurrence, primeEngagement, recomputeCentroids } from './catalog-lib.js';
 
 const log = logger.child('ingest-api');
@@ -136,7 +136,6 @@ async function main(): Promise<void> {
 
   const db = await connectDatabase();
   const { collections } = db;
-  await ensureIndexes(db.db);
 
   // ---- Collect ------------------------------------------------------------
   const collected: RawListing[] = [];
@@ -199,22 +198,22 @@ async function main(): Promise<void> {
   // Done only once there is something to replace it with, so a failed run
   // never leaves an empty catalog behind.
   if (options.replace) {
-    const removed = await Promise.all([
-      collections.products.deleteMany({}),
-      collections.clusters.deleteMany({}),
-      collections.reviews.deleteMany({}),
-      collections.sellers.deleteMany({}),
+    const [productsResult, clustersResult, reviewsResult] = await Promise.all([
+      deleteMany(collections.products, {}),
+      deleteMany(collections.clusters, {}),
+      deleteMany(collections.reviews, {}),
+      deleteMany(collections.sellers, {}),
     ]);
     log.info('cleared previous catalog', {
-      products: removed[0].deletedCount,
-      clusters: removed[1].deletedCount,
-      reviews: removed[2].deletedCount,
+      products: productsResult.length,
+      clusters: clustersResult.length,
+      reviews: reviewsResult.length,
     });
   }
 
   for (const source of sources) {
     const doc: SourceDoc<string> = {
-      _id: source.domain,
+      id: source.domain,
       displayName: source.name.split(' ')[0] as string,
       tier: 1,
       sourceType: source.domain === 'ebay.com' ? 'secondhand' : 'new',
@@ -231,7 +230,7 @@ async function main(): Promise<void> {
       checkout: { supported: true, guestCheckout: true, blocksAgents: false, protocol: null, stackableCoupons: false },
       status: 'active',
     };
-    await collections.sources.updateOne({ _id: source.domain }, { $set: doc as never }, { upsert: true });
+    await updateOne(collections.sources, { id: source.domain }, doc);
   }
 
   // ---- Ingest -------------------------------------------------------------
@@ -283,11 +282,11 @@ async function main(): Promise<void> {
   await recomputeCentroids(collections, now);
   await bootstrapCoOccurrence(collections);
 
-  const active = await collections.products.countDocuments({ status: 'active' });
+  const active = await count(collections.products, { status: 'active' });
   log.info('done', {
     activeProducts: active,
-    clusters: await collections.clusters.countDocuments({}),
-    sellers: await collections.sellers.countDocuments({}),
+    clusters: await count(collections.clusters, {}),
+    sellers: await count(collections.sellers, {}),
     seconds: Math.round((Date.now() - started) / 1000),
   });
 

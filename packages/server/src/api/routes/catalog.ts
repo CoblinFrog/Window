@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { ObjectId, type Sort } from 'mongodb';
 import { z } from 'zod';
 import {
   ApiError,
@@ -19,10 +18,11 @@ import { buildCardContext, toProductCard } from '../../feed/cards.js';
 import { cautionText } from '../../ingestion/quality.js';
 import { riskFlagText } from '../../ingestion/risk.js';
 import type { VectorCandidate } from '../../vector/types.js';
+import { findOne, find, count } from '../../db/supabase-helpers.js';
 
-function objectId(value: string, what: string): ObjectId {
-  if (!ObjectId.isValid(value)) throw ApiError.validation(`${what} must be a valid id.`);
-  return new ObjectId(value);
+function validateId(value: string, what: string): string {
+  if (!value || value.length === 0) throw ApiError.validation(`${what} must be a valid id.`);
+  return value;
 }
 
 export function catalogRoutes(ctx: AppContext): Router {
@@ -30,8 +30,8 @@ export function catalogRoutes(ctx: AppContext): Router {
   const { collections } = ctx.db;
 
   async function merchantNames(): Promise<Map<string, string>> {
-    const sources = await collections.sources.find({}).toArray();
-    return new Map(sources.map((s) => [s._id, s.displayName]));
+    const { data: sources } = await collections.sources.select('id,displayName');
+    return new Map((sources || []).map((s) => [s.id, s.displayName]));
   }
 
   /**
@@ -47,8 +47,8 @@ export function catalogRoutes(ctx: AppContext): Router {
 
   router.get('/products/:id', async (req, res, next) => {
     try {
-      const id = objectId(req.params.id, 'Product id');
-      let product = await collections.products.findOne({ _id: id });
+      const id = validateId(req.params.id, 'Product id');
+      let { data: product } = await collections.products.select('*').eq('id', id).single();
       if (!product) throw ApiError.notFound('That product');
 
       if (req.query.live === '1' || req.query.live === 'true') {
@@ -58,7 +58,7 @@ export function catalogRoutes(ctx: AppContext): Router {
         const outcome = await Promise.race([
           refresh.catch((error: unknown) => {
             logger.warn('background live refresh failed', {
-              productId: id.toHexString(),
+              productId: id,
               error: error instanceof Error ? error.message : String(error),
             });
             return 'unavailable' as const;
@@ -68,30 +68,85 @@ export function catalogRoutes(ctx: AppContext): Router {
           ),
         ]);
         if (outcome === 'refreshed' || outcome === 'removed') {
-          product = (await collections.products.findOne({ _id: id })) ?? product;
+          const { data: fresh } = await collections.products.select('*').eq('id', id).single();
+          product = fresh ?? product;
         }
         if (outcome === 'removed' && (product === null || product.status === 'dead')) {
           throw ApiError.notFound('That product');
         }
       }
 
-      const candidate = { ...(product as unknown as VectorCandidate), vectorScore: 0.5 };
+      const names = await merchantNames();
+
+      const candidate = { ...product, vectorScore: 0.5 } as unknown as VectorCandidate;
       const context = await buildCardContext(
         [candidate],
         {
           sellers: collections.sellers as never,
           clusters: collections.clusters as never,
-          merchantNames: await merchantNames(),
+          merchantNames: names,
         },
         { includeGallery: true, now: new Date() },
       );
 
-      const card = toProductCard(candidate, context);
-      const detail: ProductDetail = {
-        ...card,
+      const cluster = await findOne(collections.clusters, { id: product.clusterId });
+
+      const response: ProductDetail = {
+        productId: product.id,
+        clusterId: product.clusterId,
+        title: product.title,
+        brand: product.brand,
+        price: product.price,
+        originalPrice: product.originalPrice,
+        shipping: {
+          amount: product.shipping.amount,
+          currency: product.shipping.currency,
+          free: product.shipping.freeThreshold !== null && product.price.amount >= product.shipping.freeThreshold,
+        },
+        merchant: {
+          domain: product.source.domain,
+          displayName: names.get(product.source.domain) ?? product.source.domain,
+        },
+        seller: {
+          id: product.sellerId,
+          handle: context.sellers.get(product.sellerId)?.handle ?? '',
+          displayName: context.sellers.get(product.sellerId)?.displayName ?? '',
+          avatarUrl: context.sellers.get(product.sellerId)?.avatarUrl ?? null,
+          type: context.sellers.get(product.sellerId)?.type ?? 'retailer',
+          rating: context.sellers.get(product.sellerId)?.metrics.rating ?? null,
+        },
+        category: product.category,
+        badges: context.badges.get(product.id) ?? {
+          source: product.sourceType,
+          condition: product.condition,
+          priceContext: null,
+          onlyOne: product.stock.singleUnit,
+          endsAt: product.auction?.endsAt?.toISOString() ?? null,
+          riskFlag: riskFlagText(product.risk),
+          wellReviewed: product.quality.score > 0.8,
+          caution: cautionText(product.quality),
+        },
+        media: {
+          hero: product.media.hero,
+          galleryCount: product.media.gallery.length,
+          gallery: product.media.gallery,
+          video: product.media.video,
+        },
+        reviews: { count: cluster?.reviews.count ?? 0, meanRating: cluster?.reviews.meanRating ?? null },
+        upvotes: cluster?.engagement.upvotes ?? 0,
+        otherOffers: null,
+        auction: product.auction ? {
+          endsAt: product.auction.endsAt.toISOString(),
+          currentBid: product.auction.currentBid,
+          bidCount: product.auction.bidCount,
+        } : null,
+        canAddToCart: product.sourceType !== 'auction',
+        warning: riskFlagText(product.risk) || cautionText(product.quality) || null,
+        isExploration: false,
+        explorationTopic: null,
         specs: product.specs,
-        description: null,
         sourceUrl: product.source.url,
+        description: null,
         condition: product.condition,
         sourceType: product.sourceType,
         quality: {
@@ -104,7 +159,7 @@ export function catalogRoutes(ctx: AppContext): Router {
         risk: { tier: product.risk.tier, flag: riskFlagText(product.risk as never) },
         lastVerifiedAt: product.crawl.lastCrawledAt.toISOString(),
       };
-      res.json(detail);
+      res.json(response);
     } catch (error) {
       next(error);
     }
@@ -117,21 +172,19 @@ export function catalogRoutes(ctx: AppContext): Router {
    */
   router.get('/clusters/:id', async (req, res, next) => {
     try {
-      const id = objectId(req.params.id, 'Cluster id');
-      const cluster = await collections.clusters.findOne({ _id: id });
+      const id = validateId(req.params.id, 'Cluster id');
+      const cluster = await findOne(collections.clusters, { id });
       if (!cluster) throw ApiError.notFound('That cluster');
 
-      const members = await collections.products
-        .find({ clusterId: id, status: 'active' })
-        .toArray();
+      const members = await find(collections.products, { clusterId: id, status: 'active' });
       const names = await merchantNames();
 
       const offers: ClusterOffer[] = members
         .map((product) => ({
-          productId: product._id.toHexString(),
+          productId: product.id,
           merchantDomain: product.source.domain,
           merchantName: names.get(product.source.domain) ?? product.source.domain,
-          sellerId: product.sellerId.toHexString(),
+          sellerId: product.sellerId,
           price: product.price,
           shipping: {
             amount: product.shipping?.amount ?? 0,
@@ -144,16 +197,13 @@ export function catalogRoutes(ctx: AppContext): Router {
           condition: product.condition,
           sourceType: product.sourceType,
           inStock: product.stock.inStock,
-          isCanonical: product._id.equals(cluster.canonicalProductId),
+          isCanonical: product.id === cluster.canonicalProductId,
         }))
         .sort((a, b) => a.landedPrice.amount - b.landedPrice.amount);
 
       // Window's own upvotes are a separate, clearly delineated block: they are
       // not reviews and must never be presented alongside them as if they were.
-      const upvotes = await collections.interactions
-        .find({ clusterId: id, type: 'upvote' })
-        .project<{ reason: UpvoteReason | null }>({ reason: 1 })
-        .toArray();
+      const upvotes = await find(collections.interactions, { clusterId: id, type: 'upvote' }, { select: 'reason' });
       const reasonCounts = new Map<UpvoteReason, number>();
       for (const row of upvotes) {
         if (row.reason && (UPVOTE_REASONS as readonly string[]).includes(row.reason)) {
@@ -161,9 +211,9 @@ export function catalogRoutes(ctx: AppContext): Router {
         }
       }
 
-      const canonical = members.find((m) => m._id.equals(cluster.canonicalProductId));
+      const canonical = members.find((m) => m.id === cluster.canonicalProductId);
       const response: ClusterResponse = {
-        clusterId: id.toHexString(),
+        clusterId: id,
         title: cluster.title,
         brand: cluster.brand,
         category: cluster.category,
@@ -207,31 +257,31 @@ export function catalogRoutes(ctx: AppContext): Router {
 
   router.get('/clusters/:id/reviews', async (req, res, next) => {
     try {
-      const id = objectId(req.params.id, 'Cluster id');
+      const id = validateId(req.params.id, 'Cluster id');
       const parsed = reviewQuery.safeParse(req.query);
       if (!parsed.success) throw ApiError.validation('Invalid review query.');
       const { bucket, sort, offset, limit } = parsed.data;
 
       const filter = bucket ? { clusterId: id, bucket } : { clusterId: id };
       // Sorted by helpfulness by default, which is what the sheet opens on.
-      const SORTS: Record<typeof sort, Sort> = {
-        helpful: { helpfulCount: -1 },
-        recent: { postedAt: -1 },
-        rating_asc: { rating: 1 },
-        rating_desc: { rating: -1 },
+      const SORTS: Record<typeof sort, { column: string; ascending: boolean }> = {
+        helpful: { column: 'helpfulCount', ascending: false },
+        recent: { column: 'postedAt', ascending: false },
+        rating_asc: { column: 'rating', ascending: true },
+        rating_desc: { column: 'rating', ascending: false },
       };
       const sortSpec = SORTS[sort];
 
       const [items, total, cluster] = await Promise.all([
-        collections.reviews.find(filter).sort(sortSpec).skip(offset).limit(limit).toArray(),
-        collections.reviews.countDocuments(filter),
-        collections.clusters.findOne({ _id: id }, { projection: { 'reviews.asOf': 1 } }),
+        find(collections.reviews, filter, { skip: offset, limit, orderBy: sortSpec }),
+        count(collections.reviews, filter),
+        findOne(collections.clusters, { id }, { select: 'reviews.asOf' }),
       ]);
 
       const response: ReviewsResponse = {
-        clusterId: id.toHexString(),
+        clusterId: id,
         items: items.map((review) => ({
-          id: review._id.toHexString(),
+          id: review.id,
           rating: review.rating,
           ratingScale: review.ratingScale,
           excerpt: review.excerpt,
@@ -262,13 +312,13 @@ export function catalogRoutes(ctx: AppContext): Router {
    */
   router.get('/sellers/:id', async (req, res, next) => {
     try {
-      const id = objectId(req.params.id, 'Seller id');
-      const seller = await collections.sellers.findOne({ _id: id });
+      const id = validateId(req.params.id, 'Seller id');
+      const seller = await findOne(collections.sellers, { id });
       if (!seller) throw ApiError.notFound('That seller');
 
-      const muted = req.currentUser?.suppressions.sellers.some((s) => s.equals(id)) ?? false;
+      const muted = req.currentUser?.suppressions.sellers.includes(id) ?? false;
       const response: SellerResponse = {
-        id: id.toHexString(),
+        id: id,
         handle: seller.handle,
         displayName: seller.displayName,
         avatarUrl: seller.avatarUrl,
@@ -297,12 +347,11 @@ export function catalogRoutes(ctx: AppContext): Router {
 
   router.get('/sellers/:id/listings', async (req, res, next) => {
     try {
-      const id = objectId(req.params.id, 'Seller id');
-      const products = await collections.products
-        .find({ sellerId: id, status: 'active', 'stock.inStock': true })
-        .sort({ 'quality.score': -1 })
-        .limit(40)
-        .toArray();
+      const id = validateId(req.params.id, 'Seller id');
+      const products = await find(collections.products, 
+        { sellerId: id, status: 'active', 'stock.inStock': true },
+        { limit: 40, orderBy: { column: 'quality.score', ascending: false } }
+      );
 
       const candidates = products.map((p) => ({
         ...(p as unknown as VectorCandidate),

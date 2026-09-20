@@ -320,6 +320,20 @@ export default function FeedScreen(): React.ReactElement {
   }
   if (session.status !== 'ready') return <View style={styles.centre} />;
   if (!session.onboarded) return <Redirect href="/onboarding" />;
+  if (feed.buffer.length === 0) {
+    return (
+      <View style={styles.centre}>
+        <Text style={styles.plain}>
+          {feed.loading ? 'Loading products…' : 'Could not load products.'}
+        </Text>
+        {!feed.loading ? (
+          <Pressable onPress={() => void feed.ensureBuffer(feed.mode)} accessibilityRole="button">
+            <Text style={styles.action}>Try again</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
 
   const width = layout.columnWidth;
   const height = layout.columnHeight;

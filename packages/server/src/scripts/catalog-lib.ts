@@ -2,17 +2,16 @@
  * The tail of an ingest run, shared by the API and web ingest scripts.
  */
 
-import type { AnyBulkWriteOperation } from 'mongodb';
 import { QUALITY_WEIGHTS, clamp, cosine, meanVector } from '@window/shared';
-import type { connectDatabase } from '../db/client.js';
-import type { Category, Product } from '../db/collections.js';
+import type { CollectionSet } from '../db/supabase-collections.js';
+import { find, updateOne } from '../db/supabase-helpers.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { engagementScore } from '../ingestion/quality.js';
 import { logger } from '../lib/logger.js';
 
 const log = logger.child('catalog-lib');
 
-type Collections = Awaited<ReturnType<typeof connectDatabase>>['collections'];
+type Collections = CollectionSet;
 
 /**
  * A catalog this small has no measured engagement at all, and a zero CTR makes
@@ -20,11 +19,9 @@ type Collections = Awaited<ReturnType<typeof connectDatabase>>['collections'];
  * category mean, which is the honest prior for a product nobody has seen.
  */
 export async function primeEngagement(collections: Collections): Promise<void> {
-  const operations: Array<AnyBulkWriteOperation<Product>> = [];
-  for await (const product of collections.products.find(
-    { status: 'active' },
-    { projection: { _id: 1, quality: 1 } },
-  )) {
+  const products = await find(collections.products, { status: 'active' }, { select: 'id,quality' });
+
+  for (const product of products) {
     const term = engagementScore({
       impressions: 200,
       interactions: 8,
@@ -38,20 +35,15 @@ export async function primeEngagement(collections: Collections): Promise<void> {
       0,
       1,
     );
-    operations.push({
-      updateOne: {
-        filter: { _id: product._id },
-        update: {
-          $set: {
-            engagement: { impressions: 200, interactions: 8, ctrSmoothed: 0.04, cartAdds: 1 },
-            'quality.engagement': Math.round(term * 1000) / 1000,
-            'quality.score': Math.round(next * 1000) / 1000,
-          },
-        },
+    await updateOne(collections.products, { id: product.id }, {
+      engagement: { impressions: 200, interactions: 8, ctrSmoothed: 0.04, cartAdds: 1 },
+      quality: {
+        ...(product.quality || {}),
+        engagement: Math.round(term * 1000) / 1000,
+        score: Math.round(next * 1000) / 1000,
       },
     });
   }
-  if (operations.length > 0) await collections.products.bulkWrite(operations);
 }
 
 /**
@@ -65,49 +57,44 @@ export async function recomputeCentroids(collections: Collections, now: Date): P
   const embedder = localEmbeddingProvider();
 
   for (const level of [3, 2, 1] as const) {
-    const nodes = await collections.categories.find({ level }).toArray();
-    const operations: Array<AnyBulkWriteOperation<Category>> = [];
+    const nodes = await find(collections.categories, { level });
 
     for (const node of nodes) {
       const field = level === 1 ? 'category.l1' : level === 2 ? 'category.l2' : 'category.l3';
-      const members = await collections.products
-        .find({ [field]: node._id, status: 'active' }, { projection: { embedding: 1 }, limit: 500 })
-        .toArray();
+      const members = await find(
+        collections.products,
+        { [field]: node.id, status: 'active' },
+        { select: 'embedding', limit: 500 },
+      );
 
       const centroid =
         members.length > 0
           ? meanVector(members.map((m) => m.embedding))
           : await embedder.embedText(node.displayName);
 
-      operations.push({
-        updateOne: {
-          filter: { _id: node._id },
-          update: {
-            $set: {
-              centroid,
-              centroidComputedAt: now,
-              memberCount: members.length,
-              'engagement.productCount': members.length,
-            },
-          },
+      await updateOne(collections.categories, { id: node.id }, {
+        centroid,
+        centroidComputedAt: now,
+        memberCount: members.length,
+        engagement: {
+          ...(node.engagement || {}),
+          productCount: members.length,
         },
       });
     }
-    if (operations.length > 0) await collections.categories.bulkWrite(operations);
   }
   log.info('centroids recomputed (empty categories fall back to their name vector)');
 }
 
 export async function bootstrapCoOccurrence(collections: Collections): Promise<void> {
-  const nodes = await collections.categories.find({ level: 1 }).toArray();
-  const operations: Array<AnyBulkWriteOperation<Category>> = [];
+  const nodes = await find(collections.categories, { level: 1 });
 
   for (const node of nodes) {
     if (!node.centroid) continue;
     const pairs = nodes
-      .filter((other) => other._id !== node._id && other.centroid)
+      .filter((other) => other.id !== node.id && other.centroid)
       .map((other) => ({
-        topic: other._id,
+        topic: other.id,
         lift:
           Math.round(clamp(1 + cosine(node.centroid as number[], other.centroid as number[]) * 2.5, 0.2, 4) * 100) /
           100,
@@ -115,9 +102,6 @@ export async function bootstrapCoOccurrence(collections: Collections): Promise<v
       .sort((a, b) => b.lift - a.lift)
       .slice(0, 8);
 
-    operations.push({
-      updateOne: { filter: { _id: node._id }, update: { $set: { coOccurrence: pairs } } },
-    });
+    await updateOne(collections.categories, { id: node.id }, { coOccurrence: pairs });
   }
-  if (operations.length > 0) await collections.categories.bulkWrite(operations);
 }

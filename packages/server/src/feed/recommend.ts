@@ -97,7 +97,7 @@ function toListing(candidate: VectorCandidate): ListingRecommendation {
   // The app's own pick: mid-width AVIF, with the 480 and WebP as fallbacks.
   const hero = candidate.media?.hero;
   return {
-    productId: candidate._id.toHexString(),
+    productId: candidate.id,
     title: candidate.title,
     price: candidate.price?.amount ?? null,
     currency: candidate.price?.currency ?? null,

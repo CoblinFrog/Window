@@ -17,8 +17,8 @@
 import type { SourceDoc } from '@window/shared';
 import { BrowseAgent } from '../agent/browse-agent.js';
 import { claudeCli } from '../agent/llm.js';
-import { connectDatabase } from '../db/client.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { connectDatabase } from '../db/supabase-client.js';
+import { deleteMany, updateOne } from '../db/supabase-helpers.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import {
   AMAZON_WEB_DEFAULT_TERMS,
@@ -69,7 +69,7 @@ function parseArgs(): Options {
 
 function sourceDoc(domain: string, displayName: string, sourceType: SourceDoc<string>['sourceType']): SourceDoc<string> {
   return {
-    _id: domain,
+    id: domain,
     displayName,
     tier: 2,
     sourceType,
@@ -182,19 +182,18 @@ async function main(): Promise<void> {
   // ---- Persist -------------------------------------------------------------
   const db = await connectDatabase();
   const { collections } = db;
-  await ensureIndexes(db.db);
 
   if (options.replace) {
     const removed = await Promise.all([
-      collections.products.deleteMany({}),
-      collections.clusters.deleteMany({}),
-      collections.reviews.deleteMany({}),
-      collections.sellers.deleteMany({}),
+      deleteMany(collections.products, {}),
+      deleteMany(collections.clusters, {}),
+      deleteMany(collections.reviews, {}),
+      deleteMany(collections.sellers, {}),
     ]);
     log.info('cleared previous catalog', {
-      products: removed[0].deletedCount,
-      clusters: removed[1].deletedCount,
-      reviews: removed[2].deletedCount,
+      products: removed[0].length,
+      clusters: removed[1].length,
+      reviews: removed[2].length,
     });
   }
 
@@ -202,7 +201,7 @@ async function main(): Promise<void> {
     const doc = target.domain === 'amazon.com'
       ? sourceDoc('amazon.com', 'Amazon', 'new')
       : sourceDoc('ebay.com', 'eBay', 'secondhand');
-    await collections.sources.updateOne({ _id: target.domain }, { $set: doc as never }, { upsert: true });
+    await updateOne(collections.sources, { id: target.domain }, doc);
   }
 
   const embedder = localEmbeddingProvider();

@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
@@ -12,7 +11,7 @@ import {
 } from '@window/shared';
 import { env } from '../../config/env.js';
 import type { AppContext } from '../context.js';
-import type { Order } from '../../db/collections.js';
+import type { Order } from '../../db/supabase-collections.js';
 import { CheckoutConflict } from '../../checkout/orchestrator.js';
 import { rateLimit } from '../middleware.js';
 import { requireAuthenticated } from '../auth.js';
@@ -100,14 +99,14 @@ export function commerceRoutes(ctx: AppContext): Router {
   // -------------------------------------------------------------------------
 
   async function summarize(order: Order): Promise<CheckoutJobSummary> {
-    const source = await collections.sources.findOne({ _id: order.merchantDomain });
+    const source = await collections.sources.select('*').eq('id', order.merchantDomain).single();
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
-      jobId: order.agentRun?.jobId ?? order._id.toHexString(),
-      orderId: order._id.toHexString(),
+      jobId: order.agentRun?.jobId ?? order.id,
+      orderId: order.id,
       merchantDomain: order.merchantDomain,
-      merchantName: source?.displayName ?? order.merchantDomain,
+      merchantName: source.data?.displayName ?? order.merchantDomain,
       status: order.status,
       quote: order.quote
         ? {
@@ -131,13 +130,13 @@ export function commerceRoutes(ctx: AppContext): Router {
           ? { amount: order.quote.discount, currency: order.quote.currency }
           : null,
       items: order.items.map((item) => ({
-        productId: item.productId.toHexString(),
+        productId: item.productId,
         title: item.title,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
       })),
       protocol: order.payment?.protocol ?? null,
-      needsInput: ctx.checkout.pendingPrompt(order._id.toHexString()),
+      needsInput: ctx.checkout.pendingPrompt(order.id),
       failure: order.failure,
       merchantOrderNumber: order.merchantOrderNumber,
       riskInterstitial: interstitial,
@@ -194,14 +193,11 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!ObjectId.isValid(req.params.id)) throw ApiError.validation('Invalid job id.');
+      if (!req.params.id) throw ApiError.validation('Invalid job id.');
 
-      const order = await collections.orders.findOne({
-        _id: new ObjectId(req.params.id),
-        userId: user._id,
-      });
-      if (!order) throw ApiError.notFound('That checkout job');
-      res.json(await summarize(order));
+      const order = await collections.orders.select('*').eq('id', req.params.id).eq('userId', user.id).single();
+      if (!order.data) throw ApiError.notFound('That checkout job');
+      res.json(await summarize(order.data as Order));
     } catch (error) {
       next(error);
     }
@@ -216,11 +212,11 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!ObjectId.isValid(req.params.id)) throw ApiError.validation('Invalid job id.');
+      if (!req.params.id) throw ApiError.validation('Invalid job id.');
 
-      const orderId = new ObjectId(req.params.id);
-      const order = await collections.orders.findOne({ _id: orderId, userId: user._id });
-      if (!order) throw ApiError.notFound('That checkout job');
+      const orderId = req.params.id;
+      const order = await collections.orders.select('*').eq('id', orderId).eq('userId', user.id).single();
+      if (!order.data) throw ApiError.notFound('That checkout job');
 
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -230,7 +226,7 @@ export function commerceRoutes(ctx: AppContext): Router {
       });
       res.write(`event: state\ndata: ${JSON.stringify(await summarize(order))}\n\n`);
 
-      const unsubscribe = ctx.checkout.subscribe(orderId.toHexString(), (payload) => {
+      const unsubscribe = ctx.checkout.subscribe(orderId, (payload) => {
         res.write(`event: ${payload.event}\ndata: ${JSON.stringify(payload)}\n\n`);
       });
 
@@ -266,9 +262,9 @@ export function commerceRoutes(ctx: AppContext): Router {
 
       const parsed = authorizeSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('authorize requires the quoteHash.');
-      if (!ObjectId.isValid(req.params.id)) throw ApiError.validation('Invalid job id.');
+      if (!req.params.id) throw ApiError.validation('Invalid job id.');
 
-      const order = await ctx.checkout.authorize(new ObjectId(req.params.id), user, {
+      const order = await ctx.checkout.authorize(req.params.id, user, {
         quoteHash: parsed.data.quoteHash,
         // The user's authorization tap on the quote screen is the passkey
         // challenge. A missing assertion is refused by the payment rail.
@@ -314,8 +310,8 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      if (!ObjectId.isValid(req.params.id)) throw ApiError.validation('Invalid job id.');
-      const order = await ctx.checkout.cancel(new ObjectId(req.params.id), user);
+      if (!req.params.id) throw ApiError.validation('Invalid job id.');
+      const order = await ctx.checkout.cancel(req.params.id, user);
       res.json(await summarize(order));
     } catch (error) {
       next(error instanceof CheckoutConflict ? conflictToApiError(error) : error);
@@ -328,20 +324,20 @@ export function commerceRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
 
       const orders = await collections.orders
-        .find({ userId: user._id })
-        .sort({ createdAt: -1 })
-        .limit(50)
-        .toArray();
+        .select('*')
+        .eq('userId', user.id)
+        .order('createdAt', { ascending: false })
+        .limit(50);
 
-      const productIds = orders.flatMap((o) => o.items.map((i) => i.productId));
+      const productIds = (orders.data || []).flatMap((o) => o.items.map((i) => i.productId));
       const products = await collections.products
-        .find({ _id: { $in: productIds } }, { projection: { 'media.hero': 1 } })
-        .toArray();
-      const heroById = new Map(products.map((p) => [p._id.toHexString(), p.media.hero]));
+        .select('id,media.hero')
+        .in('id', productIds);
+      const heroById = new Map((products.data || []).map((p) => [p.id, p.media.hero]));
 
       const response: OrdersResponse = {
-        orders: orders.map((order) => ({
-          orderId: order._id.toHexString(),
+        orders: (orders.data || []).map((order) => ({
+          orderId: order.id,
           merchantDomain: order.merchantDomain,
           merchantName: order.merchantDomain,
           status: order.status,
@@ -350,10 +346,10 @@ export function commerceRoutes(ctx: AppContext): Router {
             : null,
           merchantOrderNumber: order.merchantOrderNumber,
           items: order.items.map((item) => ({
-            productId: item.productId.toHexString(),
+            productId: item.productId,
             title: item.title,
             quantity: item.quantity,
-            hero: heroById.get(item.productId.toHexString()) ?? null,
+            hero: heroById.get(item.productId) ?? null,
           })),
           createdAt: order.createdAt.toISOString(),
         })),

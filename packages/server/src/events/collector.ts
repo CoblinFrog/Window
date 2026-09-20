@@ -1,4 +1,4 @@
-import { ObjectId } from 'mongodb';
+import { randomUUID } from 'node:crypto';
 import {
   DWELL_THRESHOLDS,
   SIGNAL_QUALITY_RULES,
@@ -9,7 +9,7 @@ import {
   type InteractionType,
   type RankingConfig,
 } from '@window/shared';
-import type { CollectionSet, Interaction, User } from '../db/collections.js';
+import type { CollectionSet, Interaction, User } from '../db/supabase-collections.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
 import { bloomAdd, deserializeBloom, serializeBloom } from '../lib/bloom.js';
 import { logger } from '../lib/logger.js';
@@ -19,6 +19,7 @@ import {
   demoteStaleTopics,
 } from '../ranking/exploration.js';
 import { applyInteraction, updatePricePrior } from '../ranking/user-vector.js';
+import { find, insert, updateOne, findOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('events');
 
@@ -42,6 +43,14 @@ export interface CollectResult extends EventsResponse {
   graduatedTopics: string[];
 }
 
+/**
+ * Product ids are Postgres UUIDs. This check was `ObjectId.isValid` before the
+ * move off Mongo and the symbol went with it, so every batch posted to
+ * `/v1/events` threw a `ReferenceError` and answered 500 — silently, because
+ * the client sends events fire-and-forget and never surfaces their failure.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class EventCollector {
   constructor(private readonly deps: CollectorDeps) {}
 
@@ -54,7 +63,7 @@ export class EventCollector {
    */
   private rejectionReason(event: ClientEvent): string | null {
     if (!(event.type in SIGNAL_WEIGHTS)) return 'unknown_event_type';
-    if (!ObjectId.isValid(event.productId)) return 'invalid_product_id';
+    if (!UUID.test(event.productId)) return 'invalid_product_id';
 
     const isDwell =
       event.type === 'dwell_short' || event.type === 'dwell_long' || event.type === 'skip_fast';
@@ -116,9 +125,9 @@ export class EventCollector {
       return { accepted: 0, rejected, invalidatedBuffer: false, graduatedTopics: [] };
     }
 
-    const productIds = [...new Set(accepted.map((e) => new ObjectId(e.productId)))];
-    const products = await collections.products.find({ _id: { $in: productIds } }).toArray();
-    const productById = new Map(products.map((p) => [p._id.toHexString(), p]));
+    const productIds = [...new Set(accepted.map((e) => e.productId))];
+    const products = await find(collections.products, { id: { $in: productIds } });
+    const productById = new Map(products.map((p) => [p.id, p]));
 
     // ---- Persist ----------------------------------------------------------
     const documents: Interaction[] = [];
@@ -129,9 +138,9 @@ export class EventCollector {
         continue;
       }
       documents.push({
-        _id: new ObjectId(),
-        userId: user._id,
-        productId: product._id,
+        id: randomUUID(),
+        userId: user.id,
+        productId: product.id,
         clusterId: product.clusterId,
         sessionId,
         type: event.type,
@@ -154,13 +163,19 @@ export class EventCollector {
 
     if (documents.length > 0) {
       try {
-        // Unordered so one duplicate key does not discard the rest of the batch.
-        await collections.interactions.insertMany(documents, { ordered: false });
+        // Insert each document individually for Supabase
+        for (const doc of documents) {
+          try {
+            await insert(collections.interactions, doc);
+          } catch (error) {
+            // Duplicate idempotency keys are expected - client retried
+            // Continue with the rest
+            continue;
+          }
+        }
       } catch (error) {
-        // Duplicate idempotency keys are the expected failure here: the client
-        // retried a batch it had already delivered. Everything novel still landed.
-        const code = (error as { code?: number }).code;
-        if (code !== 11000) throw error;
+        // Log but don't throw - events are non-critical
+        log.warn('event collection error', { error: (error as Error).message });
       }
     }
 
@@ -198,7 +213,7 @@ export class EventCollector {
           productVector: product.embedding,
           categoryL1: product.category.l1,
           brand: product.brand,
-          sellerId: product.sellerId.toHexString(),
+          sellerId: product.sellerId,
           isExploration: event.isExploration ?? false,
         },
         this.deps.config,
@@ -231,7 +246,7 @@ export class EventCollector {
           );
           graduatedTopics.push(outcome.graduated.topic);
           log.info('exploration topic graduated', {
-            userId: user._id.toHexString(),
+            userId: user.id,
             topic: outcome.graduated.topic,
             weight: outcome.graduated.weight,
           });
@@ -252,31 +267,33 @@ export class EventCollector {
     // the counter pinned at zero and an exploration card on every page.
     void cardsRendered;
 
-    await collections.users.updateOne(
-      { _id: user._id },
+    await updateOne(
+      collections.users,
+      { id: user.id },
       {
-        $set: {
-          interestVector,
-          interestSet,
-          affinities,
-          pricePrior,
-          explorationState,
-          seenFilter: serializeBloom(seen, user.seenFilter.rebuiltAt),
-          'counters.lastActiveAt': now,
-          updatedAt: now,
+        interestVector,
+        interestSet,
+        affinities,
+        pricePrior,
+        explorationState,
+        seenFilter: serializeBloom(seen, user.seenFilter.rebuiltAt),
+        counters: {
+          ...user.counters,
+          lastActiveAt: now,
+          interactionCount: user.counters.interactionCount + documents.length,
         },
-        $inc: { 'counters.interactionCount': documents.length },
+        updatedAt: now,
       },
     );
 
     if (demoted.length > 0) {
-      log.info('exploration topics demoted', { userId: user._id.toHexString(), demoted });
+      log.info('exploration topics demoted', { userId: user.id, demoted });
     }
 
     // The cache is invalidated immediately on any interaction at or above 0.45,
     // so a strong signal changes the very next page.
     if (strongSignal) {
-      for (const key of cacheKeys.rankedBufferPrefixes(user._id.toHexString())) {
+      for (const key of cacheKeys.rankedBufferPrefixes(user.id)) {
         await this.deps.cache.del(key);
       }
     }

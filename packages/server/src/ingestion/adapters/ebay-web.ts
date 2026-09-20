@@ -473,7 +473,7 @@ export class EbayWebAdapter implements WebSourceAdapter {
   private readonly now: () => Date;
 
   constructor(source: SourceDoc<string>, options: Partial<EbayWebOptions> = {}) {
-    this.domain = source._id;
+    this.domain = source.id;
     this.seeds = options.seeds ?? EBAY_WEB_DEFAULT_SEEDS;
     this.fetchImpl = options.fetchImpl ?? primedFetch;
     this.now = options.now ?? (() => new Date());

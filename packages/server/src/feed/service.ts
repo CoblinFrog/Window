@@ -1,4 +1,3 @@
-import { ObjectId } from 'mongodb';
 import {
   BUFFER_CONFIG,
   RETURNING_USER,
@@ -9,7 +8,8 @@ import {
   type ProductCard,
   type RankingConfig,
 } from '@window/shared';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
+import { count, find, findOne, updateOne } from '../db/supabase-helpers.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
 import { logger } from '../lib/logger.js';
 import { RankingService } from '../ranking/service.js';
@@ -69,7 +69,7 @@ export class FeedService {
 
     // The buffer absorbs rapid paging within a 90-second window. It is keyed by
     // mode because the two modes want different shapes of the same ranked list.
-    const cacheKey = cacheKeys.rankedBuffer(user._id.toHexString(), request.mode);
+    const cacheKey = cacheKeys.rankedBuffer(user.id, request.mode);
     const cached = await this.deps.cache.get<{ productIds: string[]; at: number }>(cacheKey);
 
     try {
@@ -77,6 +77,19 @@ export class FeedService {
         request.mode === 'window'
           ? await this.windowPage(user, request, limit, now)
           : await this.singlePage(user, request, limit, now);
+
+      // A ranked page with nothing in it is a failure that did not throw: an
+      // empty or stale vector index produces no candidates, and returning the
+      // empty page as-is leaves the client with a buffer it cannot fill and no
+      // reason why. The ladder below reaches the catalog directly, so it still
+      // has something to serve.
+      if (result.items.length === 0) {
+        log.warn('ranked page came back empty; descending the degradation ladder', {
+          userId: user.id,
+          mode: request.mode,
+        });
+        return this.degrade(user, request, limit, cached?.productIds ?? [], now);
+      }
 
       await this.deps.cache.set(
         cacheKey,
@@ -87,16 +100,17 @@ export class FeedService {
       // The ranker computed what the interval has left over after this page;
       // the feed service is simply the thing that persists it. Decrementing
       // from anywhere else means two writers racing on one number.
-      await this.deps.collections.users.updateOne(
-        { _id: user._id },
-        { $set: { 'explorationState.counter': result.nextExplorationCounter } },
+      await updateOne(
+        this.deps.collections.users,
+        { id: user.id },
+        { explorationState: { ...user.explorationState, counter: result.nextExplorationCounter } },
       );
 
       return result;
     } catch (error) {
       log.error('ranking failed; descending the degradation ladder', {
         error: (error as Error).message,
-        userId: user._id.toHexString(),
+        userId: user.id,
       });
       return this.degrade(user, request, limit, cached?.productIds ?? [], now);
     }
@@ -163,7 +177,7 @@ export class FeedService {
     );
 
     const seeds = chooseQuadSeeds(ranked.items, config, paneCount);
-    const used = new Set<string>(seeds.map((s) => s.candidate._id.toHexString()));
+    const used = new Set<string>(seeds.map((s) => s.candidate.id));
     const panes: VectorCandidate[][] = [];
 
     for (const seed of seeds) {
@@ -179,8 +193,8 @@ export class FeedService {
           priceMax: seed.band.max,
           excludeIds: [
             ...user.suppressions.products,
-            ...request.seenIds.filter(ObjectId.isValid).map((id) => new ObjectId(id)),
-            ...[...used].map((id) => new ObjectId(id)),
+            ...request.seenIds,
+            ...[...used],
           ],
           excludeBrands: user.suppressions.brands,
           excludeSellerIds: user.suppressions.sellers,
@@ -197,7 +211,7 @@ export class FeedService {
       // unrelated tiles; four unrelated objects read as a junk drawer.
       if (!quad) continue;
 
-      for (const tile of quad) used.add(tile._id.toHexString());
+      for (const tile of quad) used.add(tile.id);
       panes.push(quad);
     }
 
@@ -207,7 +221,7 @@ export class FeedService {
     // entire unfamiliar storefront, presented at its best. That is a truer
     // reading of the shop-window metaphor than one odd item on a shelf.
     const explorationRandom = seededRandom(
-      `${user._id.toHexString()}:${request.sessionId}:${request.seenIds.length}:explore-pane`,
+      `${user.id}:${request.sessionId}:${request.seenIds.length}:explore-pane`,
     );
     const slots = explorationSlotsForPage(
       user.explorationState.counter,
@@ -221,10 +235,10 @@ export class FeedService {
     const explorationIndexes: number[] = [];
 
     if (slots.positions.length > 0 && panes.length > 0) {
-      const categories = await this.deps.collections.categories.find({ level: 1 }).toArray();
+      const categories = await find(this.deps.collections.categories, { level: 1 });
       const topic = chooseExplorationTopic(
         user,
-        new Map(categories.map((c) => [c._id, c])) as never,
+        new Map(categories.map((c) => [c.id, c])) as never,
         config,
         explorationRandom,
         now,
@@ -239,7 +253,7 @@ export class FeedService {
           );
           panes[paneIndex] = pane;
           explorationTopic = topic;
-          explorationProductId = (pane[0] as VectorCandidate)._id.toHexString();
+          explorationProductId = (pane[0] as VectorCandidate).id;
           for (let offset = 0; offset < pane.length; offset++) {
             explorationIndexes.push(paneIndex * size + offset);
           }
@@ -281,23 +295,23 @@ export class FeedService {
     const size = this.config.quads.size;
     const seen = deserializeBloom(user.seenFilter);
 
-    const docs = await this.deps.collections.products
-      .find({
+    const docs = await find(
+      this.deps.collections.products,
+      {
         'category.l1': topic,
         status: 'active',
         'stock.inStock': true,
         'risk.tier': { $in: ['clear', 'watch'] },
-        _id: { $nin: user.suppressions.products },
-      })
-      .sort({ 'quality.score': -1, 'engagement.ctrSmoothed': -1 })
-      .limit(240)
-      .toArray();
+        id: { $nin: user.suppressions.products },
+      },
+      { limit: 240, orderBy: [{ column: 'quality.score', ascending: false }, { column: 'engagement.ctrSmoothed', ascending: false }] },
+    );
 
     // Grouped by L2 so the pane is still one coherent window rather than a
     // sampler of the whole topic.
     const byL2 = new Map<string, VectorCandidate[]>();
     for (const doc of docs) {
-      const key = doc._id.toHexString();
+      const key = doc.id;
       if (used.has(key) || bloomHas(seen, key)) continue;
       if (doc.auction && doc.auction.endsAt.getTime() <= now.getTime()) continue;
 
@@ -352,7 +366,7 @@ export class FeedService {
             mode: 'single',
             limit: limit - reentry.length,
             sessionId: request.sessionId,
-            seenIds: [...request.seenIds, ...reentry.map((c) => c._id.toHexString())],
+            seenIds: [...request.seenIds, ...reentry.map((c) => c.id)],
           },
           now,
         );
@@ -361,7 +375,7 @@ export class FeedService {
           explorationIndexes: remainder.explorationIndexes.map((i) => i + reentry.length),
           explorationProductId:
             remainder.explorationIndexes.length > 0
-              ? (remainder.items[remainder.explorationIndexes[0] as number]?._id.toHexString() ?? null)
+              ? (remainder.items[remainder.explorationIndexes[0] as number]?.id ?? null)
               : null,
           explorationTopic: remainder.explorationTopic,
           nextExplorationCounter: remainder.nextExplorationCounter,
@@ -386,7 +400,7 @@ export class FeedService {
         explorationIndexes: ranked.explorationIndexes,
         explorationProductId:
           ranked.explorationIndexes.length > 0
-            ? (ranked.items[ranked.explorationIndexes[0] as number]?._id.toHexString() ?? null)
+            ? (ranked.items[ranked.explorationIndexes[0] as number]?.id ?? null)
             : null,
         explorationTopic: ranked.explorationTopic,
         nextExplorationCounter: ranked.nextExplorationCounter,
@@ -465,13 +479,13 @@ export class FeedService {
       for (const index of ranked.explorationIndexes) {
         const card = ranked.items[index];
         if (card) {
-          explorationProductId = card._id.toHexString();
-          explorationIndexes.push(items.length + blockItems.findIndex((c) => c._id.equals(card._id)));
+          explorationProductId = card.id;
+          explorationIndexes.push(items.length + blockItems.findIndex((c) => c.id === card.id));
         }
       }
 
       for (const candidate of blockItems) {
-        const key = candidate._id.toHexString();
+        const key = candidate.id;
         if (seen.has(key)) continue;
         seen.add(key);
         items.push(candidate);
@@ -493,7 +507,7 @@ export class FeedService {
       );
       for (const candidate of backfill.items) {
         if (items.length >= limit) break;
-        if (seen.has(candidate._id.toHexString())) continue;
+        if (seen.has(candidate.id)) continue;
         items.push(candidate);
       }
     }
@@ -537,7 +551,7 @@ export class FeedService {
         mode: 'single',
         limit: plan.fromRising,
         sessionId: request.sessionId,
-        seenIds: [...request.seenIds, ...strongest.items.map((c) => c._id.toHexString())],
+        seenIds: [...request.seenIds, ...strongest.items.map((c) => c.id)],
         restrictToTopics: plan.risingTopics,
         injectExploration: false,
       },
@@ -549,12 +563,12 @@ export class FeedService {
 
   /** Topics whose engagement has grown since the nightly rollup. */
   private async risingTopics(): Promise<string[]> {
-    const docs = await this.deps.collections.categories
-      .find({ level: 1 })
-      .sort({ 'engagement.medianCtr': -1 })
-      .limit(6)
-      .toArray();
-    return docs.map((d) => d._id);
+    const docs = await find(
+      this.deps.collections.categories,
+      { level: 1 },
+      { limit: 6, orderBy: [{ column: 'engagement.medianCtr', ascending: false }] },
+    );
+    return docs.map((d) => d.id);
   }
 
   // -------------------------------------------------------------------------
@@ -570,13 +584,13 @@ export class FeedService {
   ): Promise<ProductCard[]> {
     if (candidates.length === 0) return [];
 
-    const sources = await this.deps.collections.sources.find({}).toArray();
+    const sources = await find(this.deps.collections.sources, {});
     const context = await buildCardContext(
       candidates,
       {
         sellers: this.deps.collections.sellers as never,
         clusters: this.deps.collections.clusters as never,
-        merchantNames: new Map(sources.map((s) => [s._id, s.displayName])),
+        merchantNames: new Map(sources.map((s) => [s.id, s.displayName])),
       },
       { includeGallery, explorationProductId, explorationTopic, now },
     );
@@ -602,41 +616,41 @@ export class FeedService {
     let docs: VectorCandidate[] = [];
 
     if (cachedIds.length > 0) {
-      const ids = cachedIds.filter(ObjectId.isValid).map((id) => new ObjectId(id));
-      docs = (await collections.products
-        .find({ _id: { $in: ids }, status: 'active', 'stock.inStock': true })
-        .limit(limit)
-        .toArray()) as unknown as VectorCandidate[];
+      docs = (await find(
+        collections.products,
+        { id: { $in: cachedIds }, status: 'active', 'stock.inStock': true },
+        { limit },
+      )) as unknown as VectorCandidate[];
     }
 
     if (docs.length < limit) {
       const topics = user.interestSet.map((entry) => entry.topic);
       if (topics.length > 0) {
         level = 'topic_popularity';
-        docs = (await collections.products
-          .find({
+        docs = (await find(
+          collections.products,
+          {
             'category.l1': { $in: topics },
             status: 'active',
             'stock.inStock': true,
             'risk.tier': { $in: ['clear', 'watch'] },
-          })
-          .sort({ 'engagement.ctrSmoothed': -1, 'quality.score': -1 })
-          .limit(limit)
-          .toArray()) as unknown as VectorCandidate[];
+          },
+          { limit, orderBy: [{ column: 'engagement.ctrSmoothed', ascending: false }, { column: 'quality.score', ascending: false }] },
+        )) as unknown as VectorCandidate[];
       }
     }
 
     if (docs.length < limit) {
       level = 'global_popularity';
-      docs = (await collections.products
-        .find({
+      docs = (await find(
+        collections.products,
+        {
           status: 'active',
           'stock.inStock': true,
           'risk.tier': { $in: ['clear', 'watch'] },
-        })
-        .sort({ 'engagement.ctrSmoothed': -1, 'quality.score': -1 })
-        .limit(limit)
-        .toArray()) as unknown as VectorCandidate[];
+        },
+        { limit, orderBy: [{ column: 'engagement.ctrSmoothed', ascending: false }, { column: 'quality.score', ascending: false }] },
+      )) as unknown as VectorCandidate[];
     }
 
     const withScores = docs.map((doc) => ({ ...doc, vectorScore: 0.5 }));
@@ -671,7 +685,7 @@ export class FeedService {
     if (user.explorationState.counter > 0) return user.explorationState.counter;
     return drawExplorationCounter(
       this.config,
-      seededRandom(`${user._id.toHexString()}:exploration`),
+      seededRandom(`${user.id}:exploration`),
     );
   }
 

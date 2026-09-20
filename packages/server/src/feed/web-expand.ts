@@ -50,10 +50,10 @@ function overlap(query: Set<string>, text: string): number {
   return n;
 }
 
-/** A minimal SourceDoc for a registry miss — the adapters only read `_id`. */
+/** A minimal SourceDoc for a registry miss — the adapters only read `id`. */
 function syntheticSource(domain: string): SourceDoc<string> {
   return {
-    _id: domain,
+    id: domain,
     displayName: domain,
     tier: 2,
     sourceType: domain === 'ebay.com' ? 'secondhand' : 'new',

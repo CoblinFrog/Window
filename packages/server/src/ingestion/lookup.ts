@@ -59,10 +59,10 @@ function sourceIdFor(domain: 'amazon.com' | 'ebay.com', url: string): string {
 
 const LOOKUP_CONTEXT: CrawlContext = { rps: 1, concurrency: 1, proxyPool: 'none' };
 
-/** A minimal SourceDoc when the registry row is absent — the adapters only read `_id`. */
+/** A minimal SourceDoc when the registry row is absent — the adapters only read `id`. */
 function syntheticSource(domain: string): SourceDoc<string> {
   return {
-    _id: domain,
+    id: domain,
     displayName: domain,
     tier: 2,
     sourceType: domain === 'ebay.com' ? 'secondhand' : 'new',

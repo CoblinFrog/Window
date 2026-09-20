@@ -10,7 +10,7 @@
 
 import type { SourceDoc } from '@window/shared';
 import type { StockVerifier, VerificationResult } from '../cart/service.js';
-import type { Product } from '../db/collections.js';
+import type { Product } from '../db/supabase-collections.js';
 import { logger } from '../lib/logger.js';
 import { AmazonWebAdapter } from './adapters/amazon-web.js';
 import { EbayWebAdapter } from './adapters/ebay-web.js';
@@ -24,7 +24,8 @@ import {
   type CrawlContext,
   type SourceAdapter,
 } from './types.js';
-import type { CollectionSet } from '../db/collections.js';
+import type { CollectionSet } from '../db/supabase-collections.js';
+import { findOne, updateOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('ingestion.live');
 
@@ -52,7 +53,7 @@ export function liveAdapterFor(
   deps: { fetchImpl?: FetchLike; secret?: (name: string) => string | undefined } = {},
 ): SourceAdapter {
   const fetchImpl = deps.fetchImpl ?? primedFetch;
-  const web = WEB_ADAPTERS[source._id];
+  const web = WEB_ADAPTERS[source.id];
   if (web !== undefined && !canServe(source, 1, deps)) {
     return new web(source, { fetchImpl });
   }
@@ -81,7 +82,7 @@ export async function refreshProduct(deps: RefreshDeps, product: Product): Promi
   }
 
   const source =
-    (await deps.collections.sources.findOne({ _id: product.source.domain })) ??
+    (await findOne<SourceDoc<string>>(deps.collections.sources, { id: product.source.domain })) ??
     sourceById(product.source.domain);
   if (source === null || source === undefined) return 'unavailable';
 
@@ -115,10 +116,10 @@ export async function refreshProduct(deps: RefreshDeps, product: Product): Promi
       REFRESH_CONTEXT,
     );
     if (check?.removed) {
-      await deps.collections.products.updateOne(
-        { _id: product._id },
-        { $set: { status: 'dead' as const, 'stock.inStock': false } },
-      );
+      await updateOne(deps.collections.products, { id: product.id }, {
+        status: 'dead' as const,
+        stock: { ...product.stock, inStock: false },
+      });
       return 'removed';
     }
     return 'unchanged';
@@ -146,14 +147,14 @@ export class AdapterVerifier implements StockVerifier {
     const results: VerificationResult[] = [];
     for (const product of products) {
       const stored: VerificationResult = {
-        productId: product._id.toHexString(),
+        productId: product.id,
         inStock: product.stock.inStock && product.status === 'active',
         priceAmount: product.price.amount,
         currency: product.price.currency,
       };
 
       const source =
-        (await this.deps.collections.sources.findOne({ _id: product.source.domain })) ??
+        (await findOne<SourceDoc<string>>(this.deps.collections.sources, { id: product.source.domain })) ??
         sourceById(product.source.domain);
       if (!source) {
         results.push(stored);

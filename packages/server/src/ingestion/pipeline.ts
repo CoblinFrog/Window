@@ -1,4 +1,3 @@
-import { ObjectId } from 'mongodb';
 import {
   CLUSTERING,
   QUALITY_GATE,
@@ -10,7 +9,9 @@ import {
   type ProductDoc,
   type SourceType,
 } from '@window/shared';
-import type { CollectionSet, Cluster, Product, Seller } from '../db/collections.js';
+import { randomUUID } from 'node:crypto';
+import type { CollectionSet, Cluster, Product, Seller } from '../db/supabase-collections.js';
+import { deleteMany, find, findOne, insert, insertMany, updateOne } from '../db/supabase-helpers.js';
 import type { EmbeddingProvider } from '../embedding/provider.js';
 import type { MediaPipeline } from '../media/pipeline.js';
 import { logger } from '../lib/logger.js';
@@ -70,8 +71,8 @@ export interface IngestionDeps {
 
 export interface IngestResult {
   status: 'ingested' | 'rejected' | 'unchanged';
-  productId: ObjectId | null;
-  clusterId: ObjectId | null;
+  productId: string | null;
+  clusterId: string | null;
   rejectReason: RejectReason | null;
   matchStrength: MatchStrength;
 }
@@ -206,12 +207,12 @@ export class IngestionPipeline {
     const heroImage: MediaImage = hero;
 
     // ---- Reviews ----------------------------------------------------------
-    const clusterId = match.cluster?._id ?? new ObjectId();
+    const clusterId = match.cluster?.id ?? crypto.randomUUID();
     const storedReviews = await this.storeReviews(raw, clusterId, now);
 
     // ---- Quality ----------------------------------------------------------
     const priors = this.deps.categoryPriors?.get(classification.l3) ?? DEFAULT_PRIORS;
-    const existing = await collections.products.findOne({
+    const existing = await findOne(collections.products, {
       'source.domain': raw.sourceDomain,
       'source.sourceId': raw.sourceId,
     });
@@ -247,13 +248,13 @@ export class IngestionPipeline {
     // ---- Risk -------------------------------------------------------------
     const duplicateImageSellers = await this.findDuplicateImageSellers(
       heroImage.blurhash,
-      seller._id,
+      seller.id,
     );
     const categoryPriceStats = await this.categoryPriceStats(classification.l3);
 
     const riskInput: RiskInput = {
       product: {
-        id: existing?._id?.toHexString() ?? 'pending',
+        id: existing?.id ?? 'pending',
         title,
         description: raw.description,
         brand,
@@ -304,7 +305,7 @@ export class IngestionPipeline {
     const status: ProductDoc['status'] = risk.tier === 'blocked' ? 'rejected' : 'active';
 
     // ---- Upsert -----------------------------------------------------------
-    const product: Omit<Product, '_id'> = {
+    const product: Omit<Product, 'id'> = {
       clusterId,
       source: {
         domain: raw.sourceDomain,
@@ -336,7 +337,7 @@ export class IngestionPipeline {
         : null,
       specs,
       media: { hero: heroImage, gallery, video: await this.ingestVideo(raw) },
-      sellerId: seller._id,
+      sellerId: seller.id,
       embedding,
       embeddingVersion: this.deps.embedder.version,
       quality,
@@ -361,11 +362,23 @@ export class IngestionPipeline {
       rejectReason: null,
     };
 
-    const upserted = await collections.products.findOneAndUpdate(
-      { 'source.domain': raw.sourceDomain, 'source.sourceId': raw.sourceId },
-      { $set: product },
-      { upsert: true, returnDocument: 'after' },
-    );
+    // Check if product exists
+    const existingProduct = await findOne(collections.products, {
+      'source.domain': raw.sourceDomain,
+      'source.sourceId': raw.sourceId,
+    });
+
+    let upserted: Product;
+    if (existingProduct) {
+      // Update existing
+      upserted = await updateOne(collections.products,
+        { 'source.domain': raw.sourceDomain, 'source.sourceId': raw.sourceId },
+        product
+      );
+    } else {
+      // Insert new
+      upserted = await insert(collections.products, product);
+    }
 
     const stored = upserted as Product | null;
     if (!stored) throw new Error('Product upsert returned no document.');
@@ -375,7 +388,7 @@ export class IngestionPipeline {
 
     return {
       status: 'ingested',
-      productId: stored._id,
+      productId: stored.id,
       clusterId,
       rejectReason: null,
       matchStrength: match.strength,
@@ -429,7 +442,7 @@ export class IngestionPipeline {
       sourceSellerId: rawSeller?.sourceSellerId ?? raw.sourceDomain,
     };
 
-    const update: Omit<Seller, '_id'> = {
+    const update: Omit<Seller, 'id'> = {
       sourceDomain: key.sourceDomain,
       sourceSellerId: key.sourceSellerId,
       handle: rawSeller?.handle ?? raw.sourceDomain,
@@ -472,15 +485,13 @@ export class IngestionPipeline {
       updatedAt: now,
     };
 
-    const result = await collections.sellers.findOneAndUpdate(
-      key,
-      {
-        $set: update,
-        // `suppressed` is an enforcement decision and must survive a re-crawl.
-        $setOnInsert: {},
-      },
-      { upsert: true, returnDocument: 'after' },
-    );
+    const existingSeller = await findOne(collections.sellers, key);
+    let result: Seller;
+    if (existingSeller) {
+      result = await updateOne(collections.sellers, key, update);
+    } else {
+      result = await insert(collections.sellers, update);
+    }
     const seller = result as Seller | null;
     if (!seller) throw new Error('Seller upsert returned no document.');
     return seller;
@@ -512,7 +523,7 @@ export class IngestionPipeline {
             : { [`identifiers.${kind}`]: value };
         })
         .filter(Boolean);
-      const candidate = await collections.clusters.findOne({ $or: identifierQuery } as never);
+      const candidate = await findOne(collections.clusters, { $or: identifierQuery } as never);
       if (candidate && candidate.sourceTypes.every((t) => mayCluster(input.sourceType, t, 'identifier'))) {
         return { cluster: candidate, strength: 'identifier' };
       }
@@ -522,7 +533,7 @@ export class IngestionPipeline {
     const model = extractModelNumber(input.title, input.brand);
     const key = brandModelKey(input.brand, model);
     if (key && input.sourceType === 'new') {
-      const candidate = await collections.clusters.findOne({
+      const candidate = await findOne(collections.clusters, {
         brand: input.brand,
         'identifiers.mpn': model,
         'category.l3': input.categoryL3,
@@ -539,7 +550,7 @@ export class IngestionPipeline {
         .limit(200)
         .toArray();
       const candidates: FuzzyCandidate[] = nearby.map((c) => ({
-        clusterId: c._id.toHexString(),
+        clusterId: c.id,
         embedding: c.embedding,
         medianPrice: c.priceRange.median,
         categoryL3: c.category.l3,
@@ -555,7 +566,7 @@ export class IngestionPipeline {
         candidates,
       );
       if (hit) {
-        const cluster = nearby.find((c) => c._id.toHexString() === hit.clusterId) ?? null;
+        const cluster = nearby.find((c) => c.id === hit.clusterId) ?? null;
         if (cluster) return { cluster, strength: 'fuzzy' };
       }
     }
@@ -563,10 +574,10 @@ export class IngestionPipeline {
     return { cluster: null, strength: 'none' };
   }
 
-  private async storeReviews(raw: RawListing, clusterId: ObjectId, now: Date) {
+  private async storeReviews(raw: RawListing, clusterId: string, now: Date) {
     const { collections } = this.deps;
     if (raw.reviews.length === 0) {
-      const stored = await collections.reviews.find({ clusterId }).limit(REVIEW_FETCH_CAP).toArray();
+      const stored = await find(collections.reviews, { clusterId }, { limit: REVIEW_FETCH_CAP });
       return stored.map((r) => ({
         source: r.source,
         rating: r.rating,
@@ -583,7 +594,7 @@ export class IngestionPipeline {
     }
 
     const incoming = raw.reviews.map((r) => toAggregated(r, raw.sourceDomain, now));
-    const existing = await collections.reviews.find({ clusterId }).limit(REVIEW_FETCH_CAP).toArray();
+    const existing = await find(collections.reviews, { clusterId }, { limit: REVIEW_FETCH_CAP });
     const merged = [
       ...existing
         .filter((r) => r.source.domain !== raw.sourceDomain)
@@ -608,10 +619,10 @@ export class IngestionPipeline {
     // The stored set is rewritten wholesale rather than diffed: bucket
     // membership is a property of the corpus, not of a review, so one new
     // critical review can move several others between buckets.
-    await collections.reviews.deleteMany({ clusterId });
+    await deleteMany(collections.reviews, { clusterId });
     if (bucketed.length > 0) {
-      await collections.reviews.insertMany(
-        bucketed.map((r) => ({ _id: new ObjectId(), clusterId, ...r })),
+      await insertMany(collections.reviews,
+        bucketed.map((r) => ({ id: randomUUID(), clusterId, ...r })),
       );
     }
     return bucketed;
@@ -619,16 +630,14 @@ export class IngestionPipeline {
 
   private async findDuplicateImageSellers(
     blurhash: string,
-    sellerId: ObjectId,
+    sellerId: string,
   ): Promise<string[]> {
     const { collections } = this.deps;
-    const matches = await collections.products
-      .find(
-        { 'media.hero.blurhash': blurhash, sellerId: { $ne: sellerId } },
-        { projection: { sellerId: 1 }, limit: 10 },
-      )
-      .toArray();
-    return [...new Set(matches.map((m) => m.sellerId.toHexString()))];
+    const matches = await find(collections.products,
+      { 'media.hero.blurhash': blurhash, sellerId: { $ne: sellerId } },
+      { select: 'sellerId', limit: 10 }
+    );
+    return [...new Set(matches.map((m) => m.sellerId))];
   }
 
   private async categoryPriceStats(
@@ -651,7 +660,7 @@ export class IngestionPipeline {
 
   /** Recomputes the cluster from its members and refreshes the review rollup. */
   private async recomputeCluster(
-    clusterId: ObjectId,
+    clusterId: string,
     category: { l1: string; l2: string; l3: string },
     title: string,
     brand: string | null,
@@ -660,33 +669,21 @@ export class IngestionPipeline {
   ): Promise<void> {
     const { collections } = this.deps;
 
-    const members = await collections.products
-      .find(
-        { clusterId, status: { $in: ['active', 'stale'] } },
-        {
-          projection: {
-            _id: 1,
-            'price.amount': 1,
-            'price.currency': 1,
-            'shipping.amount': 1,
-            'stock.inStock': 1,
-            'quality.score': 1,
-            'risk.score': 1,
-            sourceType: 1,
-            embedding: 1,
-          },
-        },
-      )
-      .toArray();
+    const members = await find(collections.products,
+      { clusterId, status: { $in: ['active', 'stale'] } },
+      {
+        select: 'id,price,shipping,stock,quality,risk,sourceType,embedding',
+      }
+    );
 
     if (members.length === 0) return;
 
     const aggregate = aggregateCluster(
       members.map(
         (m): ClusterMember => ({
-          productId: m._id.toHexString(),
+          productId: m.id,
           priceAmount: m.price.amount,
-          shippingAmount: m.shipping?.amount ?? 0,
+          shippingAmount: m.shipping.amount ?? 0,
           currency: m.price.currency,
           inStock: m.stock.inStock,
           qualityScore: m.quality?.score ?? 0,
@@ -697,7 +694,7 @@ export class IngestionPipeline {
       ),
     );
 
-    const storedReviews = await collections.reviews.find({ clusterId }).limit(REVIEW_FETCH_CAP).toArray();
+    const storedReviews = await find(collections.reviews, { clusterId }, { limit: REVIEW_FETCH_CAP });
     const samples = toQualitySamples(
       storedReviews.map((r) => ({
         source: r.source,
@@ -731,7 +728,7 @@ export class IngestionPipeline {
     );
     const themes = extractThemes(samples);
 
-    const existing = await collections.clusters.findOne({ _id: clusterId });
+    const existing = await findOne(collections.clusters, { id: clusterId });
     const needsSummary = shouldRegenerateSummary(
       existing ? { count: existing.reviews.count, meanRating: existing.reviews.meanRating } : null,
       { count: ratings.count, meanRating: ratings.meanRating },
@@ -750,8 +747,8 @@ export class IngestionPipeline {
           }
         : (existing?.reviews?.summary ?? null);
 
-    const update: Omit<ClusterDoc<ObjectId>, '_id'> = {
-      canonicalProductId: new ObjectId(aggregate.canonicalProductId),
+    const update: Omit<ClusterDoc<string>, 'id'> = {
+      canonicalProductId: aggregate.canonicalProductId,
       title: existing?.title ?? title,
       brand: existing?.brand ?? brand,
       category: { ...category },
@@ -772,7 +769,7 @@ export class IngestionPipeline {
       updatedAt: now,
     };
 
-    await collections.clusters.updateOne({ _id: clusterId }, { $set: update }, { upsert: true });
+    await updateOne(collections.clusters, { id: clusterId }, update);
   }
 
   private async recordRejection(
@@ -781,20 +778,58 @@ export class IngestionPipeline {
     detail: string | null,
     now: Date,
   ): Promise<void> {
-    await this.deps.collections.products.updateOne(
-      { 'source.domain': raw.sourceDomain, 'source.sourceId': raw.sourceId },
-      {
-        $set: {
+    const existing = await findOne(this.deps.collections.products, {
+      'source.domain': raw.sourceDomain,
+      'source.sourceId': raw.sourceId,
+    });
+    
+    if (existing) {
+      await updateOne(this.deps.collections.products,
+        { id: existing.id },
+        {
           status: 'rejected',
           rejectReason: detail ? `${reason}: ${detail}` : reason,
           'crawl.lastCrawledAt': now,
           rawTitle: raw.title,
           'source.url': raw.url,
+        }
+      );
+    } else {
+      await insert(this.deps.collections.products, {
+        status: 'rejected',
+        rejectReason: detail ? `${reason}: ${detail}` : reason,
+        'crawl.lastCrawledAt': now,
+        'crawl.firstSeenAt': now,
+        rawTitle: raw.title,
+        'source.url': raw.url,
+        source: {
+          domain: raw.sourceDomain,
+          sourceId: raw.sourceId,
+          tier: 'tier1' as const,
+          url: raw.url,
         },
-        $setOnInsert: { 'crawl.firstSeenAt': now },
-      },
-      { upsert: true },
-    );
+        sourceType: raw.sourceType,
+        title: raw.title,
+        brand: null,
+        identifiers: raw.identifiers,
+        category: { l1: '', l2: '', l3: '' },
+        price: { amount: 0, currency: 'USD' },
+        originalPrice: null,
+        shipping: { amount: 0, currency: 'USD', freeThreshold: null },
+        condition: 'unknown',
+        stock: { inStock: false, quantity: null, singleUnit: false },
+        auction: null,
+        specs: [],
+        media: { hero: null as any, gallery: [], video: null },
+        sellerId: '',
+        embedding: [],
+        embeddingVersion: '',
+        quality: { score: 0, cautions: [] },
+        risk: { tier: 'high', score: 1, flags: [], reviewedBy: null },
+        engagement: { impressions: 0, interactions: 0, ctrSmoothed: 0, cartAdds: 0 },
+        clusterId: null,
+      });
+    }
   }
 }
 
