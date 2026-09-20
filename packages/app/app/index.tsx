@@ -331,15 +331,27 @@ export default function FeedScreen(): React.ReactElement {
   const sheetOpen =
     reviewsFor !== null || sellerFor !== null || menuFor !== null || reasonFor !== null || askOpen;
 
+  /** The pane view is the only place a single product is what the screen is about. */
+  const inPane = feed.mode === 'single';
+
   useKeyboardControls(
     {
       onNext: next,
       onPrev: prev,
       onModeLeft: () => switchMode('left'),
       onModeRight: () => switchMode('right'),
-      onUpvote: () => card && toggleUpvote(card),
-      onReviews: () => card && openReviews(card, false),
-      onCart: () => card && addToCart(card),
+      // The card bindings belong to the pane view and nowhere else. The window
+      // screen shows four products at once and singles none of them out, so
+      // there is nothing on screen that "upvote" could be pointing at. It used
+      // to act on `feed.cursor` anyway — a cursor the grid barely expresses —
+      // so pressing L there liked whichever of the four the feed happened to
+      // be counting from, which from the outside is one of them at random.
+      //
+      // Scrolling and the mode keys stay: those act on the screen itself,
+      // which is a thing the window screen does have.
+      onUpvote: () => inPane && card && toggleUpvote(card),
+      onReviews: () => inPane && card && openReviews(card, false),
+      onCart: () => inPane && card && addToCart(card),
       onPlayPause: () => undefined,
       onEscape: () => {
         // The panel closes itself on Escape; the feed must not also act on it.
@@ -494,7 +506,9 @@ export default function FeedScreen(): React.ReactElement {
 
       {layout.showKeyboardHints ? (
         <Text style={styles.hints}>
-          ↑↓ scroll · tap to step closer · Esc back · L upvote · C reviews · B cart
+          {inPane
+            ? '↑↓ scroll · Esc back · L upvote · C reviews · B cart'
+            : '↑↓ scroll · tap to step closer'}
         </Text>
       ) : null}
 

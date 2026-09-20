@@ -21,7 +21,7 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
-import { BREAKPOINTS, COLORS, ICON, MOTION, RADIUS, SPACING, TYPE, type ChatResponse } from '@window/shared';
+import { COLORS, ICON, MOTION, RADIUS, SPACING, TYPE, type ChatResponse } from '@window/shared';
 import { Icon } from './Icon.js';
 
 /**
@@ -106,16 +106,7 @@ export function AskPanel({
   onOpenChange,
   reducedMotion = false,
 }: AskPanelProps): React.ReactElement {
-  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
-  /**
-   * A pull is a touch idiom. On a pointer there is nothing to pull with and
-   * nothing that says the top edge is draggable, so the strip's 3 px hairline
-   * — which is right above a thumb — was simply an invisible band at the top
-   * of a desktop window. Wide viewports get a labelled control instead, and
-   * every viewport gets a click that opens the panel, since a hairline nobody
-   * can see is not improved by being draggable.
-   */
-  const pointerAffordance = viewportWidth >= BREAKPOINTS.phone;
+  const { height: viewportHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const maxHeight = Math.round(viewportHeight * MAX_HEIGHT_FRACTION);
   // The panel is the one surface pinned to the top edge, so it is the one that
@@ -461,17 +452,18 @@ export function AskPanel({
             onPress={openPanel}
             accessibilityRole="button"
             accessibilityLabel="Ask the shopping assistant"
-            style={pointerAffordance ? styles.askPill : styles.handleTarget}
+            style={styles.askPill}
             hitSlop={8}
           >
-            {pointerAffordance ? (
-              <Animated.View style={[styles.askPillInner, handleStyle]}>
-                <Icon name="search" size={16} color={COLORS.textSecondary} />
-                <Text style={styles.askPillText}>Ask for anything</Text>
-              </Animated.View>
-            ) : (
-              <Animated.View style={[styles.handle, handleStyle]} />
-            )}
+            {/* The same control everywhere. The hairline it replaces was a
+                touch idiom that only worked if you already knew the top edge
+                was draggable — which is no more true with a thumb than with a
+                pointer. The pull still works for anyone who does know; this is
+                what tells everyone else there is something here. */}
+            <Animated.View style={[styles.askPillInner, handleStyle]}>
+              <Icon name="search" size={16} color={COLORS.textSecondary} />
+              <Text style={styles.askPillText}>Ask for anything</Text>
+            </Animated.View>
           </Pressable>
         </View>
       </GestureDetector>
@@ -721,19 +713,17 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.hairline,
   },
+  /** Still used by the open panel's own footer, which drags it shut. */
   handle: {
     width: 36,
     height: 3,
     backgroundColor: COLORS.hairline,
   },
-  /** The touch target around the hairline, which is far too small to hit. */
-  handleTarget: {
+  askPill: {
     minHeight: ICON.minTarget,
-    minWidth: 72,
     alignItems: 'center',
     justifyContent: 'flex-start',
   },
-  askPill: { alignItems: 'center', justifyContent: 'flex-start' },
   askPillInner: {
     flexDirection: 'row',
     alignItems: 'center',
