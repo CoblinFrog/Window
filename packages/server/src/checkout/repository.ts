@@ -37,8 +37,8 @@ export type Source = SourceDoc<string>;
 export type Coupon = CouponDoc<string>;
 export type MerchantLink = MerchantLinkRecord<string>;
 
-/** The fields a new order is created with. The store assigns `_id`. */
-export type NewOrder = Omit<Order, '_id'>;
+/** The fields a new order is created with. The store assigns `id`. */
+export type NewOrder = Omit<Order, 'id'>;
 
 /**
  * A partial update to an order.
@@ -170,7 +170,7 @@ export interface CheckoutRepository {
   // Merchant links
   // -------------------------------------------------------------------------
 
-  upsertMerchantLink(link: Omit<MerchantLink, '_id'>): Promise<void>;
+  upsertMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<void>;
 
   getMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null>;
 }

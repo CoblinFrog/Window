@@ -3,10 +3,10 @@ import { createCache, type KeyValueCache } from '../cache/index.js';
 import { CartService } from '../cart/service.js';
 import { CheckoutOrchestrator } from '../checkout/orchestrator.js';
 import { CouponStore } from '../checkout/coupons.js';
-import { MongoCheckoutRepository } from '../checkout/repository.mongo.js';
+import { SupabaseCheckoutRepository } from '../checkout/repository.supabase.js';
 import type { CheckoutRepository } from '../checkout/repository.js';
-import { connectDatabase, type DatabaseHandle } from '../db/client.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
+import { connectDatabase, type DatabaseHandle } from '../db/index.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import type { EmbeddingProvider } from '../embedding/provider.js';
 import { EventCollector } from '../events/collector.js';
@@ -17,7 +17,6 @@ import { mediaPipeline, type MediaPipeline } from '../media/pipeline.js';
 import { RankingService } from '../ranking/service.js';
 import { createVectorSearch } from '../vector/index.js';
 import type { VectorSearch } from '../vector/types.js';
-import { createMailer, createOidcVerifier, type Mailer, type OidcVerifier } from './claims.js';
 
 export interface AppContext {
   db: DatabaseHandle;
@@ -52,7 +51,6 @@ export interface AppContext {
  */
 export async function createContext(options: { ensureIndexes?: boolean } = {}): Promise<AppContext> {
   const db = await connectDatabase();
-  if (options.ensureIndexes !== false) await ensureIndexes(db.db);
 
   const cache = await createCache();
   const vectors = await createVectorSearch(db.collections.products);
@@ -61,16 +59,12 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
   const classifier = new CategoryClassifier(embedder);
   await classifier.init();
 
-  // Ranking weights live in a config document and are hot-reloadable; the
-  // built-in defaults are the bootstrap value when none has been written yet.
-  const stored = await db.db
-    .collection<{ _id: string; config: RankingConfig }>('config')
-    .findOne({ _id: 'ranking' });
-  const config = stored?.config ?? DEFAULT_RANKING_CONFIG;
+  // For now, use default ranking config. In Supabase, this could be stored in a config table
+  const config = DEFAULT_RANKING_CONFIG;
 
   const ranking = new RankingService({ collections: db.collections, vectors, config });
   const feed = new FeedService({ collections: db.collections, ranking, vectors, cache });
-  const repository = new MongoCheckoutRepository(db.collections);
+  const repository = new SupabaseCheckoutRepository(db.client);
   const cart = new CartService({ repository });
   const coupons = new CouponStore(repository);
   const checkout = new CheckoutOrchestrator({ repository, cache, coupons });
@@ -82,6 +76,7 @@ export async function createContext(options: { ensureIndexes?: boolean } = {}): 
     vectorBackend: vectors.kind,
     cacheBackend: cache.kind,
     rankingConfig: config.version,
+    database: 'supabase',
   });
 
   return {

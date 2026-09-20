@@ -11,7 +11,7 @@ import {
 } from '@window/shared';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import type { User } from '../db/collections.js';
+import type { User } from '../db/supabase-collections.js';
 import type { CheckoutRepository, Order } from './repository.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
 import { checkoutInterstitial } from '../ingestion/risk.js';
@@ -165,7 +165,7 @@ export class CheckoutOrchestrator {
    */
   async createJobs(user: User, cartId: string, now = new Date()): Promise<Order[]> {
     const { repository } = this.deps;
-    const userId = user._id.toHexString();
+    const userId = user.id;
     const cart = await repository.getCart(cartId, userId);
     if (!cart) throw new Error('Cart not found.');
 
@@ -178,11 +178,11 @@ export class CheckoutOrchestrator {
     }
 
     const products = await repository.getProducts(cart.items.map((i) => i.productId));
-    const titles = new Map(products.map((p) => [p._id, p.title]));
+    const titles = new Map(products.map((p) => [p.id, p.title]));
 
     const orders: Order[] = [];
     for (const [merchantDomain, items] of byMerchant) {
-      const order: Omit<Order, '_id'> = {
+      const order: Omit<Order, 'id'> = {
         userId,
         cartId,
         merchantDomain,
@@ -225,9 +225,9 @@ export class CheckoutOrchestrator {
   async runQuote(order: Order, user: User): Promise<Order> {
     const { repository } = this.deps;
     const jobId = order.agentRun?.jobId ?? `job_${randomUUID().slice(0, 18)}`;
-    const runtime = this.runtimeFor(order._id, jobId, order.merchantDomain);
+    const runtime = this.runtimeFor(order.id, jobId, order.merchantDomain);
 
-    await repository.updateOrder(order._id, {
+    await repository.updateOrder(order.id, {
       status: 'quoting' as OrderStatus,
       agentRun: {
         jobId,
@@ -256,7 +256,7 @@ export class CheckoutOrchestrator {
       }
 
       const products = await repository.getProducts(order.items.map((i) => i.productId));
-      const productById = new Map(products.map((p) => [p._id, p]));
+      const productById = new Map(products.map((p) => [p.id, p]));
 
       const items: CheckoutLineItem[] = order.items.map((item) => {
         const product = productById.get(item.productId);
@@ -272,7 +272,7 @@ export class CheckoutOrchestrator {
       });
 
       const subtotal = items.reduce((s, i) => s + i.expectedUnitPrice * i.quantity, 0);
-      const orderCount = await repository.countOrders(user._id.toHexString(), {
+      const orderCount = await repository.countOrders(user.id, {
         status: 'placed',
       });
 
@@ -351,7 +351,7 @@ export class CheckoutOrchestrator {
         hash,
       };
 
-      const updated = await repository.updateOrder(order._id, {
+      const updated = await repository.updateOrder(order.id, {
         items: remainingItems,
         quote: storedQuote,
         coupon: best.code
@@ -399,7 +399,7 @@ export class CheckoutOrchestrator {
     now = new Date(),
   ): Promise<Order> {
     const { repository } = this.deps;
-    const order = await repository.getOrder(orderId, user._id.toHexString());
+    const order = await repository.getOrder(orderId, user.id);
     if (!order) throw new CheckoutConflict('bad_state', 'Order not found.');
 
     if (order.status !== 'awaiting_auth') {
@@ -430,14 +430,14 @@ export class CheckoutOrchestrator {
     }
 
     try {
-      const ordersToday = await repository.countOrders(user._id.toHexString(), {
+      const ordersToday = await repository.countOrders(user.id, {
         status: 'placed',
         since: new Date(now.getTime() - 86_400_000),
       });
 
       const source = await repository.getSource(order.merchantDomain);
       const intent = await this.payments.createIntent({
-        userId: user._id.toHexString(),
+        userId: user.id,
         jobId: order.agentRun?.jobId ?? orderId,
         merchantDomain: order.merchantDomain,
         merchantCategory: source?.sourceType ?? 'new',
@@ -490,7 +490,7 @@ export class CheckoutOrchestrator {
   private async place(order: Order, intentId: string, paymentHandle: string): Promise<Order> {
     const { repository } = this.deps;
     const jobId = order.agentRun?.jobId as string;
-    const runtime = this.runtimeFor(order._id, jobId, order.merchantDomain);
+    const runtime = this.runtimeFor(order.id, jobId, order.merchantDomain);
     const now = new Date();
 
     try {
@@ -534,7 +534,7 @@ export class CheckoutOrchestrator {
       // anything is shown as complete. It is never re-submitted.
       const status: OrderStatus = placement.uncertain ? 'uncertain' : 'placed';
 
-      const updated = await repository.updateOrder(order._id, {
+      const updated = await repository.updateOrder(order.id, {
         status,
         merchantOrderNumber: placement.merchantOrderNumber,
         agentRun: order.agentRun
@@ -551,7 +551,7 @@ export class CheckoutOrchestrator {
       await this.writeAudit(runtime, order, 'placement');
       this.emit(runtime, { event: 'state', state: status });
       await this.payments.revoke(intentId);
-      this.runtimes.delete(order._id);
+      this.runtimes.delete(order.id);
 
       return updated as Order;
     } catch (error) {
@@ -572,7 +572,7 @@ export class CheckoutOrchestrator {
    */
   async cancel(orderId: string, user: User, now = new Date()): Promise<Order> {
     const { repository } = this.deps;
-    const order = await repository.getOrder(orderId, user._id.toHexString());
+    const order = await repository.getOrder(orderId, user.id);
     if (!order) throw new CheckoutConflict('bad_state', 'Order not found.');
     if (order.status === 'placed' || order.status === 'placing' || order.status === 'uncertain') {
       throw new CheckoutConflict(
@@ -589,7 +589,7 @@ export class CheckoutOrchestrator {
       this.runtimes.delete(orderId);
     }
 
-    const updated = await repository.cancelOrder(orderId, user._id.toHexString(), now);
+    const updated = await repository.cancelOrder(orderId, user.id, now);
     if (!updated) throw new CheckoutConflict('bad_state', 'This job could not be cancelled.');
 
     // The cart is restored to `open` so nothing is stranded by a cancellation.
@@ -708,23 +708,23 @@ export class CheckoutOrchestrator {
     const recoverable = abort?.recoverable ?? true;
 
     log.warn('checkout job failed', {
-      orderId: order._id,
+      orderId: order.id,
       merchantDomain: order.merchantDomain,
       code,
       message,
     });
 
-    const updated = await this.deps.repository.updateOrder(order._id, {
+    const updated = await this.deps.repository.updateOrder(order.id, {
       status: 'failed' as OrderStatus,
       failure: { code, message, recoverable },
       agentRun: order.agentRun ? { ...order.agentRun, endedAt: new Date() } : null,
       updatedAt: new Date(),
     });
 
-    const runtime = this.runtimes.get(order._id);
+    const runtime = this.runtimes.get(order.id);
     if (runtime) {
       this.emit(runtime, { event: 'state', state: 'failed' });
-      this.runtimes.delete(order._id);
+      this.runtimes.delete(order.id);
     }
 
     // The cart is preserved so the user can finish manually via a deep link.
@@ -748,7 +748,7 @@ export class CheckoutOrchestrator {
     await mkdir(dir, { recursive: true });
     const record = {
       jobId: runtime.session.jobId,
-      orderId: order._id,
+      orderId: order.id,
       userId: order.userId,
       merchantDomain: order.merchantDomain,
       phase,

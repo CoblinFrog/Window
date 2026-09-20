@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it, beforeEach } from 'node:test';
-import { ObjectId } from 'mongodb';
 import { CHECKOUT_CONFIG } from '@window/shared';
 import { MemoryCache } from '../cache/index.js';
-import type { User } from '../db/collections.js';
+import type { User } from '../db/supabase-collections.js';
 import { CheckoutOrchestrator, CheckoutConflict } from './orchestrator.js';
 import { MemoryCheckoutRepository } from './repository.memory.js';
 import { fixtureProduct, fixtureSource } from './repository.conformance.js';
@@ -23,8 +22,8 @@ import type { Cart } from './repository.js';
  * Every case below is a way the user could lose money or lose an order.
  */
 
-const USER_ID = new ObjectId('507f1f77bcf86cd799439011');
-const user = { _id: USER_ID, settings: { currency: 'USD' } } as unknown as User;
+const USER_ID = '507f1f77bcf86cd799439011';
+const user = { id: USER_ID, settings: { currency: 'USD' } } as unknown as User;
 
 /** A merchant that always succeeds, so a failing test means a real regression. */
 function reliableAgent() {
@@ -50,14 +49,14 @@ async function harness(
 ): Promise<Harness> {
   const repo = new MemoryCheckoutRepository();
   repo.seed({
-    products: [fixtureProduct({ _id: 'prod_1', title: 'Keyboard' })],
-    sources: [fixtureSource({ _id: 'shop.test' })],
+    products: [fixtureProduct({ id: 'prod_1', title: 'Keyboard' })],
+    sources: [fixtureSource({ id: 'shop.test' })],
   });
 
-  const cart = await repo.createCart(USER_ID.toHexString(), new Date());
+  const cart = await repo.createCart(USER_ID, new Date());
   const items: Cart['items'] = [
     {
-      _id: 'line_1',
+      id: 'line_1',
       productId: 'prod_1',
       clusterId: null,
       sellerId: 'seller_1',
@@ -72,7 +71,7 @@ async function harness(
       addedAt: new Date(),
     } as unknown as Cart['items'][number],
   ];
-  await repo.saveCartItems(cart._id, items, new Date());
+  await repo.saveCartItems(cart.id, items, new Date());
 
   const payments = options.payments ?? new SimulatedPaymentRail();
   const agent = options.agent ?? reliableAgent();
@@ -84,7 +83,34 @@ async function harness(
     agentFor: async () => agent,
   });
 
-  return { repo, orchestrator, payments, cartId: cart._id };
+  return { repo, orchestrator, payments, cartId: cart.id };
+}
+
+/**
+ * Answers any prompt the merchant raises, the way a waiting user would.
+ *
+ * The simulated agent asks for 3-D Secure on 8% of placements, seeded from the
+ * randomly generated job id — so without this a run is a coin flip between
+ * passing and blocking forever on a prompt nobody answers. Answering it here
+ * keeps the test deterministic *and* exercises the handoff path rather than
+ * pretending it does not exist.
+ */
+function answerPrompts(h: Harness, orderId: string): () => void {
+  const timer = setInterval(() => {
+    const prompt = h.orchestrator.pendingPrompt(orderId);
+    if (prompt) h.orchestrator.provideInput(orderId, prompt.promptId, 'confirmed');
+  }, 1);
+  return () => clearInterval(timer);
+}
+
+/** Authorizes a job, answering anything the merchant asks along the way. */
+async function authorize(h: Harness, orderId: string, input: Parameters<CheckoutOrchestrator['authorize']>[2]) {
+  const stop = answerPrompts(h, orderId);
+  try {
+    return await h.orchestrator.authorize(orderId, user, input);
+  } finally {
+    stop();
+  }
 }
 
 /** Drives a job to the point where it is waiting for the user's tap. */
@@ -112,7 +138,7 @@ describe('checkout lifecycle', () => {
 
   it('places the order when the authorization echoes the exact quote', async () => {
     const quoted = await quotedJob(h);
-    const placed = await h.orchestrator.authorize(quoted._id, user, {
+    const placed = await authorize(h, quoted.id, {
       quoteHash: quoted.quote!.hash,
       passkeyAssertion: 'tap_1',
       userAgent: 'test',
@@ -135,7 +161,7 @@ describe('checkout lifecycle', () => {
 
     await assert.rejects(
       () =>
-        h.orchestrator.authorize(quoted._id, user, {
+        h.orchestrator.authorize(quoted.id, user, {
           quoteHash: 'f'.repeat(64),
           passkeyAssertion: 'tap_1',
           userAgent: 'test',
@@ -144,7 +170,7 @@ describe('checkout lifecycle', () => {
         error instanceof CheckoutConflict && error.code === 'quote_mismatch',
     );
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.status, 'awaiting_auth', 'a refused authorization must change nothing');
     assert.equal(after?.submissionSeq, 0);
   });
@@ -156,7 +182,7 @@ describe('checkout lifecycle', () => {
     await assert.rejects(
       () =>
         h.orchestrator.authorize(
-          quoted._id,
+          quoted.id,
           user,
           { quoteHash: quoted.quote!.hash, passkeyAssertion: 'tap_1', userAgent: 'test' },
           afterExpiry,
@@ -164,7 +190,7 @@ describe('checkout lifecycle', () => {
       (error: unknown) => error instanceof CheckoutConflict && error.code === 'quote_expired',
     );
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.status, 'awaiting_auth');
   });
 
@@ -174,7 +200,7 @@ describe('checkout lifecycle', () => {
     // Still `pending`: never quoted, so there is no quote to have been shown.
     await assert.rejects(
       () =>
-        h.orchestrator.authorize(order!._id, user, {
+        h.orchestrator.authorize(order!.id, user, {
           quoteHash: 'a'.repeat(64),
           passkeyAssertion: 'tap_1',
           userAgent: 'test',
@@ -185,11 +211,11 @@ describe('checkout lifecycle', () => {
 
   it('refuses to authorize another user\'s job', async () => {
     const quoted = await quotedJob(h);
-    const stranger = { _id: new ObjectId(), settings: { currency: 'USD' } } as unknown as User;
+    const stranger = { id: 'd290f1ee-6c54-4b01-90e6-d701748f0851', settings: { currency: 'USD' } } as unknown as User;
 
     await assert.rejects(
       () =>
-        h.orchestrator.authorize(quoted._id, stranger, {
+        h.orchestrator.authorize(quoted.id, stranger, {
           quoteHash: quoted.quote!.hash,
           passkeyAssertion: 'tap_1',
           userAgent: 'test',
@@ -197,7 +223,7 @@ describe('checkout lifecycle', () => {
       (error: unknown) => error instanceof CheckoutConflict,
     );
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.status, 'awaiting_auth');
   });
 
@@ -213,15 +239,15 @@ describe('checkout lifecycle', () => {
       userAgent: 'test',
     };
 
-    await h.orchestrator.authorize(quoted._id, user, input);
+    await authorize(h, quoted.id, input);
 
     // The replay: same job, same hash, same everything.
     await assert.rejects(
-      () => h.orchestrator.authorize(quoted._id, user, input),
+      () => authorize(h, quoted.id, input),
       (error: unknown) => error instanceof CheckoutConflict,
     );
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.submissionSeq, 1, 'the submission counter must never exceed one');
   });
 
@@ -235,14 +261,14 @@ describe('checkout lifecycle', () => {
 
     // A double-tap on a slow connection. Both requests are genuinely in flight.
     const results = await Promise.allSettled([
-      h.orchestrator.authorize(quoted._id, user, input),
-      h.orchestrator.authorize(quoted._id, user, input),
+      authorize(h, quoted.id, input),
+      authorize(h, quoted.id, input),
     ]);
 
     assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
     assert.equal(results.filter((r) => r.status === 'rejected').length, 1);
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.submissionSeq, 1);
   });
 
@@ -262,7 +288,7 @@ describe('checkout lifecycle', () => {
     const local = await harness({ payments: refusing });
     const quoted = await quotedJob(local);
 
-    const result = await local.orchestrator.authorize(quoted._id, user, {
+    const result = await authorize(local, quoted.id, {
       quoteHash: quoted.quote!.hash,
       passkeyAssertion: 'tap_1',
       userAgent: 'test',
@@ -275,13 +301,13 @@ describe('checkout lifecycle', () => {
 
   it('caps the payment intent at the authorized total plus tolerance', async () => {
     const quoted = await quotedJob(h);
-    await h.orchestrator.authorize(quoted._id, user, {
+    await authorize(h, quoted.id, {
       quoteHash: quoted.quote!.hash,
       passkeyAssertion: 'tap_1',
       userAgent: 'test',
     });
 
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.payment?.cap, capFor(quoted.quote!.total));
     // The agent never receives the token itself, only a reference.
     assert.ok(after?.payment?.tokenRef.startsWith('tok_'));
@@ -294,18 +320,18 @@ describe('checkout lifecycle', () => {
   it('cancels before submission and returns the cart to the user', async () => {
     const quoted = await quotedJob(h);
 
-    const cancelled = await h.orchestrator.cancel(quoted._id, user);
+    const cancelled = await h.orchestrator.cancel(quoted.id, user);
     assert.equal(cancelled.status, 'cancelled');
 
     // Nothing may be stranded: the cart goes back to `open` so the user can
     // finish manually.
-    const cart = await h.repo.getCart(h.cartId, USER_ID.toHexString());
+    const cart = await h.repo.getCart(h.cartId, USER_ID);
     assert.equal(cart?.status, 'open');
   });
 
   it('refuses to cancel once the order has been placed', async () => {
     const quoted = await quotedJob(h);
-    await h.orchestrator.authorize(quoted._id, user, {
+    await authorize(h, quoted.id, {
       quoteHash: quoted.quote!.hash,
       passkeyAssertion: 'tap_1',
       userAgent: 'test',
@@ -314,17 +340,17 @@ describe('checkout lifecycle', () => {
     // The merchant may already hold it. A cancel that silently does nothing is
     // worse than a refusal.
     await assert.rejects(
-      () => h.orchestrator.cancel(quoted._id, user),
+      () => h.orchestrator.cancel(quoted.id, user),
       (error: unknown) => error instanceof CheckoutConflict && error.code === 'bad_state',
     );
   });
 
   it('refuses to cancel another user\'s job', async () => {
     const quoted = await quotedJob(h);
-    const stranger = { _id: new ObjectId(), settings: { currency: 'USD' } } as unknown as User;
+    const stranger = { id: 'd290f1ee-6c54-4b01-90e6-d701748f0851', settings: { currency: 'USD' } } as unknown as User;
 
-    await assert.rejects(() => h.orchestrator.cancel(quoted._id, stranger));
-    const after = await h.repo.getOrder(quoted._id, USER_ID.toHexString());
+    await assert.rejects(() => h.orchestrator.cancel(quoted.id, stranger));
+    const after = await h.repo.getOrder(quoted.id, USER_ID);
     assert.equal(after?.status, 'awaiting_auth');
   });
 
@@ -337,7 +363,7 @@ describe('checkout lifecycle', () => {
     local.repo.seed({
       sources: [
         fixtureSource({
-          _id: 'shop.test',
+          id: 'shop.test',
           checkout: { protocol: 'browser', blocksAgents: true, stackableCoupons: false },
         } as never),
       ],
@@ -360,7 +386,7 @@ describe('checkout lifecycle', () => {
     local.repo.seed({
       sources: [
         fixtureSource({
-          _id: 'shop.test',
+          id: 'shop.test',
           checkout: { protocol: 'browser', blocksAgents: true, stackableCoupons: false },
         } as never),
       ],
@@ -371,7 +397,7 @@ describe('checkout lifecycle', () => {
 
     await assert.rejects(
       () =>
-        local.orchestrator.authorize(order!._id, user, {
+        local.orchestrator.authorize(order!.id, user, {
           quoteHash: 'a'.repeat(64),
           passkeyAssertion: 'tap_1',
           userAgent: 'test',

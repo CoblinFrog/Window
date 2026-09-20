@@ -1,5 +1,6 @@
 import { EMBEDDING_VERSION } from '@window/shared';
 import { requireSecret } from './secrets.js';
+import { SUPABASE_CONFIG } from './supabase.js';
 
 function str(name: string, fallback: string): string {
   const v = process.env[name];
@@ -32,10 +33,19 @@ function bool(name: string, fallback: boolean): boolean {
 export const env = {
   nodeEnv: str('NODE_ENV', 'development'),
   port: int('PORT', 4000),
-  host: str('HOST', '127.0.0.1'),
-  /** Public origin, used to build media and deep-link URLs. */
+  host: str('HOST', '0.0.0.0'),
+  /**
+   * Public origin, used to build media and deep-link URLs. It defaults to the
+   * loopback address rather than to `host`: 0.0.0.0 is a bind address, and a
+   * browser handed it as the origin of a hero image may refuse the request. Set
+   * `PUBLIC_URL` to the address clients actually reach this server on.
+   */
   publicUrl: str('PUBLIC_URL', `http://127.0.0.1:${int('PORT', 4000)}`),
 
+  supabaseUrl: str('SUPABASE_URL', SUPABASE_CONFIG.url),
+  supabaseKey: str('SUPABASE_SERVICE_ROLE_KEY', SUPABASE_CONFIG.serviceRoleKey),
+
+  // Legacy MongoDB config (kept for migration fallback)
   mongoUrl: str('MONGO_URL', 'mongodb://127.0.0.1:27017'),
   mongoDb: str('MONGO_DB', 'window'),
 

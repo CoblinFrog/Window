@@ -6,7 +6,7 @@ import {
   type ColdStartStrategy,
   type RankingConfig,
 } from '@window/shared';
-import type { User } from '../db/collections.js';
+import type { User } from '../db/supabase-collections.js';
 
 /**
  * Cold start.

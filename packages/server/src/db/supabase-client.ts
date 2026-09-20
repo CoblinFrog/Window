@@ -1,11 +1,10 @@
-import { MongoClient, type Db } from 'mongodb';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import { collectionsFor, type CollectionSet } from './collections.js';
+import { collectionsFor, type CollectionSet } from './supabase-collections.js';
 
 export interface DatabaseHandle {
-  client: MongoClient;
-  db: Db;
+  client: SupabaseClient;
   collections: CollectionSet;
   close(): Promise<void>;
 }
@@ -13,32 +12,32 @@ export interface DatabaseHandle {
 let handle: DatabaseHandle | null = null;
 
 export async function connectDatabase(
-  url: string = env.mongoUrl,
-  dbName: string = env.mongoDb,
+  url: string = env.supabaseUrl,
+  key: string = env.supabaseKey,
 ): Promise<DatabaseHandle> {
   if (handle) return handle;
 
-  const client = new MongoClient(url, {
-    // The feed path is latency-critical; a slow pool is worse than a fast error.
-    serverSelectionTimeoutMS: 5_000,
-    maxPoolSize: 50,
-    minPoolSize: 5,
-    retryWrites: true,
+  if (!url || !key) {
+    throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in environment');
+  }
+
+  const client = createClient(url, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
   });
-  await client.connect();
-  const db = client.db(dbName);
 
   handle = {
     client,
-    db,
-    collections: collectionsFor(db),
+    collections: collectionsFor(client),
     async close() {
       handle = null;
-      await client.close();
+      // Supabase client doesn't need explicit closing
     },
   };
 
-  logger.info('connected to mongodb', { db: dbName });
+  logger.info('connected to supabase', { url });
   return handle;
 }
 

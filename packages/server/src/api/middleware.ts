@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import { ObjectId } from 'mongodb';
 import { ApiError, RATE_LIMITS, SESSION_CONFIG } from '@window/shared';
 import { env } from '../config/env.js';
 import { secretsMatch } from '../config/secrets.js';
 import { logger } from '../lib/logger.js';
 import { cacheKeys, type KeyValueCache } from '../cache/index.js';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
+import { findOne } from '../db/supabase-helpers.js';
 import { isAnonymousUser, verifyToken, type Principal } from './auth.js';
 import { hasPollutedKey, opaqueSecretSchema } from './validation.js';
 
@@ -186,7 +186,7 @@ async function principalFromToken(
   raw: string,
 ): Promise<{ principal: Principal; user: User }> {
   const claims = verifyToken(raw);
-  const user = await collections.users.findOne({ _id: claims.userId });
+  const user = await findOne<User>(collections.users, { id: claims.userId });
   if (!user) {
     // The token is well-formed but its user is gone: an account deleted while a
     // client still holds a token. Treated as unauthenticated rather than as an
@@ -200,7 +200,7 @@ async function principalFromToken(
   return {
     user,
     principal: {
-      userId: user._id,
+      userId: user.id,
       deviceUserId: user.deviceUserId,
       // From the document, never from the token.
       isAnonymous: isAnonymousUser(user),
@@ -230,7 +230,7 @@ export async function mintStreamTicket(
 ): Promise<{ ticket: string; expiresAt: Date }> {
   const ticket = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
   const value: StreamTicket = {
-    userId: principal.userId.toHexString(),
+    userId: principal.userId,
     path,
     epoch: principal.epoch,
   };
@@ -256,7 +256,7 @@ async function principalFromTicket(
   if (!stored) throw ApiError.unauthorized('This stream ticket has expired or was already used.');
   if (stored.path !== path) throw ApiError.unauthorized('This ticket was issued for another stream.');
 
-  const user = await collections.users.findOne({ _id: new ObjectId(stored.userId) });
+  const user = await findOne<User>(collections.users, { id: stored.userId });
   if (!user) throw ApiError.unauthorized('This identity no longer exists.');
   if ((user.sessionEpoch ?? 1) !== stored.epoch) {
     throw ApiError.unauthorized('This session was revoked; re-authenticate.');
@@ -265,7 +265,7 @@ async function principalFromTicket(
   return {
     user,
     principal: {
-      userId: user._id,
+      userId: user.id,
       deviceUserId: user.deviceUserId,
       isAnonymous: isAnonymousUser(user),
       epoch: user.sessionEpoch ?? 1,
@@ -307,7 +307,7 @@ export function rateLimit(cache: KeyValueCache, bucket: RateLimitBucket) {
   const { limit, windowMs } = BUCKETS[bucket];
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const principal = req.principal?.userId.toHexString() ?? `ip:${req.ip ?? 'unknown'}`;
+      const principal = req.principal?.userId ?? `ip:${req.ip ?? 'unknown'}`;
       const key = cacheKeys.rateLimit(principal, bucket);
       const { count, resetAt } = await cache.incr(key, windowMs);
 

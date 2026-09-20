@@ -48,9 +48,9 @@ export class MemoryCheckoutRepository implements CheckoutRepository {
     sources?: readonly Source[];
     coupons?: readonly Coupon[];
   }): this {
-    for (const product of fixtures.products ?? []) this.products.set(product._id, clone(product));
-    for (const source of fixtures.sources ?? []) this.sources.set(source._id, clone(source));
-    for (const coupon of fixtures.coupons ?? []) this.coupons.set(coupon._id, clone(coupon));
+    for (const product of fixtures.products ?? []) this.products.set(product.id, clone(product));
+    for (const source of fixtures.sources ?? []) this.sources.set(source.id, clone(source));
+    for (const coupon of fixtures.coupons ?? []) this.coupons.set(coupon.id, clone(coupon));
     return this;
   }
 
@@ -73,8 +73,8 @@ export class MemoryCheckoutRepository implements CheckoutRepository {
   }
 
   async createCart(userId: string, now: Date): Promise<Cart> {
-    const cart: Cart = { _id: newId(), userId, status: 'open', items: [], updatedAt: now };
-    this.carts.set(cart._id, cart);
+    const cart: Cart = { id: newId(), userId, status: 'open', items: [], updatedAt: now };
+    this.carts.set(cart.id, cart);
     return clone(cart);
   }
 
@@ -109,8 +109,8 @@ export class MemoryCheckoutRepository implements CheckoutRepository {
   }
 
   async createOrder(order: NewOrder): Promise<Order> {
-    const stored: Order = { ...clone(order), _id: newId() };
-    this.orders.set(stored._id, stored);
+    const stored: Order = { ...clone(order), id: newId() };
+    this.orders.set(stored.id, stored);
     return clone(stored);
   }
 
@@ -250,10 +250,10 @@ export class MemoryCheckoutRepository implements CheckoutRepository {
   // Merchant links
   // -------------------------------------------------------------------------
 
-  async upsertMerchantLink(link: Omit<MerchantLink, '_id'>): Promise<void> {
+  async upsertMerchantLink(link: Omit<MerchantLink, 'id'>): Promise<void> {
     const key = `${link.userId}:${link.merchantDomain}`;
     const existing = this.links.get(key);
-    this.links.set(key, { ...clone(link), _id: existing?._id ?? newId() });
+    this.links.set(key, { ...clone(link), id: existing?.id ?? newId() });
   }
 
   async getMerchantLink(userId: string, merchantDomain: string): Promise<MerchantLink | null> {

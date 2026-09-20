@@ -1,10 +1,10 @@
-import type { ObjectId } from 'mongodb';
 import {
   CLUSTERING,
   type CardBadges,
   type ProductCard,
 } from '@window/shared';
-import type { Cluster, Seller } from '../db/collections.js';
+import type { Cluster, Seller } from '../db/supabase-collections.js';
+import { find } from '../db/supabase-helpers.js';
 import { cautionText } from '../ingestion/quality.js';
 import { riskFlagText } from '../ingestion/risk.js';
 import type { VectorCandidate } from '../vector/types.js';
@@ -69,12 +69,12 @@ export function toProductCard(
   candidate: VectorCandidate,
   context: CardContext,
 ): ProductCard {
-  const sellerId = candidate.sellerId.toHexString();
+  const sellerId = candidate.sellerId;
   const seller = context.sellers.get(sellerId);
-  const clusterId = candidate.clusterId ? candidate.clusterId.toHexString() : null;
+  const clusterId = candidate.clusterId;
   const cluster = clusterId ? context.clusters.get(clusterId) : undefined;
 
-  const productId = candidate._id.toHexString();
+  const productId = candidate.id;
   const isExploration = context.explorationProductId === productId;
 
   // "4 other sellers, from $X" — only offers the user could actually buy
@@ -151,29 +151,26 @@ export function toProductCard(
 export async function buildCardContext(
   candidates: readonly VectorCandidate[],
   deps: {
-    sellers: { find(filter: object): { toArray(): Promise<Seller[]> } };
-    clusters: { find(filter: object): { toArray(): Promise<Cluster[]> } };
+    sellers: any;
+    clusters: any;
     merchantNames: ReadonlyMap<string, string>;
   },
   options: Omit<CardContext, 'sellers' | 'clusters' | 'merchantNames' | 'qualityTopDecile'> & {
     qualityTopDecile?: number;
   },
 ): Promise<CardContext> {
-  const sellerIds = [...new Set(candidates.map((c) => c.sellerId.toHexString()))];
+  const sellerIds = [...new Set(candidates.map((c) => c.sellerId))];
   const clusterIds = [
     ...new Set(
       candidates
         .map((c) => c.clusterId)
-        .filter((id): id is ObjectId => id !== null)
-        .map((id) => id.toHexString()),
+        .filter((id): id is string => id !== null),
     ),
   ];
 
   const [sellers, clusters] = await Promise.all([
-    deps.sellers.find({ _id: { $in: candidates.map((c) => c.sellerId) } }).toArray(),
-    deps.clusters
-      .find({ _id: { $in: candidates.map((c) => c.clusterId).filter(Boolean) } })
-      .toArray(),
+    find<Seller>(deps.sellers, { id: { $in: candidates.map((c) => c.sellerId) } }),
+    find<Cluster>(deps.clusters, { id: { $in: candidates.map((c) => c.clusterId).filter(Boolean) } }),
   ]);
 
   void sellerIds;
@@ -186,8 +183,8 @@ export async function buildCardContext(
       : (scores[Math.min(scores.length - 1, Math.floor(scores.length * 0.9))] as number);
 
   return {
-    sellers: new Map(sellers.map((s) => [s._id.toHexString(), s])),
-    clusters: new Map(clusters.map((c) => [c._id.toHexString(), c])),
+    sellers: new Map(sellers.map((s) => [s.id, s])),
+    clusters: new Map(clusters.map((c) => [c.id, c])),
     merchantNames: deps.merchantNames,
     qualityTopDecile: options.qualityTopDecile ?? topDecile,
     explorationProductId: options.explorationProductId ?? null,

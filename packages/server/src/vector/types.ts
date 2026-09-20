@@ -1,5 +1,4 @@
-import type { ObjectId } from 'mongodb';
-import type { Product } from '../db/collections.js';
+import type { Product } from '../db/supabase-collections.js';
 
 /**
  * Pre-filters applied inside the retrieval stage. Every field here is declared
@@ -15,7 +14,7 @@ export interface VectorFilter {
   priceMin?: number;
   priceMax?: number;
   /** Excluded ids: suppressed products and the seen-set's exact tail. */
-  excludeIds?: ObjectId[];
+  excludeIds?: string[];
   /**
    * High-cardinality exclusions. These are not declared filter paths on the
    * vector index — indexing a per-user suppression list is not a thing — so
@@ -23,7 +22,7 @@ export interface VectorFilter {
    * database rather than in application code.
    */
   excludeBrands?: string[];
-  excludeSellerIds?: ObjectId[];
+  excludeSellerIds?: string[];
   excludeDomains?: string[];
   /** Drops listings past their source's staleness ceiling. */
   crawledSince?: Date;
@@ -43,7 +42,7 @@ export interface VectorQuery {
  */
 export type VectorCandidate = Pick<
   Product,
-  | '_id'
+  | 'id'
   | 'clusterId'
   | 'title'
   | 'brand'
@@ -70,7 +69,7 @@ export type VectorCandidate = Pick<
 };
 
 export const CANDIDATE_PROJECTION = {
-  _id: 1,
+  id: 1,
   clusterId: 1,
   title: 1,
   brand: 1,
@@ -98,7 +97,7 @@ export interface VectorSearch {
   search(query: VectorQuery): Promise<VectorCandidate[]>;
   /** Local indexes need to be told about writes; Atlas keeps itself in sync. */
   onProductUpserted?(product: Product): void;
-  onProductRemoved?(id: ObjectId): void;
+  onProductRemoved?(id: string): void;
   /** Number of vectors currently searchable. */
   size(): Promise<number>;
 }

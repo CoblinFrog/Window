@@ -1,4 +1,3 @@
-import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { ApiError } from '@window/shared';
 
@@ -28,38 +27,38 @@ export function isSafeKey(key: string): boolean {
 }
 
 /**
- * A 24-hex MongoDB id, validated as a string before it is ever constructed.
+ * A row id, validated before it ever reaches a query.
  *
- * `new ObjectId(untrusted)` throws a raw `BSONError`, which the problem-details
- * handler can only turn into a 500 — an input mistake reported as a server
- * fault. Validating first makes it the 400 it actually is, and keeps
- * non-strings out of the filter position entirely.
+ * Supabase issues `uuid`, and Postgres rejects a malformed one with a 22P02
+ * that surfaces as a 500 — an input mistake reported as a server fault, with a
+ * stack logged for every probe. Validating here makes it the 400 it actually
+ * is, and keeps non-strings out of the filter position entirely.
+ *
+ * The legacy 24-hex form is still accepted because rows migrated from MongoDB
+ * carry their old identifiers, and a link someone bookmarked should not 400.
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LEGACY_OBJECT_ID = /^[a-f0-9]{24}$/i;
+
 export const objectIdSchema = z
   .string()
-  .refine((value) => ObjectId.isValid(value) && /^[a-f0-9]{24}$/i.test(value), {
-    message: 'Expected a 24-character hexadecimal id.',
+  .refine((value) => UUID.test(value) || LEGACY_OBJECT_ID.test(value), {
+    message: 'Expected a uuid.',
   });
-
-export function toObjectId(value: string): ObjectId {
-  const parsed = objectIdSchema.safeParse(value);
-  if (!parsed.success) throw new Error('Refusing to construct an ObjectId from an invalid string.');
-  return new ObjectId(parsed.data);
-}
 
 /**
  * Parses a path parameter into an id, or reports a 400.
  *
  * Express types a path parameter as `string | string[]`, because a route can
- * bind the same name twice — which means an untyped `new ObjectId(req.params.id)`
- * is a call that can receive an array. Funnelling every id through one function
- * makes the array case a validation failure instead of a driver exception, and
- * leaves exactly one place where an untrusted string becomes a query value.
+ * bind the same name twice — so an untyped read is a value that can arrive as
+ * an array. Funnelling every id through one function makes that a validation
+ * failure rather than a driver exception, and leaves exactly one place where
+ * an untrusted string becomes a query value.
  */
-export function idParam(value: unknown, what = 'id'): ObjectId {
+export function idParam(value: unknown, what = 'id'): string {
   const parsed = objectIdSchema.safeParse(value);
   if (!parsed.success) throw ApiError.validation(`Invalid ${what}.`);
-  return new ObjectId(parsed.data);
+  return parsed.data;
 }
 
 /**

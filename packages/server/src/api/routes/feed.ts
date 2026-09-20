@@ -12,6 +12,7 @@ import type { AppContext } from '../context.js';
 import { bloomAdd, deserializeBloom, serializeBloom } from '../../lib/bloom.js';
 import { discardBuffer } from '../../feed/service.js';
 import { rateLimit } from '../middleware.js';
+import { updateOne } from '../../db/supabase-helpers.js';
 
 const pageSchema = z.object({
   mode: z.enum(['single', 'window']),
@@ -93,18 +94,24 @@ export function feedRoutes(ctx: AppContext): Router {
       const sessionId = `s_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
       const counter = ctx.feed.explorationCounterFor(user);
 
-      await ctx.db.collections.users.updateOne(
-        { _id: user._id },
+      await updateOne(
+        ctx.db.collections.users,
+        { id: user.id },
         {
-          $set: { 'explorationState.counter': counter, 'counters.lastActiveAt': new Date() },
-          $inc: { 'counters.sessionCount': 1 },
+          explorationState: { ...user.explorationState, counter },
+          counters: {
+            ...user.counters,
+            lastActiveAt: new Date(),
+            sessionCount: user.counters.sessionCount + 1,
+          },
+          updatedAt: new Date(),
         },
       );
 
       const response: FeedSessionResponse = {
         sessionId,
         user: {
-          id: user._id.toHexString(),
+          id: user.id,
           isAnonymous: principal.isAnonymous,
           onboarded: user.onboarding !== null,
           interactionCount: user.counters.interactionCount,
@@ -115,8 +122,8 @@ export function feedRoutes(ctx: AppContext): Router {
         // Deterministic bucketing on user id, so any metric can be sliced by
         // arm without instrumenting each change separately.
         experiments: {
-          feedComposition: bucketFor(user._id.toHexString(), 'feedComposition', ['A', 'B']),
-          explorationInterval: bucketFor(user._id.toHexString(), 'explorationInterval', [
+          feedComposition: bucketFor(user.id, 'feedComposition', ['A', 'B']),
+          explorationInterval: bucketFor(user.id, 'explorationInterval', [
             'fixed',
             'adaptive',
           ]),

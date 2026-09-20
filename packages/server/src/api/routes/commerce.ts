@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
@@ -90,7 +89,7 @@ export function commerceRoutes(ctx: AppContext): Router {
       const parsed = patchSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid cart patch.');
 
-      const lineId = idParam(req.params.id, 'cart line id').toHexString();
+      const lineId = idParam(req.params.id, 'cart line id');
       await ctx.cart.updateItem(user, lineId, {
         ...parsed.data,
         ...(parsed.data.variant ? { variant: sanitizeRecord(parsed.data.variant) } : {}),
@@ -105,7 +104,7 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      await ctx.cart.removeItem(user, idParam(req.params.id, 'cart line id').toHexString());
+      await ctx.cart.removeItem(user, idParam(req.params.id, 'cart line id'));
       res.json(await ctx.cart.view(user));
     } catch (error) {
       next(error);
@@ -121,8 +120,8 @@ export function commerceRoutes(ctx: AppContext): Router {
     const interstitial = await ctx.checkout.riskInterstitial(order);
 
     return {
-      jobId: order.agentRun?.jobId ?? order._id,
-      orderId: order._id,
+      jobId: order.agentRun?.jobId ?? order.id,
+      orderId: order.id,
       merchantDomain: order.merchantDomain,
       merchantName: source?.displayName ?? order.merchantDomain,
       status: order.status,
@@ -154,7 +153,7 @@ export function commerceRoutes(ctx: AppContext): Router {
         unitPrice: item.unitPrice,
       })),
       protocol: order.payment?.protocol ?? null,
-      needsInput: ctx.checkout.pendingPrompt(order._id),
+      needsInput: ctx.checkout.pendingPrompt(order.id),
       failure: order.failure,
       merchantOrderNumber: order.merchantOrderNumber,
       riskInterstitial: interstitial,
@@ -179,7 +178,7 @@ export function commerceRoutes(ctx: AppContext): Router {
         throw ApiError.validation('There is nothing available in the cart to check out.');
       }
 
-      const orders = await ctx.checkout.createJobs(user, cart._id);
+      const orders = await ctx.checkout.createJobs(user, cart.id);
 
       // Quoting is long-running — 25 s at p50, 60 s at p95, and up to 180 s
       // before it fails cleanly — and a job can stop mid-run to ask the user
@@ -212,8 +211,8 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
       const order = await ctx.repository.getOrder(
-        idParam(req.params.id, 'job id').toHexString(),
-        user._id.toHexString(),
+        idParam(req.params.id, 'job id'),
+        user.id,
       );
       if (!order) throw ApiError.notFound('That checkout job');
       res.json(await summarize(order));
@@ -236,11 +235,11 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       const principal = req.principal;
       if (!user || !principal) throw ApiError.unauthorized();
-      const jobId = idParam(req.params.id, 'job id').toHexString();
+      const jobId = idParam(req.params.id, 'job id');
 
       // Scoped to a job this caller actually owns, so a ticket cannot be minted
       // for somebody else's stream even by someone holding a valid session.
-      const order = await ctx.repository.getOrder(jobId, user._id.toHexString());
+      const order = await ctx.repository.getOrder(jobId, user.id);
       if (!order) throw ApiError.notFound('That checkout job');
 
       const { ticket, expiresAt } = await mintStreamTicket(
@@ -263,8 +262,8 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      const orderId = idParam(req.params.id, 'job id').toHexString();
-      const order = await ctx.repository.getOrder(orderId, user._id.toHexString());
+      const orderId = idParam(req.params.id, 'job id');
+      const order = await ctx.repository.getOrder(orderId, user.id);
       if (!order) throw ApiError.notFound('That checkout job');
 
       res.writeHead(200, {
@@ -314,7 +313,7 @@ export function commerceRoutes(ctx: AppContext): Router {
 
       const parsed = authorizeSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('authorize requires the quoteHash.');
-      const order = await ctx.checkout.authorize(idParam(req.params.id, 'job id').toHexString(), user, {
+      const order = await ctx.checkout.authorize(idParam(req.params.id, 'job id'), user, {
         quoteHash: parsed.data.quoteHash,
         // The user's authorization tap on the quote screen is the passkey
         // challenge. A missing assertion is refused by the payment rail.
@@ -351,9 +350,9 @@ export function commerceRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
       const parsed = inputSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid input response.');
-      const jobId = idParam(req.params.id, 'job id').toHexString();
+      const jobId = idParam(req.params.id, 'job id');
 
-      const order = await ctx.repository.getOrder(jobId, user._id.toHexString());
+      const order = await ctx.repository.getOrder(jobId, user.id);
       // Indistinguishable from a job that does not exist, so this is not an
       // oracle for which order ids are real.
       if (!order) throw ApiError.notFound('That checkout job');
@@ -381,7 +380,7 @@ export function commerceRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      const order = await ctx.checkout.cancel(idParam(req.params.id, 'job id').toHexString(), user);
+      const order = await ctx.checkout.cancel(idParam(req.params.id, 'job id'), user);
       res.json(await summarize(order));
     } catch (error) {
       next(error instanceof CheckoutConflict ? conflictToApiError(error) : error);
@@ -393,16 +392,16 @@ export function commerceRoutes(ctx: AppContext): Router {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
 
-      const orders = await ctx.repository.listOrders(user._id.toHexString(), 50);
+      const orders = await ctx.repository.listOrders(user.id, 50);
 
       const products = await ctx.repository.getProducts(
         orders.flatMap((o) => o.items.map((i) => i.productId)),
       );
-      const heroById = new Map(products.map((p) => [p._id, p.media.hero]));
+      const heroById = new Map(products.map((p) => [p.id, p.media.hero]));
 
       const response: OrdersResponse = {
         orders: orders.map((order) => ({
-          orderId: order._id,
+          orderId: order.id,
           merchantDomain: order.merchantDomain,
           merchantName: order.merchantDomain,
           status: order.status,
@@ -458,7 +457,7 @@ export function commerceRoutes(ctx: AppContext): Router {
         const linkId = randomUUID();
 
         await ctx.repository.upsertMerchantLink({
-          userId: user._id.toHexString(),
+          userId: user.id,
           merchantDomain: domain,
           status: 'pending',
           encryptedSession: null,

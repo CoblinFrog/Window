@@ -1,4 +1,4 @@
-import { ObjectId } from 'mongodb';
+import { randomUUID } from 'node:crypto';
 import {
   ApiError,
   PROBLEM_TYPES,
@@ -6,7 +6,7 @@ import {
   type CartLine,
   type CartResponse,
 } from '@window/shared';
-import type { User } from '../db/collections.js';
+import type { User } from '../db/supabase-collections.js';
 import type { Cart, CheckoutRepository, Product } from '../checkout/repository.js';
 import { logger } from '../lib/logger.js';
 import { cautionText } from '../ingestion/quality.js';
@@ -52,7 +52,7 @@ export interface StockVerifier {
 export class StoredListingVerifier implements StockVerifier {
   async verify(products: readonly Product[]): Promise<VerificationResult[]> {
     return products.map((product) => ({
-      productId: product._id,
+      productId: product.id,
       inStock: product.stock.inStock && product.status === 'active',
       priceAmount: product.price.amount,
       currency: product.price.currency,
@@ -74,8 +74,8 @@ export class CartService {
 
   async openCart(user: User, now = new Date()): Promise<Cart> {
     const { repository } = this.deps;
-    const existing = await repository.getOpenCart(user._id.toHexString());
-    return existing ?? (await repository.createCart(user._id.toHexString(), now));
+    const existing = await repository.getOpenCart(user.id);
+    return existing ?? (await repository.createCart(user.id, now));
   }
 
   /**
@@ -91,10 +91,6 @@ export class CartService {
     now = new Date(),
   ): Promise<Cart> {
     const { repository } = this.deps;
-    if (!ObjectId.isValid(request.productId)) {
-      throw ApiError.validation('productId must be a valid id.');
-    }
-
     const product = await repository.getProduct(request.productId);
     if (!product) throw ApiError.notFound('That product');
 
@@ -130,15 +126,15 @@ export class CartService {
     // the same bag twice.
     const variantKey = JSON.stringify(variant);
     const existing = cart.items.find(
-      (item) => item.productId === product._id && JSON.stringify(item.variant) === variantKey,
+      (item) => item.productId === product.id && JSON.stringify(item.variant) === variantKey,
     );
 
     if (existing) {
       existing.quantity = Math.min(existing.quantity + quantity, product.stock.quantity ?? 99);
     } else {
       cart.items.push({
-        _id: new ObjectId().toHexString(),
-        productId: product._id,
+        id: randomUUID(),
+        productId: product.id,
         clusterId: product.clusterId,
         sellerId: product.sellerId,
         merchantDomain: product.source.domain,
@@ -154,7 +150,7 @@ export class CartService {
       });
     }
 
-    await repository.saveCartItems(cart._id, cart.items, now);
+    await repository.saveCartItems(cart.id, cart.items, now);
     return cart;
   }
 
@@ -165,7 +161,7 @@ export class CartService {
     now = new Date(),
   ): Promise<Cart> {
     const cart = await this.openCart(user, now);
-    const line = cart.items.find((item) => item._id === lineId);
+    const line = cart.items.find((item) => item.id === lineId);
     if (!line) throw ApiError.notFound('That cart line');
 
     if (patch.quantity !== undefined) {
@@ -174,16 +170,16 @@ export class CartService {
     }
     if (patch.variant) line.variant = patch.variant;
 
-    await this.deps.repository.saveCartItems(cart._id, cart.items, now);
+    await this.deps.repository.saveCartItems(cart.id, cart.items, now);
     return cart;
   }
 
   async removeItem(user: User, lineId: string, now = new Date()): Promise<Cart> {
     const cart = await this.openCart(user, now);
-    const next = cart.items.filter((item) => item._id !== lineId);
+    const next = cart.items.filter((item) => item.id !== lineId);
     if (next.length === cart.items.length) throw ApiError.notFound('That cart line');
 
-    await this.deps.repository.saveCartItems(cart._id, next, now);
+    await this.deps.repository.saveCartItems(cart.id, next, now);
     return { ...cart, items: next };
   }
 
@@ -199,7 +195,7 @@ export class CartService {
 
     if (cart.items.length === 0) {
       return {
-        cartId: cart._id,
+        cartId: cart.id,
         status: cart.status,
         lines: [],
         byMerchant: [],
@@ -210,7 +206,7 @@ export class CartService {
     }
 
     const products = await repository.getProducts(cart.items.map((i) => i.productId));
-    const productById = new Map(products.map((p) => [p._id, p]));
+    const productById = new Map(products.map((p) => [p.id, p]));
 
     const verified = await this.verifier.verify(products);
     const verifiedById = new Map(verified.map((v) => [v.productId, v]));
@@ -224,7 +220,7 @@ export class CartService {
       const check = verifiedById.get(key);
       if (!product || !check) {
         item.available = false;
-        diffs.push({ lineId: item._id, kind: 'out_of_stock', from: item.priceNow, to: null });
+        diffs.push({ lineId: item.id, kind: 'out_of_stock', from: item.priceNow, to: null });
         continue;
       }
 
@@ -232,10 +228,10 @@ export class CartService {
       const next = { amount: check.priceAmount, currency: check.currency };
 
       if (!check.inStock && item.available) {
-        diffs.push({ lineId: item._id, kind: 'out_of_stock', from: previous, to: null });
+        diffs.push({ lineId: item.id, kind: 'out_of_stock', from: previous, to: null });
       } else if (next.amount !== previous.amount) {
         diffs.push({
-          lineId: item._id,
+          lineId: item.id,
           kind: next.amount > previous.amount ? 'price_up' : 'price_down',
           from: previous,
           to: next,
@@ -248,7 +244,7 @@ export class CartService {
 
       const caution = product.quality.cautions?.[0] ?? null;
       lines.push({
-        id: item._id,
+        id: item.id,
         productId: key,
         clusterId: item.clusterId,
         title: product.title,
@@ -275,10 +271,10 @@ export class CartService {
       });
     }
 
-    await repository.saveCartItems(cart._id, cart.items, now);
+    await repository.saveCartItems(cart.id, cart.items, now);
 
     if (diffs.length > 0) {
-      log.info('cart diff surfaced', { cartId: cart._id, diffs: diffs.length });
+      log.info('cart diff surfaced', { cartId: cart.id, diffs: diffs.length });
     }
 
     const byMerchant = new Map<string, { lineIds: string[]; subtotal: number; currency: string }>();
@@ -296,7 +292,7 @@ export class CartService {
 
     const currency = lines[0]?.priceNow.currency ?? user.settings.currency;
     return {
-      cartId: cart._id,
+      cartId: cart.id,
       status: cart.status,
       lines,
       byMerchant: [...byMerchant.entries()].map(([domain, entry]) => ({

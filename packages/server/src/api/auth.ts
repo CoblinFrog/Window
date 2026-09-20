@@ -1,12 +1,12 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ObjectId } from 'mongodb';
 import {
   ApiError,
   EMBEDDING_DIM,
   SESSION_CONFIG,
   type UserDoc,
 } from '@window/shared';
-import type { CollectionSet, User } from '../db/collections.js';
+import type { CollectionSet, User } from '../db/supabase-collections.js';
+import { findOne, insert, updateOne } from '../db/supabase-helpers.js';
 import { createBloom, serializeBloom } from '../lib/bloom.js';
 import { requireSecret } from '../config/secrets.js';
 
@@ -27,7 +27,7 @@ import { requireSecret } from '../config/secrets.js';
  */
 
 export interface Principal {
-  userId: ObjectId;
+  userId: string;
   /** The public handle, never the secret. */
   deviceUserId: string;
   /** Recomputed from the user document on every request, never read from the token. */
@@ -77,7 +77,7 @@ export function mintDeviceHandle(): string {
 
 export function mintToken(principal: Principal, now = Date.now()): string {
   const body: TokenPayload = {
-    sub: principal.userId.toHexString(),
+    sub: principal.userId,
     dev: principal.deviceUserId,
     epc: principal.epoch,
     iat: now,
@@ -130,12 +130,12 @@ export function verifyToken(token: string, now = Date.now()): Omit<Principal, 'i
   if (typeof decoded.iat !== 'number' || decoded.iat > now + SESSION_CONFIG.clockSkewMs) {
     throw ApiError.unauthorized('Token is not yet valid.');
   }
-  if (typeof decoded.sub !== 'string' || !ObjectId.isValid(decoded.sub)) {
+  if (typeof decoded.sub !== 'string' || decoded.sub.length === 0) {
     throw ApiError.unauthorized('Token subject is not an identity.');
   }
 
   return {
-    userId: new ObjectId(decoded.sub),
+    userId: decoded.sub,
     deviceUserId: typeof decoded.dev === 'string' ? decoded.dev : '',
     epoch: typeof decoded.epc === 'number' ? decoded.epc : 0,
   };
@@ -154,7 +154,7 @@ export async function createDeviceUser(
 ): Promise<{ user: User; deviceSecret: string }> {
   const deviceSecret = mintDeviceSecret();
 
-  const blank: Omit<UserDoc<ObjectId>, '_id'> = {
+  const blank: Omit<UserDoc<string>, 'id'> = {
     deviceUserId: mintDeviceHandle(),
     deviceSecretHash: hashDeviceSecret(deviceSecret),
     sessionEpoch: 1,
@@ -186,8 +186,8 @@ export async function createDeviceUser(
     updatedAt: now,
   };
 
-  const result = await collections.users.insertOne(blank as User);
-  return { user: { ...blank, _id: result.insertedId } as User, deviceSecret };
+  const created = await insert<User>(collections.users, blank as User);
+  return { user: created, deviceSecret };
 }
 
 /**
@@ -202,7 +202,7 @@ export async function resumeDeviceUser(
   collections: CollectionSet,
   deviceSecret: string,
 ): Promise<User | null> {
-  return collections.users.findOne({ deviceSecretHash: hashDeviceSecret(deviceSecret) });
+  return findOne<User>(collections.users, { deviceSecretHash: hashDeviceSecret(deviceSecret) });
 }
 
 /**
@@ -212,13 +212,18 @@ export async function resumeDeviceUser(
  * until it expires no matter what the user does, and "sign out everywhere"
  * is a button that lies.
  */
-export async function revokeSessions(collections: CollectionSet, userId: ObjectId): Promise<number> {
-  const updated = await collections.users.findOneAndUpdate(
-    { _id: userId },
-    { $inc: { sessionEpoch: 1 }, $set: { updatedAt: new Date() } },
-    { returnDocument: 'after' },
-  );
-  return updated?.sessionEpoch ?? 0;
+export async function revokeSessions(collections: CollectionSet, userId: string): Promise<number> {
+  // Read-then-increment rather than an atomic $inc: PostgREST has no increment
+  // operator. The race here only ever revokes more than intended, never fewer,
+  // so it fails safe — but it is the one spot that wants a Postgres function if
+  // sign-out-everywhere ever becomes hot.
+  const current = await findOne<User>(collections.users, { id: userId });
+  const next = (current?.sessionEpoch ?? 1) + 1;
+  await updateOne<User>(collections.users, { id: userId }, {
+    sessionEpoch: next,
+    updatedAt: new Date(),
+  } as Partial<User>);
+  return next;
 }
 
 /** Anonymous principals cannot place orders or link merchant accounts. */

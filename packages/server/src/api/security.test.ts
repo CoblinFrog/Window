@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { ObjectId } from 'mongodb';
 
 process.env.AUTH_SECRET ??= 'a'.repeat(48);
 process.env.INTERNAL_TOKEN ??= 'b'.repeat(48);
@@ -37,7 +36,7 @@ const { capFor, assertSpendRules, SimulatedPaymentRail, DEFAULT_SPEND_RULES } = 
  */
 
 const principal = {
-  userId: new ObjectId('507f1f77bcf86cd799439011'),
+  userId: '507f1f77bcf86cd799439011',
   deviceUserId: 'dev_0123456789abcdef',
   isAnonymous: true,
   epoch: 3,
@@ -46,7 +45,7 @@ const principal = {
 describe('session tokens', () => {
   it('round-trips a token it minted', () => {
     const claims = verifyToken(mintToken(principal));
-    assert.equal(claims.userId.toHexString(), principal.userId.toHexString());
+    assert.equal(claims.userId, principal.userId);
     assert.equal(claims.epoch, 3);
   });
 
@@ -54,7 +53,7 @@ describe('session tokens', () => {
     const [version, payload, signature] = mintToken(principal).split('.');
     const forged = Buffer.from(
       JSON.stringify({
-        sub: new ObjectId().toHexString(),
+        sub: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
         dev: 'x',
         epc: 1,
         iat: Date.now(),
@@ -272,12 +271,14 @@ describe('injection boundaries', () => {
     assert.equal(hasPollutedKey(JSON.parse('[{"prototype":1}]')), true);
   });
 
-  it('rejects a non-hex id before it reaches a query', () => {
-    // `new ObjectId(garbage)` throws a BSONError the problem handler can only
+  it('rejects a malformed id before it reaches a query', () => {
+    // A malformed uuid is a Postgres 22P02, which the problem handler can only
     // render as a 500 — a 400 reported as a server fault, with a stack per probe.
     for (const candidate of ['', 'abc', '../../etc/passwd', '{"$gt":""}', 'z'.repeat(24)]) {
       assert.equal(objectIdSchema.safeParse(candidate).success, false, candidate);
     }
+    assert.equal(objectIdSchema.safeParse('d290f1ee-6c54-4b01-90e6-d701748f0851').success, true);
+    // Rows migrated from MongoDB keep their old identifiers.
     assert.equal(objectIdSchema.safeParse('507f1f77bcf86cd799439011').success, true);
   });
 

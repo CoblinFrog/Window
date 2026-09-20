@@ -39,17 +39,17 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       const mine = await repo.createCart('user_a', new Date());
 
-      assert.notEqual(await repo.getCart(mine._id, 'user_a'), null);
-      assert.equal(await repo.getCart(mine._id, 'user_b'), null);
+      assert.notEqual(await repo.getCart(mine.id, 'user_a'), null);
+      assert.equal(await repo.getCart(mine.id, 'user_b'), null);
     });
 
     it('never returns one user\'s order to another', async () => {
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({ userId: 'user_a' }));
 
-      assert.notEqual(await repo.getOrder(order._id, 'user_a'), null);
+      assert.notEqual(await repo.getOrder(order.id, 'user_a'), null);
       // This is the IDOR the checkout routes depend on being impossible.
-      assert.equal(await repo.getOrder(order._id, 'user_b'), null);
+      assert.equal(await repo.getOrder(order.id, 'user_b'), null);
     });
 
     it('lists only the caller\'s own orders', async () => {
@@ -66,8 +66,8 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({ userId: 'user_a' }));
 
-      assert.equal(await repo.cancelOrder(order._id, 'user_b', new Date()), null);
-      const still = await repo.getOrder(order._id, 'user_a');
+      assert.equal(await repo.cancelOrder(order.id, 'user_b', new Date()), null);
+      const still = await repo.getOrder(order.id, 'user_a');
       assert.equal(still?.status, 'awaiting_auth');
     });
 
@@ -79,13 +79,13 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({ status: 'awaiting_auth' }));
 
-      const first = await repo.claimForSubmission(order._id, { status: 'placing' });
+      const first = await repo.claimForSubmission(order.id, { status: 'placing' });
       assert.notEqual(first, null);
       assert.equal(first?.status, 'placing');
       assert.equal(first?.submissionSeq, 1);
 
       // The second caller must get null, not a second claim on the same order.
-      assert.equal(await repo.claimForSubmission(order._id, { status: 'placing' }), null);
+      assert.equal(await repo.claimForSubmission(order.id, { status: 'placing' }), null);
     });
 
     it('gives the order to exactly one of many concurrent claims', async () => {
@@ -95,7 +95,7 @@ export function describeCheckoutRepository(
       // The real contention case: a double-tap, a retried request, two tabs.
       // If a store implements this as read-then-write, this is where it fails.
       const results = await Promise.all(
-        Array.from({ length: 8 }, () => repo.claimForSubmission(order._id, { status: 'placing' })),
+        Array.from({ length: 8 }, () => repo.claimForSubmission(order.id, { status: 'placing' })),
       );
 
       assert.equal(results.filter((r) => r !== null).length, 1);
@@ -106,7 +106,7 @@ export function describeCheckoutRepository(
       for (const status of ['pending', 'quoting', 'placing', 'placed', 'cancelled', 'failed'] as const) {
         const order = await repo.createOrder(newOrder({ status }));
         assert.equal(
-          await repo.claimForSubmission(order._id, { status: 'placing' }),
+          await repo.claimForSubmission(order.id, { status: 'placing' }),
           null,
           `status ${status} must not be claimable`,
         );
@@ -118,9 +118,9 @@ export function describeCheckoutRepository(
       // 409. A store that throws here turns a normal double-tap into a 500.
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({ status: 'awaiting_auth' }));
-      await repo.claimForSubmission(order._id, { status: 'placing' });
+      await repo.claimForSubmission(order.id, { status: 'placing' });
 
-      await assert.doesNotReject(() => repo.claimForSubmission(order._id, { status: 'placing' }));
+      await assert.doesNotReject(() => repo.claimForSubmission(order.id, { status: 'placing' }));
     });
 
     // -----------------------------------------------------------------------
@@ -132,7 +132,7 @@ export function describeCheckoutRepository(
       for (const status of ['placing', 'placed', 'uncertain'] as const) {
         const order = await repo.createOrder(newOrder({ status }));
         assert.equal(
-          await repo.cancelOrder(order._id, 'user_a', new Date()),
+          await repo.cancelOrder(order.id, 'user_a', new Date()),
           null,
           `${status} must not be cancellable`,
         );
@@ -143,7 +143,7 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       for (const status of ['pending', 'quoting', 'awaiting_auth'] as const) {
         const order = await repo.createOrder(newOrder({ status }));
-        const cancelled = await repo.cancelOrder(order._id, 'user_a', new Date());
+        const cancelled = await repo.cancelOrder(order.id, 'user_a', new Date());
         assert.equal(cancelled?.status, 'cancelled', `${status} must be cancellable`);
       }
     });
@@ -157,7 +157,7 @@ export function describeCheckoutRepository(
       const order = await repo.createOrder(newOrder({}));
       const expiresAt = new Date('2026-06-01T12:00:00.000Z');
 
-      await repo.updateOrder(order._id, {
+      await repo.updateOrder(order.id, {
         quote: {
           subtotal: 1000,
           shipping: 500,
@@ -171,7 +171,7 @@ export function describeCheckoutRepository(
         },
       });
 
-      const stored = await repo.getOrder(order._id, 'user_a');
+      const stored = await repo.getOrder(order.id, 'user_a');
       // A Date that came back as a string would make every expired quote look
       // valid, because a string is never less than Date.now().
       assert.ok(stored?.quote?.expiresAt instanceof Date, 'expiresAt must be a Date');
@@ -185,7 +185,7 @@ export function describeCheckoutRepository(
         newOrder({ items: [{ productId: 'p1', title: 'Thing', quantity: 3, unitPrice: 1999, variant: {} }] }),
       );
 
-      const stored = await repo.getOrder(order._id, 'user_a');
+      const stored = await repo.getOrder(order.id, 'user_a');
       // 1999 must not come back as 19.99, "1999.00", or a float.
       assert.equal(stored?.items[0]?.unitPrice, 1999);
       assert.equal(Number.isInteger(stored?.items[0]?.unitPrice), true);
@@ -197,7 +197,7 @@ export function describeCheckoutRepository(
         newOrder({ items: [{ productId: 'p1', title: 'Thing', quantity: 1, unitPrice: 100, variant: {} }] }),
       );
 
-      const stored = await repo.getOrder(order._id, 'user_a');
+      const stored = await repo.getOrder(order.id, 'user_a');
       assert.deepEqual(stored?.items[0]?.variant, {});
     });
 
@@ -205,10 +205,10 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({}));
 
-      const first = await repo.getOrder(order._id, 'user_a');
+      const first = await repo.getOrder(order.id, 'user_a');
       first!.status = 'placed' as OrderStatus;
 
-      const second = await repo.getOrder(order._id, 'user_a');
+      const second = await repo.getOrder(order.id, 'user_a');
       // Mutating a returned document must not mutate the store. A real database
       // gets this for free; an in-process one has to be deliberate about it.
       assert.equal(second?.status, 'awaiting_auth');
@@ -218,8 +218,8 @@ export function describeCheckoutRepository(
       const repo = await freshRepository();
       const order = await repo.createOrder(newOrder({ merchantDomain: 'shop.test' }));
 
-      await repo.updateOrder(order._id, { status: 'quoting' });
-      const stored = await repo.getOrder(order._id, 'user_a');
+      await repo.updateOrder(order.id, { status: 'quoting' });
+      const stored = await repo.getOrder(order.id, 'user_a');
 
       assert.equal(stored?.status, 'quoting');
       assert.equal(stored?.merchantDomain, 'shop.test', 'a patch must not clear other fields');
@@ -232,27 +232,27 @@ export function describeCheckoutRepository(
     it('finds the open cart and ignores closed ones', async () => {
       const repo = await freshRepository();
       const first = await repo.createCart('user_a', new Date());
-      await repo.setCartStatus(first._id, 'closed', new Date());
+      await repo.setCartStatus(first.id, 'closed', new Date());
 
       assert.equal(await repo.getOpenCart('user_a'), null);
 
       const second = await repo.createCart('user_a', new Date());
-      assert.equal((await repo.getOpenCart('user_a'))?._id, second._id);
+      assert.equal((await repo.getOpenCart('user_a'))?.id, second.id);
     });
 
     it('reopens a cart only from the expected status', async () => {
       const repo = await freshRepository();
       const cart = await repo.createCart('user_a', new Date());
-      await repo.setCartStatus(cart._id, 'closed', new Date());
+      await repo.setCartStatus(cart.id, 'closed', new Date());
 
       // A cancellation arriving late must not reopen a cart the user has since
       // moved on from.
-      await repo.reopenCart(cart._id, 'checking_out', new Date());
-      assert.equal((await repo.getCart(cart._id, 'user_a'))?.status, 'closed');
+      await repo.reopenCart(cart.id, 'checking_out', new Date());
+      assert.equal((await repo.getCart(cart.id, 'user_a'))?.status, 'closed');
 
-      await repo.setCartStatus(cart._id, 'checking_out', new Date());
-      await repo.reopenCart(cart._id, 'checking_out', new Date());
-      assert.equal((await repo.getCart(cart._id, 'user_a'))?.status, 'open');
+      await repo.setCartStatus(cart.id, 'checking_out', new Date());
+      await repo.reopenCart(cart.id, 'checking_out', new Date());
+      assert.equal((await repo.getCart(cart.id, 'user_a'))?.status, 'open');
     });
 
     // -----------------------------------------------------------------------
@@ -329,7 +329,7 @@ export function newOrder(overrides: Partial<NewOrder> = {}): NewOrder {
  */
 export function fixtureProduct(overrides: Partial<Product> = {}): Product {
   return {
-    _id: 'p1',
+    id: 'p1',
     title: 'Thing',
     clusterId: null,
     sellerId: 'seller_1',
@@ -350,7 +350,7 @@ export function fixtureProduct(overrides: Partial<Product> = {}): Product {
 /** A merchant source with only the fields checkout actually reads. */
 export function fixtureSource(overrides: Partial<Source> = {}): Source {
   return {
-    _id: 'shop.test',
+    id: 'shop.test',
     displayName: 'Shop',
     sourceType: 'new',
     checkout: { protocol: 'browser', blocksAgents: false, stackableCoupons: false },

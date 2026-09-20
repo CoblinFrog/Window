@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import {
   ApiError,
@@ -25,6 +24,17 @@ import {
 } from '../auth.js';
 import { issueEmailChallenge, normalizeEmail, verifyEmailChallenge } from '../claims.js';
 import { objectIdSchema, opaqueSecretSchema } from '../validation.js';
+import {
+  count as countRows,
+  deleteMany,
+  deleteOne,
+  find,
+  findOne,
+  insert,
+  updateMany,
+  updateOne,
+} from '../../db/supabase-helpers.js';
+import type { Category, Product, ReportDoc, User } from '../../db/supabase-collections.js';
 import { seedInterestSet, seedPricePrior, seedUserVector } from '../../ranking/user-vector.js';
 
 export function profileRoutes(ctx: AppContext): Router {
@@ -44,15 +54,16 @@ export function profileRoutes(ctx: AppContext): Router {
   /** The 18 L1 tiles with imagery. */
   router.get('/onboarding/topics', async (_req, res, next) => {
     try {
-      const docs = await collections.categories
-        .find({ level: 1 })
-        .sort({ 'tile.order': 1 })
-        .toArray();
+      const docs = await find<Category>(
+        collections.categories,
+        { level: 1 },
+        { orderBy: { column: 'tile.order', ascending: true } },
+      );
 
       const topics = (docs.length > 0 ? docs : []).map((doc) => ({
-        id: doc._id,
+        id: doc.id,
         displayName: doc.displayName,
-        image: doc.tile?.image ?? `${env.publicUrl}/media/topic/${doc._id}`,
+        image: doc.tile?.image ?? `${env.publicUrl}/media/topic/${doc.id}`,
         order: doc.tile?.order ?? 0,
       }));
 
@@ -101,9 +112,10 @@ export function profileRoutes(ctx: AppContext): Router {
         throw ApiError.validation('Topics must be distinct.');
       }
 
-      const categories = await collections.categories
-        .find({ _id: { $in: topics }, level: 1 })
-        .toArray();
+      const categories = await find<Category>(collections.categories, {
+        id: { in: topics },
+        level: 1,
+      });
       const centroids = categories
         .map((c) => c.centroid)
         .filter((c): c is number[] => Array.isArray(c) && c.length > 0);
@@ -126,19 +138,14 @@ export function profileRoutes(ctx: AppContext): Router {
         explorationState: { ...user.explorationState, counter: 0 },
       });
 
-      await collections.users.updateOne(
-        { _id: user._id },
-        {
-          $set: {
-            onboarding: { topics, priceBand, completedAt: now },
-            interestVector,
-            interestSet,
-            pricePrior,
-            'explorationState.counter': counter,
-            updatedAt: now,
-          },
-        },
-      );
+      await updateOne<User>(collections.users, { id: user.id }, {
+        onboarding: { topics, priceBand, completedAt: now },
+        interestVector,
+        interestSet,
+        pricePrior,
+        explorationState: { ...user.explorationState, counter },
+        updatedAt: now,
+      } as Partial<User>);
 
       res.status(204).end();
     } catch (error) {
@@ -153,7 +160,7 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!user || !principal) throw ApiError.unauthorized();
 
       const response: MeResponse = {
-        id: user._id.toHexString(),
+        id: user.id,
         deviceUserId: user.deviceUserId,
         isAnonymous: principal.isAnonymous,
         email: user.auth?.email ?? null,
@@ -199,16 +206,14 @@ export function profileRoutes(ctx: AppContext): Router {
       const parsed = settingsSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid settings patch.');
 
-      const updates: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(parsed.data)) {
-        if (value !== undefined) updates[`settings.${key}`] = value;
+      if (Object.keys(parsed.data).length === 0) {
+        throw ApiError.validation('No settings supplied.');
       }
-      if (Object.keys(updates).length === 0) throw ApiError.validation('No settings supplied.');
 
-      await collections.users.updateOne(
-        { _id: user._id },
-        { $set: { ...updates, updatedAt: new Date() } },
-      );
+      await updateOne<User>(collections.users, { id: user.id }, {
+        settings: { ...user.settings, ...parsed.data },
+        updatedAt: new Date(),
+      } as Partial<User>);
       res.status(204).end();
     } catch (error) {
       next(error);
@@ -236,24 +241,35 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!parsed.success) throw ApiError.validation('Invalid suppression request.');
       const { kind, value, productId } = parsed.data;
 
-      // Validated before construction, not after: `new ObjectId(garbage)` throws
-      // a BSONError the problem handler can only render as a 500, reporting a
-      // bad request as a server fault and logging a stack for every probe.
+      // Validated before use, not after. Under Mongo this prevented a BSONError
+      // rendered as a 500; under Postgres a malformed uuid is a 22P02 with the
+      // same effect — a bad request reported as a server fault.
       if (kind !== 'brand' && !objectIdSchema.safeParse(value).success) {
         throw ApiError.validation(`${kind} suppressions require a valid id.`);
       }
 
-      const update =
-        kind === 'brand'
-          ? { $addToSet: { 'suppressions.brands': value } }
-          : kind === 'seller'
-            ? { $addToSet: { 'suppressions.sellers': new ObjectId(value) } }
-            : { $addToSet: { 'suppressions.products': new ObjectId(value) } };
+      // Get current user to check existing suppressions
+      const currentUser = await findOne<User>(collections.users, { id: user.id });
+      if (!currentUser) throw ApiError.notFound('User not found');
 
-      await collections.users.updateOne({ _id: user._id }, update as never);
+      let newSuppressions = { ...currentUser.suppressions };
+      
+      if (kind === 'brand') {
+        newSuppressions.brands = [...new Set([...newSuppressions.brands, value])];
+      } else if (kind === 'seller') {
+        newSuppressions.sellers = [...new Set([...newSuppressions.sellers, value])];
+      } else {
+        newSuppressions.products = [...new Set([...newSuppressions.products, value])];
+      }
+
+      await updateOne(
+        collections.users,
+        { id: user.id },
+        { suppressions: newSuppressions, updatedAt: new Date() },
+      );
 
       const signalProductId = productId ?? (kind === 'product' ? value : null);
-      if (signalProductId && ObjectId.isValid(signalProductId)) {
+      if (signalProductId) {
         const type =
           kind === 'brand' ? 'hide_brand' : kind === 'seller' ? 'mute_seller' : 'hide_product';
         const event: ClientEvent = {
@@ -268,36 +284,6 @@ export function profileRoutes(ctx: AppContext): Router {
       }
 
       res.status(204).end();
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  const challengeSchema = z.object({ email: z.string().email().max(254) });
-
-  /**
-   * Step one of an email claim: send a code to the address and prove nothing yet.
-   *
-   * The response is identical whether or not the address is already attached to
-   * another account. Telling the caller "that email is taken" turns this into an
-   * oracle for which of a list of addresses has a Window account, which is a
-   * privacy leak paid for with no security benefit.
-   */
-  router.post('/me/claim/email', rateLimit(ctx.cache, 'claim'), async (req, res, next) => {
-    try {
-      const user = req.currentUser;
-      if (!user) throw ApiError.unauthorized();
-
-      const parsed = challengeSchema.safeParse(req.body);
-      if (!parsed.success) throw ApiError.validation('A valid email address is required.');
-
-      const { expiresAt } = await issueEmailChallenge(
-        ctx.cache,
-        ctx.mailer,
-        user._id.toHexString(),
-        parsed.data.email,
-      );
-      res.status(202).json({ expiresAt: expiresAt.toISOString() });
     } catch (error) {
       next(error);
     }
@@ -338,7 +324,7 @@ export function profileRoutes(ctx: AppContext): Router {
 
         const result = await verifyEmailChallenge(
           ctx.cache,
-          user._id.toHexString(),
+          user.id,
           email,
           token,
         );
@@ -364,31 +350,23 @@ export function profileRoutes(ctx: AppContext): Router {
       // belongs to someone else silently produces two accounts answering to one
       // identity — and a merge request nobody can safely honour. The unique
       // index on `auth.email` is the actual enforcement; this is the message.
-      const taken = await collections.users.findOne({
-        'auth.email': verifiedEmail,
-        _id: { $ne: user._id },
-      });
-      if (taken) {
+      const taken = await findOne<User>(collections.users, { 'auth->>email': verifiedEmail });
+      if (taken && taken.id !== user.id) {
         throw ApiError.validation(
           'That address is already attached to another Window account. Sign in on that account instead.',
         );
       }
 
       try {
-        await collections.users.updateOne(
-          { _id: user._id },
-          {
-            $set: {
-              auth: {
-                email: verifiedEmail,
-                providers: [provider],
-                claimedAt: now,
-                emailVerifiedAt: now,
-              },
-              updatedAt: now,
-            },
+        await updateOne<User>(collections.users, { id: user.id }, {
+          auth: {
+            email: verifiedEmail,
+            providers: [provider],
+            claimedAt: now,
+            emailVerifiedAt: now,
           },
-        );
+          updatedAt: now,
+        } as Partial<User>);
       } catch (error) {
         if ((error as { code?: number }).code === 11000) {
           throw ApiError.validation('That address is already attached to another Window account.');
@@ -400,7 +378,7 @@ export function profileRoutes(ctx: AppContext): Router {
       // before the claim described an anonymous principal; leaving it valid
       // means the old, lower-trust credential still opens the higher-trust
       // account for the rest of its lifetime.
-      const epoch = await revokeSessions(collections, user._id);
+      const epoch = await revokeSessions(collections, user.id);
 
       res.json({
         token: mintToken({ ...principal, isAnonymous: false, epoch }),
@@ -422,7 +400,7 @@ export function profileRoutes(ctx: AppContext): Router {
     try {
       const user = req.currentUser;
       if (!user) throw ApiError.unauthorized();
-      await revokeSessions(collections, user._id);
+      await revokeSessions(collections, user.id);
       res.status(204).end();
     } catch (error) {
       next(error);
@@ -442,18 +420,19 @@ export function profileRoutes(ctx: AppContext): Router {
       if (!user) throw ApiError.unauthorized();
 
       await Promise.all([
-        collections.interactions.deleteMany({ userId: user._id }),
-        collections.carts.deleteMany({ userId: user._id }),
-        collections.merchantLinks.deleteMany({ userId: user._id }),
-        collections.reports.deleteMany({ userId: user._id }),
+        deleteMany(collections.interactions, { userId: user.id }),
+        deleteMany(collections.carts, { userId: user.id }),
+        deleteMany(collections.merchantLinks, { userId: user.id }),
+        deleteMany(collections.reports, { userId: user.id }),
       ]);
       // Orders are retained: they are transaction records with their own legal
       // retention, so they are unlinked from the identity rather than deleted.
-      await collections.orders.updateMany(
-        { userId: user._id },
-        { $set: { userId: new ObjectId('000000000000000000000000') } },
+      await updateMany(
+        collections.orders,
+        { userId: user.id },
+        { userId: '00000000-0000-0000-0000-000000000000' },
       );
-      await collections.users.deleteOne({ _id: user._id });
+      await deleteOne(collections.users, { id: user.id });
 
       res.status(204).end();
     } catch (error) {
@@ -489,14 +468,19 @@ export function profileRoutes(ctx: AppContext): Router {
       const parsed = reportSchema.safeParse(req.body);
       if (!parsed.success) throw ApiError.validation('Invalid report.');
 
-      const productId = new ObjectId(parsed.data.productId);
-      const product = await collections.products.findOne({ _id: productId });
+      const productId = parsed.data.productId;
+      const product = await findOne<Product>(collections.products, { id: productId });
       if (!product) throw ApiError.notFound('That product');
 
-      await collections.reports.updateOne(
-        { productId, userId: user._id },
-        {
-          $set: {
+      // Check if report already exists
+      const existingReport = await findOne(collections.reports, { productId, userId: user.id });
+      
+      if (existingReport) {
+        // Update existing report
+        await updateOne(
+          collections.reports,
+          { productId, userId: user.id },
+          {
             sellerId: product.sellerId,
             reason: parsed.data.reason,
             note: parsed.data.note ?? null,
@@ -504,20 +488,36 @@ export function profileRoutes(ctx: AppContext): Router {
             createdAt: new Date(),
             resolvedAt: null,
           },
-        },
-        { upsert: true },
-      );
+        );
+      } else {
+        // Insert new report
+        await insert(collections.reports, {
+          productId,
+          userId: user.id,
+          sellerId: product.sellerId,
+          reason: parsed.data.reason,
+          note: parsed.data.note ?? null,
+          status: 'open' as const,
+          createdAt: new Date(),
+          resolvedAt: null,
+        });
+      }
 
-      const count = await collections.reports.countDocuments({ productId, status: 'open' });
-      await collections.products.updateOne(
-        { _id: productId },
-        { $set: { 'risk.reports.count': count } },
+      const count = await countRows(collections.reports, { productId, status: 'open' });
+      
+      // Update product risk reports count
+      const updatedProduct = { ...product, risk: { ...product.risk, reports: { count, upheld: product.risk.reports.upheld } } };
+      await updateOne(
+        collections.products,
+        { id: productId },
+        { risk: updatedProduct.risk },
       );
 
       if (count >= 3 && product.risk.tier !== 'high' && product.risk.tier !== 'blocked') {
-        await collections.products.updateOne(
-          { _id: productId },
-          { $set: { 'risk.tier': 'high', 'risk.score': Math.max(product.risk.score, 0.75) } },
+        await updateOne(
+          collections.products,
+          { id: productId },
+          { risk: { ...updatedProduct.risk, tier: 'high', score: Math.max(product.risk.score, 0.75) } },
         );
       }
 
@@ -563,7 +563,7 @@ export function authRoutes(ctx: AppContext): Router {
       const user = existing ?? minted!.user;
 
       const principal = {
-        userId: user._id,
+        userId: user.id,
         deviceUserId: user.deviceUserId,
         isAnonymous: isAnonymousUser(user),
         epoch: user.sessionEpoch ?? 1,
@@ -575,7 +575,7 @@ export function authRoutes(ctx: AppContext): Router {
         // storage and presents it to resume; the server keeps only its hash.
         ...(minted ? { deviceSecret: minted.deviceSecret } : {}),
         deviceUserId: user.deviceUserId,
-        userId: user._id.toHexString(),
+        userId: user.id,
         isAnonymous: principal.isAnonymous,
         onboarded: user.onboarding !== null,
       });

@@ -75,7 +75,7 @@ export function chooseQuadSeeds(
   // the feed, and a second keyboard window is not.
   for (const candidate of ranked) {
     if (seeds.length >= count) break;
-    if (seeds.some((s) => s.candidate._id.equals(candidate._id))) continue;
+    if (seeds.some((s) => s.candidate.id === candidate.id)) continue;
     seeds.push({
       candidate,
       l2: candidate.category.l2,
@@ -108,9 +108,9 @@ export function assembleQuad(
 
   for (const candidate of pool) {
     if (quad.length >= size) break;
-    const key = candidate._id.toHexString();
+    const key = candidate.id;
     if (used.has(key)) continue;
-    if (quad.some((q) => q._id.equals(candidate._id))) continue;
+    if (quad.some((q) => q.id === candidate.id)) continue;
     if (candidate.category.l2 !== seed.l2) continue;
 
     const nextMin = Math.min(min, candidate.price.amount);

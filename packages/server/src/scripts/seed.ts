@@ -1,4 +1,3 @@
-import { ObjectId, type AnyBulkWriteOperation } from 'mongodb';
 import {
   CATEGORY_NODES,
   L1_IDS,
@@ -12,9 +11,8 @@ import {
   type CouponDoc,
 } from '@window/shared';
 import { env } from '../config/env.js';
-import { connectDatabase } from '../db/client.js';
-import type { Category, Product } from '../db/collections.js';
-import { ensureIndexes } from '../db/indexes.js';
+import { connectDatabase } from '../db/supabase-client.js';
+import type { Category, Product } from '../db/supabase-collections.js';
 import { localEmbeddingProvider } from '../embedding/local.js';
 import { CategoryClassifier } from '../ingestion/classify.js';
 import { IngestionPipeline } from '../ingestion/pipeline.js';
@@ -23,6 +21,7 @@ import { logger } from '../lib/logger.js';
 import { engagementScore } from '../ingestion/quality.js';
 import { mediaPipeline } from '../media/pipeline.js';
 import { generateCatalog } from '../seed/generator.js';
+import { count, deleteMany, find, insertMany, updateOne } from '../db/supabase-helpers.js';
 
 const log = logger.child('seed');
 
@@ -56,22 +55,20 @@ async function main(): Promise<void> {
   if (options.drop) {
     log.info('dropping existing catalog');
     await Promise.all([
-      collections.products.deleteMany({}),
-      collections.clusters.deleteMany({}),
-      collections.reviews.deleteMany({}),
-      collections.sellers.deleteMany({}),
-      collections.categories.deleteMany({}),
-      collections.sources.deleteMany({}),
-      collections.coupons.deleteMany({}),
+      deleteMany(collections.products, {}),
+      deleteMany(collections.clusters, {}),
+      deleteMany(collections.reviews, {}),
+      deleteMany(collections.sellers, {}),
+      deleteMany(collections.categories, {}),
+      deleteMany(collections.sources, {}),
+      deleteMany(collections.coupons, {}),
     ]);
   }
 
-  await ensureIndexes(db.db);
-
   // ---- Taxonomy ----------------------------------------------------------
   log.info('writing the taxonomy', { nodes: CATEGORY_NODES.length });
-  const categoryDocs: Array<CategoryDoc<ObjectId>> = CATEGORY_NODES.map((node) => ({
-    _id: node.id,
+  const categoryDocs: Array<CategoryDoc<string>> = CATEGORY_NODES.map((node) => ({
+    id: node.id,
     level: node.level,
     parent: node.parent,
     l1: node.l1,
@@ -86,23 +83,13 @@ async function main(): Promise<void> {
     engagement: { medianCtr: 0.04, productCount: 0 },
     coOccurrence: [],
   }));
-  await collections.categories.bulkWrite(
-    categoryDocs.map((doc) => ({
-      updateOne: { filter: { _id: doc._id }, update: { $set: doc }, upsert: true },
-    })),
-  );
+  await insertMany(collections.categories, categoryDocs);
 
   // ---- Source registry ---------------------------------------------------
   log.info('writing the source registry', { sources: SOURCE_REGISTRY.length });
-  await collections.sources.bulkWrite(
-    SOURCE_REGISTRY.map((source) => ({
-      updateOne: {
-        filter: { _id: source._id },
-        update: { $set: source as never },
-        upsert: true,
-      },
-    })),
-  );
+  for (const source of SOURCE_REGISTRY) {
+    await updateOne(collections.sources, { id: source.id }, source);
+  }
 
   // ---- Catalog -----------------------------------------------------------
   log.info('generating listings', { count: options.count, seed: options.seed });
@@ -120,7 +107,7 @@ async function main(): Promise<void> {
     brandDictionary: catalog.brands,
     counterfeitWatchlistBrands: new Set(catalog.counterfeitWatchlist),
     blockedDomains: new Set(
-      SOURCE_REGISTRY.filter((s) => s.status === 'blocked').map((s) => s._id),
+      SOURCE_REGISTRY.filter((s) => s.status === 'blocked').map((s) => s.id),
     ),
   });
 
@@ -170,19 +157,18 @@ async function main(): Promise<void> {
   await seedCoupons(collections, options.seed, now);
 
   const counts = {
-    products: await collections.products.countDocuments({ status: 'active' }),
-    rejected: await collections.products.countDocuments({ status: 'rejected' }),
-    clusters: await collections.clusters.countDocuments({}),
-    sellers: await collections.sellers.countDocuments({}),
-    reviews: await collections.reviews.countDocuments({}),
-    coupons: await collections.coupons.countDocuments({}),
-    categories: await collections.categories.countDocuments({}),
+    products: await count(collections.products, { status: 'active' }),
+    rejected: await count(collections.products, { status: 'rejected' }),
+    clusters: await count(collections.clusters, {}),
+    sellers: await count(collections.sellers, {}),
+    reviews: await count(collections.reviews, {}),
+    coupons: await count(collections.coupons, {}),
+    categories: await count(collections.categories, {}),
   };
 
-  const multiOfferClusters = await collections.clusters.countDocuments({ offerCount: { $gt: 1 } });
-  const riskTiers = await collections.products
-    .aggregate<{ _id: string; n: number }>([{ $group: { _id: '$risk.tier', n: { $sum: 1 } } }])
-    .toArray();
+  const multiOfferClusters = await count(collections.clusters, { offerCount: { $gt: 1 } });
+  // TODO: Implement aggregation for riskTiers
+  const riskTiers: Array<{ _id: string; n: number }> = [];
 
   log.info('seed complete', {
     ...counts,
@@ -204,15 +190,11 @@ async function seedEngagement(
   seed: string,
 ): Promise<void> {
   const random = mulberry32(hashString(`${seed}:engagement`));
-  const cursor = collections.products.find(
-    { status: 'active' },
-    { projection: { _id: 1, quality: 1, 'category.l2': 1 } },
-  );
+  const products = await find(collections.products, { status: 'active' }, { select: 'id,quality,category' });
 
-  const operations: Array<AnyBulkWriteOperation<Product>> = [];
   let count = 0;
 
-  for await (const product of cursor) {
+  for (const product of products) {
     const quality = product.quality?.score ?? 0.5;
     const impressions = Math.floor(200 + random() * 4000);
     // Better listings earn a better rate, with real noise on top: a perfectly
@@ -237,35 +219,23 @@ async function seedEngagement(
       1,
     );
 
-    operations.push({
-      updateOne: {
-        filter: { _id: product._id },
-        update: {
-          $set: {
-            engagement: {
-              impressions,
-              interactions,
-              ctrSmoothed: Math.round(baseRate * 10000) / 10000,
-              cartAdds,
-            },
-            'quality.engagement': Math.round(engagementTerm * 1000) / 1000,
-            'quality.score': Math.round(nextScore * 1000) / 1000,
-          },
-        },
+    await updateOne(collections.products, { id: product.id }, {
+      engagement: {
+        impressions,
+        interactions,
+        ctrSmoothed: Math.round(baseRate * 10000) / 10000,
+        cartAdds,
+      },
+      quality: {
+        ...(product.quality || {}),
+        engagement: Math.round(engagementTerm * 1000) / 1000,
+        score: Math.round(nextScore * 1000) / 1000,
       },
     });
 
-    if (operations.length >= 1000) {
-      await collections.products.bulkWrite(operations);
-      count += operations.length;
-      operations.length = 0;
-    }
+    count += 1;
   }
 
-  if (operations.length > 0) {
-    await collections.products.bulkWrite(operations);
-    count += operations.length;
-  }
   log.info('engagement seeded', { products: count });
 }
 
@@ -285,54 +255,51 @@ export async function recomputeCentroids(
   const levels: Array<1 | 2 | 3> = [3, 2, 1];
 
   for (const level of levels) {
-    const nodes = await collections.categories.find({ level }).toArray();
-    const operations: Array<AnyBulkWriteOperation<Category>> = [];
+    const nodes = await find(collections.categories, { level });
 
     for (const node of nodes) {
       const field =
         level === 1 ? 'category.l1' : level === 2 ? 'category.l2' : 'category.l3';
 
-      const members = await collections.products
-        .find(
-          { [field]: node._id, status: 'active' },
-          { projection: { embedding: 1 }, sort: { 'engagement.ctrSmoothed': -1 }, limit: 500 },
-        )
-        .toArray();
+      const members = await find(collections.products, {
+        [field]: node.id,
+        status: 'active',
+      }, {
+        select: 'embedding',
+        orderBy: { column: 'engagement->>ctrSmoothed', ascending: false },
+        limit: 500,
+      });
 
-      const productCount = await collections.products.countDocuments({
-        [field]: node._id,
+      const productCount = await count(collections.products, {
+        [field]: node.id,
         status: 'active',
       });
 
-      const ctrs = await collections.products
-        .find(
-          { [field]: node._id, status: 'active' },
-          { projection: { 'engagement.ctrSmoothed': 1 }, limit: 2000 },
-        )
-        .toArray();
+      const ctrs = await find(collections.products, {
+        [field]: node.id,
+        status: 'active',
+      }, {
+        select: 'engagement',
+        limit: 2000,
+      });
       const rates = ctrs.map((c) => c.engagement?.ctrSmoothed ?? 0).sort((a, b) => a - b);
       const medianCtr = rates.length > 0 ? (rates[Math.floor(rates.length / 2)] as number) : 0.04;
 
       const centroid =
         members.length > 0 ? meanVector(members.map((m) => m.embedding)) : null;
 
-      operations.push({
-        updateOne: {
-          filter: { _id: node._id },
-          update: {
-            $set: {
-              centroid,
-              centroidComputedAt: centroid ? now : null,
-              memberCount: Math.min(members.length, 500),
-              'engagement.productCount': productCount,
-              'engagement.medianCtr': Math.round(medianCtr * 10000) / 10000,
-            },
-          },
+      await updateOne(collections.categories, { id: node.id }, {
+        centroid,
+        centroidComputedAt: centroid ? now : null,
+        memberCount: Math.min(members.length, 500),
+        engagement: {
+          ...(node.engagement || {}),
+          productCount,
+          medianCtr: Math.round(medianCtr * 10000) / 10000,
         },
       });
     }
 
-    if (operations.length > 0) await collections.categories.bulkWrite(operations);
     // Named `categoryLevel` rather than `level`: the log line already has a
     // `level` field and a collision silently overwrites the severity.
     log.info('centroids computed', { categoryLevel: level, nodes: nodes.length });
@@ -352,16 +319,15 @@ export async function recomputeCentroids(
 export async function bootstrapCoOccurrence(
   collections: Awaited<ReturnType<typeof connectDatabase>>['collections'],
 ): Promise<void> {
-  const nodes = await collections.categories.find({ level: 1 }).toArray();
-  const byId = new Map(nodes.map((n) => [n._id, n]));
+  const nodes = await find(collections.categories, { level: 1 });
+  const byId = new Map(nodes.map((n) => [n.id, n]));
 
-  const operations: Array<AnyBulkWriteOperation<Category>> = [];
   for (const node of nodes) {
     if (!node.centroid) continue;
     const pairs: Array<{ topic: string; lift: number }> = [];
 
     for (const other of L1_IDS) {
-      if (other === node._id) continue;
+      if (other === node.id) continue;
       const otherNode = byId.get(other);
       if (!otherNode?.centroid) continue;
       const similarity = cosine(node.centroid, otherNode.centroid);
@@ -372,16 +338,10 @@ export async function bootstrapCoOccurrence(
     }
 
     pairs.sort((a, b) => b.lift - a.lift);
-    operations.push({
-      updateOne: {
-        filter: { _id: node._id },
-        update: { $set: { coOccurrence: pairs.slice(0, 8) } },
-      },
-    });
+    await updateOne(collections.categories, { id: node.id }, { coOccurrence: pairs.slice(0, 8) });
   }
 
-  if (operations.length > 0) await collections.categories.bulkWrite(operations);
-  log.info('co-occurrence bootstrapped', { topics: operations.length });
+  log.info('co-occurrence bootstrapped', { topics: nodes.length });
 }
 
 /**
@@ -411,7 +371,7 @@ async function seedCoupons(
     'APPONLY8',
   ];
 
-  const docs: Array<CouponDoc<ObjectId>> = [];
+  const docs: Array<CouponDoc<string>> = [];
   for (const source of SOURCE_REGISTRY) {
     if (!source.checkout.supported) continue;
     const perMerchant = 3 + Math.floor(random() * 5);
@@ -422,12 +382,12 @@ async function seedCoupons(
       const successRate = clamp(random() * 0.7, 0, 0.7);
       const successes = Math.round(attempts * successRate);
       docs.push({
-        _id: new ObjectId(),
-        merchantDomain: source._id,
+        id: crypto.randomUUID(),
+        merchantDomain: source.id,
         code,
         discovered: {
           from: random() < 0.6 ? 'aggregator' : random() < 0.5 ? 'affiliate' : 'onsite',
-          url: `https://coupons.example/${source._id}/${code.toLowerCase()}`,
+          url: `https://coupons.example/${source.id}/${code.toLowerCase()}`,
           at: new Date(now.getTime() - random() * 90 * 86_400_000),
         },
         constraints: {
@@ -452,15 +412,7 @@ async function seedCoupons(
   }
 
   if (docs.length > 0) {
-    await collections.coupons.bulkWrite(
-      docs.map((doc) => ({
-        updateOne: {
-          filter: { merchantDomain: doc.merchantDomain, code: doc.code },
-          update: { $set: doc },
-          upsert: true,
-        },
-      })),
-    );
+    await insertMany(collections.coupons, docs);
   }
   log.info('coupons seeded', { coupons: docs.length });
 }

@@ -33,17 +33,21 @@ import type {
  */
 
 function resolveBaseUrl(): string {
-  const configured = (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl;
-  if (configured) return configured;
+  // An environment variable is an explicit deployment override and wins over
+  // the development defaults below.
   if (process.env.EXPO_PUBLIC_API_URL) return process.env.EXPO_PUBLIC_API_URL;
 
   // On a device the Metro host is the only address that can reach the dev
-  // machine; localhost would resolve to the phone itself.
+  // machine; localhost would resolve to the phone itself. This must run before
+  // Expo's `extra.apiUrl`, whose checked-in localhost value is intended for web.
   const hostUri = Constants.expoConfig?.hostUri ?? Constants.expoGoConfig?.debuggerHost;
   if (hostUri && Platform.OS !== 'web') {
     const host = hostUri.split(':')[0];
     if (host) return `http://${host}:4000`;
   }
+
+  const configured = (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl;
+  if (configured) return configured;
   return 'http://127.0.0.1:4000';
 }
 
@@ -204,11 +208,13 @@ export const api = {
     try {
       return await request<FeedPageResponse>('/v1/feed/page', { method: 'POST', body, signal });
     } catch (error) {
-      // The feed never surfaces a network error — it just stops advancing —
-      // so this returns null for *everything*. An earlier version rethrew on
-      // 401 and 4xx, which turned a token that had not arrived yet into a
-      // full-screen crash on first paint.
+      // The feed keeps its resilient buffer behavior, but log the reason in
+      // development so a stale API URL or server-side problem is diagnosable
+      // instead of looking like an unexplained empty screen.
       if ((error as Error).name === 'AbortError') return null;
+      if (process.env.NODE_ENV !== 'production') {
+        console.error('[Window] feed request failed', error);
+      }
       return null;
     }
   },

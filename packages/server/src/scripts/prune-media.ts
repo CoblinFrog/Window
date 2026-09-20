@@ -1,7 +1,7 @@
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { env } from '../config/env.js';
-import { connectDatabase } from '../db/client.js';
+import { connectDatabase } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 
 const log = logger.child('prune-media');
