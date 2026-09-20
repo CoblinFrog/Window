@@ -45,6 +45,13 @@ export interface ActionBarProps {
   onCartLongPress(): void;
   onShare(): void;
   onShareLongPress(): void;
+  /**
+   * Asks whether a press arriving right now is a drag's ghost. The bar rides
+   * at the foot of a pane that scrolls, and on the web a drag that starts and
+   * ends on the same element still emits a click — so a scroll begun on this
+   * row added to a cart. Long presses are exempt: no drag produces one.
+   */
+  suppressTap?: (() => boolean) | undefined;
 }
 
 function tick(): void {
@@ -61,6 +68,7 @@ interface BarButtonProps {
   caption?: string | undefined;
   onPress(): void;
   onLongPress(): void;
+  suppressTap?: (() => boolean) | undefined;
 }
 
 function BarButton({
@@ -70,10 +78,12 @@ function BarButton({
   caption,
   onPress,
   onLongPress,
+  suppressTap,
 }: BarButtonProps): React.ReactElement {
   return (
     <Pressable
       onPress={() => {
+        if (suppressTap?.()) return;
         tick();
         onPress();
       }}
@@ -103,7 +113,7 @@ function BarButton({
 }
 
 export function ActionBar(props: ActionBarProps): React.ReactElement {
-  const { card } = props;
+  const { card, suppressTap } = props;
   const upvotes = card.upvotes + (props.upvoted ? 1 : 0);
 
   return (
@@ -115,6 +125,7 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
         caption={upvotes > 0 ? compact(upvotes) : undefined}
         onPress={props.onUpvote}
         onLongPress={props.onUpvoteLongPress}
+        suppressTap={suppressTap}
       />
 
       {/* Auction items cannot be added to a cart; they deep-link to the bid book. */}
@@ -124,6 +135,7 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
         active={props.inCart}
         onPress={props.onCart}
         onLongPress={props.onCartLongPress}
+        suppressTap={suppressTap}
       />
 
       {/* Long-press jumps straight to the critical reviews. */}
@@ -133,6 +145,7 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
         caption={card.reviews.count > 0 ? compact(card.reviews.count) : undefined}
         onPress={props.onReviews}
         onLongPress={props.onReviewsLongPress}
+        suppressTap={suppressTap}
       />
 
       <BarButton
@@ -140,6 +153,7 @@ export function ActionBar(props: ActionBarProps): React.ReactElement {
         label="Share"
         onPress={props.onShare}
         onLongPress={props.onShareLongPress}
+        suppressTap={suppressTap}
       />
     </View>
   );

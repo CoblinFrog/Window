@@ -145,8 +145,6 @@ export function usePager({
           else scrollY.value = next;
         })
         .onEnd((event) => {
-          dragging.value = 0;
-
           // Negative means the surface moved forward, towards the next page.
           const travelled = dragOrigin.value - scrollY.value;
           // A drag that actually went somewhere is about to produce a stray
@@ -173,6 +171,22 @@ export function usePager({
               if (finished && direction) runOnJS(commit)(direction);
             },
           );
+        })
+        // `onFinalize`, not `onEnd`. Gesture-handler calls `onEnd` only for a
+        // gesture that activated, and this pan deliberately does not activate
+        // until the finger has travelled past `activationSlop` — that is what
+        // keeps it from stealing taps. So every tap on the surface ran
+        // `onBegin`, set this flag, and never cleared it.
+        //
+        // The flag gates the effect below that moves the surface when something
+        // other than a drag changed the page, which is the wheel, the keyboard,
+        // a deep link and a refill landing. Stuck at 1, all four stopped
+        // moving: the cursor still advanced, the surface did not follow, and
+        // after two steps the viewport was parked between pages showing
+        // nothing at all. `onFinalize` runs for every gesture, activated or
+        // not, which is the guarantee this needs.
+        .onFinalize(() => {
+          dragging.value = 0;
         }),
     [commit, current, dragOrigin, dragging, height, last, markDragged, scrollY],
   );

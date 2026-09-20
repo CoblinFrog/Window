@@ -47,7 +47,7 @@ export interface PaneDeckProps {
   /** Back to the window screen: the control, and the rightward swipe. */
   onBack(): void;
   /** The action bar for the card in view, built by the parent. */
-  renderActions(card: ProductCard): React.ReactNode;
+  renderActions(card: ProductCard, suppressTap: () => boolean): React.ReactNode;
   onSeller(card: ProductCard): void;
   onSimilar?: ((card: ProductCard) => void) | undefined;
   onGalleryAdvance(card: ProductCard, index: number): void;
@@ -185,7 +185,7 @@ export function PaneDeck({
                   // them in a deck is one too many.
                   // Only the card in view gets live controls; a neighbour half
                   // on screen mid-drag is scenery, not something to press.
-                  actions={isCurrent ? renderActions(page) : null}
+                  actions={isCurrent ? renderActions(page, pager.justDragged) : null}
                   // Story-style: a strip down the left edge steps back through
                   // the photographs, the rest of the frame steps on.
                   onStepBack={() => onEdgeTap(-1)}
@@ -194,6 +194,10 @@ export function PaneDeck({
                   onLongPress={onCardLongPress}
                   onBack={onBack}
                   onSeller={() => onSeller(page)}
+                  // The flap scrolls with the pane, so every control on it has
+                  // to be able to tell a tap from the click a drag leaves
+                  // behind.
+                  suppressTap={pager.justDragged}
                   onSimilar={onSimilar ? () => onSimilar(page) : undefined}
                 />
               </View>
