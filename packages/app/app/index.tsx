@@ -2,12 +2,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Linking from 'expo-linking';
-import { Redirect, useRouter } from 'expo-router';
+import { Redirect, useFocusEffect, useRouter } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import Animated from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   COLORS,
   PANE_SIZE,
+  MOTION,
   SCROLL,
   SPACING,
   TYPE,
@@ -18,7 +26,7 @@ import {
 } from '@window/shared';
 import { api } from '../src/api/client.js';
 import { ActionBar } from '../src/components/ActionBar.js';
-import { AskPanel } from '../src/components/AskPanel.js';
+import { ASK_PILL_HEIGHT, ASK_PILL_TOP, AskPanel } from '../src/components/AskPanel.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
 import { ReasonPicker } from '../src/components/ReasonPicker.js';
@@ -54,6 +62,7 @@ export default function FeedScreen(): React.ReactElement {
   const feed = useFeed();
   const cart = useCart();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   const [reviewsFor, setReviewsFor] = useState<{ card: ProductCard; critical: boolean } | null>(
     null,
@@ -347,6 +356,70 @@ export default function FeedScreen(): React.ReactElement {
 
   const cartCount = cart.itemCount();
 
+  /**
+   * Diving into the cart.
+   *
+   * The same idea as promoting a tile into the pane view — the feed leans
+   * towards what you picked and gets out of the way — but it can only be half
+   * of it. The pane view is a layer in this screen, so it can be grown out of
+   * the tile it came from; the cart is a route, and a route cannot be made to
+   * grow out of a button. What is animated is the departure: the feed shrinks
+   * towards the cart button and fades, and only then is the route pushed, so
+   * the modal is not already covering the thing that is moving.
+   *
+   * The target is in the column's own coordinates. On a phone the column is
+   * the screen and that is exactly where the button is; on desktop the column
+   * is centred and the button is out at the window's edge, so the feed heads
+   * for its own top-left corner instead — the same direction, a shorter trip.
+   */
+  const cartDive = useSharedValue(0);
+  const diveTargetX = 12 + ASK_PILL_HEIGHT / 2;
+  const diveTargetY = insets.top + ASK_PILL_TOP + ASK_PILL_HEIGHT / 2;
+  // `layout` rather than the `width`/`height` bindings below, which are derived
+  // from it further down the component than this runs.
+  const diveStyle = useAnimatedStyle(() => {
+    const t = cartDive.value;
+    // Identity at rest: the feed must not pay for a transform it is not using.
+    if (t === 0) return {};
+    return {
+      opacity: 1 - 0.9 * t,
+      transform: [
+        { translateX: (diveTargetX - layout.columnWidth / 2) * t },
+        { translateY: (diveTargetY - layout.columnHeight / 2) * t },
+        { scale: 1 - 0.16 * t },
+      ],
+    };
+  }, [diveTargetX, diveTargetY, layout.columnWidth, layout.columnHeight]);
+
+  const goCart = useCallback(() => {
+    router.push('/cart');
+  }, [router]);
+
+  const openCart = useCallback(() => {
+    if (reducedMotion) {
+      goCart();
+      return;
+    }
+    cartDive.value = withTiming(
+      1,
+      { duration: MOTION.promoteMs, easing: Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number])) },
+      (finished) => {
+        if (finished) runOnJS(goCart)();
+      },
+    );
+  }, [cartDive, goCart, reducedMotion]);
+
+  // Coming back is the dive played backwards. Resetting on the spot instead
+  // would snap the feed to full size behind a modal that is still fading out.
+  useFocusEffect(
+    useCallback(() => {
+      cartDive.value = withTiming(0, {
+        duration: MOTION.promoteMs,
+        easing: Easing.bezier(...(MOTION.easing as unknown as [number, number, number, number])),
+      });
+    }, [cartDive]),
+  );
+
   useKeyboardControls(
     {
       onNext: next,
@@ -428,7 +501,7 @@ export default function FeedScreen(): React.ReactElement {
             the feed anchors to it rather than to the stage, because on desktop
             the stage is the whole window and the rail sits *outside* the
             column — anchored to the stage it lands off the right edge. */}
-        <View style={{ width, height }}>
+        <Animated.View style={[{ width, height }, diveStyle]}>
           {/* Both layouts stay mounted for the length of a zoom: the grid has
               to be visible leaning about the tile, and the pane has to be
               painting the product the whole way out of it. The window screen is
@@ -509,44 +582,13 @@ export default function FeedScreen(): React.ReactElement {
             </View>
           ) : null}
 
-          {/* The way to the cart, and the only one: nothing else in the app
-              navigates to that screen. It lives in the window screen's top
-              left, which is free — the pane view puts its back control there,
-              which is why this is not drawn in that mode, and why the ask
-              strip above is inset from both edges rather than spanning them.
-
-              The count is on the button because a cart you cannot see the size
-              of is one you have to open to learn anything about. */}
-          {!inPane ? (
-            <Pressable
-              onPress={() => router.push('/cart')}
-              accessibilityRole="button"
-              accessibilityLabel={
-                cartCount > 0
-                  ? `Cart, ${cartCount} ${cartCount === 1 ? 'item' : 'items'}`
-                  : 'Cart, empty'
-              }
-              style={styles.cartButton}
-              hitSlop={8}
-            >
-              {/* The button's body is `card`, which is white — the window
-                  screen inverts the frame. So the glyph takes the light-surface
-                  ink, not the default, which is also white. */}
-              <Icon name="cart" size={20} color={COLORS.textPrimaryLight} />
-              {cartCount > 0 ? (
-                <View style={styles.cartBadge}>
-                  <Text style={styles.cartBadgeText}>{cartCount > 9 ? '9+' : cartCount}</Text>
-                </View>
-              ) : null}
-            </Pressable>
-          ) : null}
 
           {/* The single coach mark in the product: a 2-second hint, dismissed
               on first interaction and never shown again. */}
           {showSwipeHint && feed.mode === 'window' && card ? (
             <SwipeHint onDone={() => setShowSwipeHint(false)} />
           ) : null}
-        </View>
+        </Animated.View>
       </View>
 
       {layout.showKeyboardHints ? (
@@ -612,6 +654,43 @@ export default function FeedScreen(): React.ReactElement {
         />
       ) : null}
 
+      {/* The way to the cart, and the only one: nothing else in the app
+          navigates to that screen.
+
+          It sits beside the ask pill on the same band, anchored to the screen
+          rather than to the column — the pill is, and two controls that are
+          meant to read as a pair cannot be pinned to two different boxes. It
+          borrows the pill's height so they match, and takes the top-left
+          corner, which is free on the window screen. The pane view puts its
+          back control there, which is why this is not drawn in that mode and
+          why the ask strip is inset from both edges rather than spanning them.
+
+          The count rides on the button, because a cart you cannot see the size
+          of is one you have to open to learn anything about. */}
+      {!inPane ? (
+        <Pressable
+          onPress={openCart}
+          accessibilityRole="button"
+          accessibilityLabel={
+            cartCount > 0
+              ? `Cart, ${cartCount} ${cartCount === 1 ? 'item' : 'items'}`
+              : 'Cart, empty'
+          }
+          style={[styles.cartButton, { top: insets.top + ASK_PILL_TOP }]}
+          hitSlop={8}
+        >
+          {/* The button's body is `card`, which is white — the window screen
+              inverts the frame. So the glyph takes the light-surface ink, not
+              the default, which is also white. */}
+          <Icon name="cart" size={18} color={COLORS.textPrimaryLight} />
+          {cartCount > 0 ? (
+            <View style={styles.cartBadge}>
+              <Text style={styles.cartBadgeText}>{cartCount > 9 ? '9+' : cartCount}</Text>
+            </View>
+          ) : null}
+        </Pressable>
+      ) : null}
+
       {/* Pulled down from the top edge, over the feed. Mounted outside the
           column because on desktop the column is centred and the pull belongs
           to the top of the screen, not to the top of the card. */}
@@ -669,15 +748,15 @@ const styles = StyleSheet.create({
   // A floating pill in the top right. Every other corner is spoken for: the
   // back control has the top left, the price and similar-products link have the
   // bottom, and the middle is the photograph.
-  // Circular, in the top left, on the same band as the ask pill above it. The
-  // pill is inset 60 px from each edge, so the two never meet.
+  // Circular, in the top left, on the ask pill's band and at its height. The
+  // pill is inset 60 px from each edge, so the two never meet. `top` is set
+  // where it is rendered, because it has to clear the safe area.
   cartButton: {
     position: 'absolute',
-    top: 12,
     left: 12,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: ASK_PILL_HEIGHT,
+    height: ASK_PILL_HEIGHT,
+    borderRadius: ASK_PILL_HEIGHT / 2,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.card,

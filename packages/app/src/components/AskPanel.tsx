@@ -59,6 +59,16 @@ const GRAB_STRIP_HEIGHT = 56;
  * would eat it — the one control that gets you out of an enlarged card.
  */
 const GRAB_STRIP_INSET = 60;
+/**
+ * The pill's height and its offset below the safe area.
+ *
+ * Exported because the cart button sits beside it and has to line up with it.
+ * Two controls on the same band, sized and placed by two sets of private
+ * numbers, drift the moment either one is touched — which is exactly what
+ * happened: a 40 px circle at top 12 next to a 34 px pill at top 10.
+ */
+export const ASK_PILL_HEIGHT = 34;
+export const ASK_PILL_TOP = 10;
 /** How far the finger travels for a full open. */
 const OPEN_TRAVEL = 180;
 /** Past this fraction of the travel, or a firm flick, the pull commits. */
@@ -704,7 +714,7 @@ const styles = StyleSheet.create({
     height: GRAB_STRIP_HEIGHT,
     alignItems: 'center',
     justifyContent: 'flex-start',
-    paddingTop: 10,
+    paddingTop: ASK_PILL_TOP,
   },
   footer: {
     height: GRAB_STRIP_HEIGHT,
@@ -728,7 +738,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    height: 34,
+    height: ASK_PILL_HEIGHT,
     paddingHorizontal: 14,
     borderRadius: RADIUS.tile,
     borderWidth: StyleSheet.hairlineWidth,
