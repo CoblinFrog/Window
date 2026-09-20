@@ -203,6 +203,21 @@ export function AskPanel({
     [progress, openRef, reducedMotion],
   );
 
+  /**
+   * Closing ends the conversation.
+   *
+   * There used to be a "New" button in a footer for this. With it gone, a
+   * transcript that survived every close would be one nothing could clear —
+   * it would accumulate across a session and reopen taller every time, until
+   * it hit its cap and stayed there. Closing is the gesture that means "done",
+   * so it is the one that clears.
+   *
+   * Cleared after the bubble has shut, not with it. The bubble's height comes
+   * from measuring the contents, so emptying them first makes it snap to the
+   * prompt's height and then animate from there, which looks like two
+   * different closes fighting.
+   */
+  const clearAfterClose = useRef<ReturnType<typeof setTimeout> | null>(null);
   const close = useCallback(() => {
     inFlight.current?.abort();
     inFlight.current = null;
@@ -210,7 +225,20 @@ export function AskPanel({
     animateTo(0);
     settle(false);
     input.current?.blur();
+    if (clearAfterClose.current) clearTimeout(clearAfterClose.current);
+    clearAfterClose.current = setTimeout(() => {
+      setTurns([]);
+      setError(null);
+      setDraft('');
+    }, MOTION.sheetMs);
   }, [animateTo, settle]);
+
+  useEffect(
+    () => () => {
+      if (clearAfterClose.current) clearTimeout(clearAfterClose.current);
+    },
+    [],
+  );
 
   const openPanel = useCallback(() => {
     animateTo(1);
@@ -272,17 +300,6 @@ export function AskPanel({
         inFlight.current = null;
       });
   }, [draft, asking, onAsk, turns, latest]);
-
-  /** Start over. The feed keeps whatever the last answer put there. */
-  const reset = useCallback(() => {
-    inFlight.current?.abort();
-    inFlight.current = null;
-    setAsking(false);
-    setTurns([]);
-    setError(null);
-    setDraft('');
-    input.current?.focus();
-  }, []);
 
   const openPick = useCallback(
     (picks: ChatResponse['picks'], productId: string) => {
@@ -405,7 +422,11 @@ export function AskPanel({
             if (measured > 0) height.value = measured;
           }}
         >
-          <View style={[styles.prompt, { paddingTop: topInset + SPACING.screenMargin }]}>
+          {/* No safe-area padding here. The bubble is already positioned below
+              the inset, so adding it again counted it twice and pushed the
+              text to the bottom of the row — 19 px of space above it and 1 px
+              below. The row centres its own contents now. */}
+          <View style={styles.prompt}>
             <TextInput
               ref={input}
               style={styles.input}
@@ -490,21 +511,6 @@ export function AskPanel({
             </ScrollView>
           ) : null}
 
-          {/* Starting over is not closing, so it keeps its own place. The
-              handle that used to drag the panel shut is gone with the pull. */}
-          {turns.length > 0 ? (
-            <View style={styles.footer}>
-              <PressScale
-                onPress={reset}
-                hitSlop={8}
-                style={styles.restart}
-                accessibilityRole="button"
-                accessibilityLabel="Start a new conversation"
-              >
-                <Text style={styles.restartLabel}>New</Text>
-              </PressScale>
-            </View>
-          ) : null}
         </Animated.View>
       </Animated.View>
     </View>
@@ -656,7 +662,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingLeft: SPACING.screenMargin,
-    paddingRight: 4,
+    // Not `screenMargin`, and not 4 either. The cross is a 44 px target around
+    // a 24 px glyph, so the glyph already sits 10 px inside its own button:
+    // 6 px of padding puts it the same 16 px from the edge as the text on the
+    // left, which is what balance means here. At 4 it was 3 px from the edge
+    // and the row looked pushed against the wall.
+    paddingRight: 6,
     minHeight: ICON.minTarget,
   },
   input: {
@@ -675,7 +686,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   // React Native does not default `flexShrink` to 1 the way the web does, so
-  // without this the answers push the footer handle out of the capped panel.
+  // without this a long transcript pushes past the bubble's height cap
+  // instead of scrolling inside it.
   answer: { flexGrow: 0, flexShrink: 1 },
   answerContent: { paddingBottom: 8 },
   /** What the shopper said, set apart from what the assistant answered. */
@@ -752,15 +764,6 @@ const styles = StyleSheet.create({
     lineHeight: TYPE.lineHeights.small,
     marginTop: 4,
   },
-  // Holds only "New" now. The handle that dragged the panel shut went with
-  // the pull, and the cross moved up to the prompt row.
-  footer: {
-    height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.hairlineLight,
-  },
   askPill: {
     minHeight: ICON.minTarget,
     alignItems: 'center',
@@ -782,20 +785,5 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondaryLight,
     fontSize: TYPE.sizes.small,
     lineHeight: TYPE.lineHeights.small,
-  },
-  restart: {
-    position: 'absolute',
-    // Was inset to clear the close control that used to sit beside it here.
-    right: SPACING.screenMargin,
-    height: ICON.minTarget,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  restartLabel: {
-    color: COLORS.textSecondaryLight,
-    fontSize: TYPE.sizes.small,
-    lineHeight: TYPE.lineHeights.small,
-    fontWeight: TYPE.weights.semibold,
   },
 });
