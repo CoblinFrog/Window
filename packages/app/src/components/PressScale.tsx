@@ -19,16 +19,20 @@ import { MOTION } from '@window/shared';
  * Down is a fast timing and up is a spring, which is the asymmetry that makes
  * it feel like a physical button rather than an easing curve: real things
  * compress the instant they are pushed and take their own time coming back.
- * The spring overshoots slightly on release, so the control arrives at rest
- * having visibly moved rather than sliding to a stop.
  *
- * It is deliberately small. A press is feedback, not an event: anything large
- * enough to notice as an animation would be competing with the thing the press
- * actually did.
+ * The pop is the overshoot on release, and it has to be aimed at rather than
+ * hoped for. The spring runs on the compression, not on the scale, so when it
+ * overshoots past zero the control goes *above* its resting size — a damping
+ * ratio of 0.33 puts the peak around 5% over, which is the difference between
+ * a button that springs back and one that you can see spring back. The first
+ * attempt at this was 0.42, and at that ratio the peak is 2% and nobody
+ * noticed it was there.
  */
 
-const PRESSED = 0.9;
-const DOWN_MS = 90;
+const PRESSED = 0.86;
+const DOWN_MS = 80;
+/** Damping ratio near 0.33: fast, and overshooting enough to read as a pop. */
+const RELEASE = { damping: 9, stiffness: 380, mass: 0.5 } as const;
 
 export interface PressScaleProps extends Omit<PressableProps, 'style'> {
   style?: StyleProp<ViewStyle>;
@@ -69,7 +73,7 @@ export function PressScale({
 
   const up = useCallback(
     (event: Parameters<NonNullable<PressableProps['onPressOut']>>[0]) => {
-      pressed.value = withSpring(0, { damping: 12, stiffness: 400, mass: 0.5 });
+      pressed.value = withSpring(0, RELEASE);
       onPressOut?.(event);
     },
     [onPressOut, pressed],

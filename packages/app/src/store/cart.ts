@@ -138,6 +138,18 @@ export interface CartState {
   offline: boolean;
   /** Adds taken while offline, in the order they were made. */
   queued: QueuedAdd[];
+  /**
+   * Adds that are in flight.
+   *
+   * `contains` counts these, so the control fills the moment it is pressed
+   * rather than when the server gets back. The offline queue below has always
+   * been counted for exactly this reason — the icon going back to empty reads
+   * as the tap having been lost — and an add that is merely slow is no
+   * different to the person who pressed it. Removed on either outcome: the
+   * cart itself holds it once the add lands, and a refusal has to be allowed
+   * to take it away again.
+   */
+  pending: Set<string>;
   /** The last auction refusal, so the caller can render "Open to bid". */
   auctionBlock: { productId: string; sourceUrl: string | null } | null;
 
@@ -178,6 +190,7 @@ export const useCart = create<CartState>((set, get) => ({
   acknowledged: new Set<string>(),
   offline: false,
   queued: [],
+  pending: new Set<string>(),
   auctionBlock: null,
 
   /**
@@ -215,6 +228,15 @@ export const useCart = create<CartState>((set, get) => ({
       return { kind: 'queued' };
     }
 
+    // Marked before the request, so the control fills on the press rather than
+    // on the reply. Cleared on both paths below.
+    set({ pending: new Set(get().pending).add(productId) });
+    const settle = (): void => {
+      const next = new Set(get().pending);
+      next.delete(productId);
+      set({ pending: next });
+    };
+
     try {
       const cart = await api.addToCart({
         productId,
@@ -222,10 +244,15 @@ export const useCart = create<CartState>((set, get) => ({
         quantity,
       });
       set({ cart, auctionBlock: null });
+      settle();
       // Emitted on acceptance, not on intent: a refused add is not a signal.
       emit('cart_add', { productId, position: signal.position, mode: signal.mode });
       return { kind: 'added' };
     } catch (error) {
+      // Whatever happened, this add is no longer in flight. The queue below
+      // keeps the control filled where the add is only deferred; a refusal
+      // lets it empty again, which is the honest answer.
+      settle();
       if (isTransportFailure(error)) {
         const queued: QueuedAdd = { productId, variant: options.variant, quantity, signal };
         const next = [...get().queued, queued];
@@ -381,8 +408,10 @@ export const useCart = create<CartState>((set, get) => ({
   contains(productId) {
     const state = get();
     if (state.cart?.lines.some((line) => line.productId === productId)) return true;
-    // A queued offline add counts: the user pressed the button, and the icon
-    // going back to empty would read as the tap having been lost.
+    // An add still on its way counts, and so does one queued offline: the user
+    // pressed the button, and the icon staying empty until the network agrees
+    // reads as the tap having been lost.
+    if (state.pending.has(productId)) return true;
     return state.queued.some((queued) => queued.productId === productId);
   },
 

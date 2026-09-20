@@ -12,6 +12,7 @@ import {
   type ProductCard,
 } from '@window/shared';
 import { Icon } from './Icon.js';
+import { PressScale } from './PressScale.js';
 import { Scrim } from './Scrim.js';
 
 /**
@@ -226,7 +227,10 @@ export function PaneView({
             the controls have moved off the photograph entirely. */}
         <Scrim top right={false} bottom={total > 1} />
 
-        <Pressable
+        {/* The same press feedback as the bar below. It is the pane's other
+            icon button, and two controls on one screen that answer a finger
+            differently read as one of them being broken. */}
+        <PressScale
           onPress={onBack}
           accessibilityRole="button"
           accessibilityLabel="Back to the window"
@@ -234,7 +238,7 @@ export function PaneView({
           hitSlop={10}
         >
           <Icon name="back" size={26} />
-        </Pressable>
+        </PressScale>
 
         {/* Gallery position, as dashes rather than dots-with-a-count: one per
             photograph the product has. Nothing appears until it is needed, so a
