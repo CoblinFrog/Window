@@ -12,6 +12,8 @@ import { COLORS, ICON } from '@window/shared';
 
 export type IconName =
   | 'upvote'
+  | 'chevronDown'
+  | 'star'
   | 'reviews'
   | 'cart'
   | 'share'
@@ -70,33 +72,65 @@ function renderGlyph(
   stroke: string,
 ): React.ReactElement {
   switch (name) {
-    // An upward arrow rather than a heart: this is a ranking signal about a
-    // product, not an emotion about a post.
+    // A thumb rather than a heart: this is a judgement about a product, not an
+    // emotion about a post. It is the most heavily weighted explicit signal in
+    // the ranking model, so it gets the most legible glyph in the set.
     case 'upvote':
-      return <Path d="M12 20V5M12 5l-6 6M12 5l6 6" {...common} />;
+      return (
+        <>
+          <Path
+            d="M7 10.5 11 3a2.2 2.2 0 0 1 2.2 2.2V9h4.4a2 2 0 0 1 2 2.35l-1.2 6.4A2.4 2.4 0 0 1 16 19.7H7"
+            {...common}
+          />
+          <Path d="M7 10.5v9.2H4.6a1 1 0 0 1-1-1v-7.2a1 1 0 0 1 1-1H7Z" {...common} />
+        </>
+      );
 
+    // A star inside a speech bubble: reviews are other people's verdicts, which
+    // is a different thing from a comment thread and should not look like one.
     case 'reviews':
       return (
-        <Path
-          d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.5A8 8 0 0 1 11 4h2a8 8 0 0 1 8 8Z"
-          {...common}
-        />
+        <>
+          <Path
+            d="M4 4.8h16a1 1 0 0 1 1 1v9.6a1 1 0 0 1-1 1h-6.2L12 21l-1.8-4.6H4a1 1 0 0 1-1-1V5.8a1 1 0 0 1 1-1Z"
+            {...common}
+          />
+          <Path
+            d="m12 7.6 1.32 2.76 2.93.4-2.12 2.1.52 3-2.65-1.44L9.35 15.86l.52-3-2.12-2.1 2.93-.4L12 7.6Z"
+            {...common}
+          />
+        </>
       );
 
     case 'cart':
       return (
         <>
-          <Path d="M4 8h16l-1.2 12H5.2L4 8Z" {...common} />
-          <Path d="M9 8V6a3 3 0 0 1 6 0v2" {...common} fill="none" />
+          <Path d="M2.6 4h2.5l2.6 10.4h9.6l2.1-7.6H6.3" {...common} fill="none" />
+          <Circle cx={9} cy={19} r={1.6} {...common} />
+          <Circle cx={16.6} cy={19} r={1.6} {...common} />
         </>
       );
 
+    // A curved arrow leaving the frame rather than a tray with an arrow in it:
+    // sharing sends a link out, it does not export anything.
     case 'share':
       return (
         <>
-          <Path d="M12 16V3M12 3 7 8M12 3l5 5" {...common} fill="none" />
-          <Path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" {...common} fill="none" />
+          <Path d="M3 18.5c1.8-6.4 6.4-9.6 13.8-9.6" {...common} fill="none" />
+          <Path d="m13.2 4.4 7 4.5-7 4.5" {...common} fill="none" />
         </>
+      );
+
+    /** The affordance on a rating: it points at the reviews. */
+    case 'chevronDown':
+      return <Path d="m5 9 7 7 7-7" {...common} fill="none" />;
+
+    case 'star':
+      return (
+        <Path
+          d="M12 3.2l2.7 5.6 6 .85-4.35 4.3 1.05 6.05L12 17.14 6.6 20l1.05-6.05L3.3 9.65l6-.85L12 3.2Z"
+          {...common}
+        />
       );
 
     case 'seller':

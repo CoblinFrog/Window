@@ -1,28 +1,38 @@
-import React from 'react';
-import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import React, { useState } from 'react';
+import { Platform, Pressable, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
-import { COLORS, ICON, SPACING, TYPE, type ProductCard } from '@window/shared';
+import { ICON, SPACING, type ProductCard } from '@window/shared';
 import { Icon, type IconName } from './Icon.js';
 
 /**
- * The right-side action rail, Single mode only.
+ * The action rail, pane view only.
  *
  * Deliberately TikTok-shaped: the gesture vocabulary is already learned, and a
  * shopping feed that behaves like a video feed inherits that muscle memory for
- * free. Stacked bottom-up, 56 px targets, 20 px from the right edge.
+ * free. Four outline glyphs down the right edge of the photograph.
  *
- * Every control here is simultaneously a UI action and a ranking signal, which
- * is why each one takes both an `onPress` and an `onLongPress` — the long-press
- * is never decoration, it is always a more specific version of the same intent.
+ * Every control is simultaneously a UI action and a ranking signal, which is
+ * why each takes both an `onPress` and an `onLongPress` — the long-press is
+ * never decoration, it is always a more specific version of the same intent.
+ *
+ * Two rules keep it on the image, which is the only place it belongs:
+ *
+ *   - It sizes itself from the photograph it sits on, not from the window. The
+ *     glass is a panel inside the window, and on a desktop or a short viewport
+ *     those two heights are nothing like each other — measuring the wrong one
+ *     is how a rail ends up running off the bottom of the frame.
+ *   - The boxes shrink before the rail will overflow. Below 44 px they keep a
+ *     44 px touch target through hit slop, so a cramped frame costs legibility
+ *     rather than costing anyone the ability to press the thing.
+ *
+ * The seller is not on the rail: it lives on the merchant line beneath the
+ * glass, where the seller's name already is.
  */
 
 export interface ActionRailProps {
   card: ProductCard;
   upvoted: boolean;
   inCart: boolean;
-  onSeller(): void;
-  onSellerLongPress(): void;
   onUpvote(): void;
   onUpvoteLongPress(): void;
   onReviews(): void;
@@ -31,14 +41,11 @@ export interface ActionRailProps {
   onCartLongPress(): void;
   onShare(): void;
   onShareLongPress(): void;
-  /** Desktop places the rail outside the column, with labels next to the icons. */
-  withLabels?: boolean;
-  reducedMotion?: boolean;
 }
 
 function tick(): void {
   // An upvote is confirmed by the icon filling and a haptic tick, and nothing
-  // else. No toast, no burst of confetti, no counter animation.
+  // else. No toast, no confetti, no counter animation.
   if (Platform.OS !== 'web') void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 }
 
@@ -46,8 +53,10 @@ interface RailButtonProps {
   name: IconName;
   label: string;
   active?: boolean;
-  caption?: string;
-  withLabels: boolean;
+  size: number;
+  glyph: number;
+  /** Restores the 44 px touch target when the glyph had to be drawn smaller. */
+  slop: number;
   onPress(): void;
   onLongPress(): void;
 }
@@ -56,8 +65,9 @@ function RailButton({
   name,
   label,
   active = false,
-  caption,
-  withLabels,
+  size,
+  glyph,
+  slop,
   onPress,
   onLongPress,
 }: RailButtonProps): React.ReactElement {
@@ -70,170 +80,137 @@ function RailButton({
       onLongPress={onLongPress}
       delayLongPress={320}
       accessibilityRole="button"
+      // The rail is icon-only: the counts it might carry are stated in full
+      // beneath the glass, and the label is the accessible name rather than
+      // text drawn across someone's product photograph.
       accessibilityLabel={label}
       accessibilityState={{ selected: active }}
-      style={[styles.button, withLabels ? styles.buttonWithLabel : null]}
-      hitSlop={4}
+      style={[styles.button, { width: size, height: size }]}
+      hitSlop={slop}
     >
-      <Icon name={name} active={active} />
-      {/* The caption is the count, not a word. The rail is icon-only furniture
-          on a phone; on desktop the label moves out beside the glyph. */}
-      {caption ? <Text style={styles.caption}>{caption}</Text> : null}
-      {withLabels ? <Text style={styles.label}>{label}</Text> : null}
+      <Icon name={name} active={active} size={glyph} />
     </Pressable>
   );
 }
 
-/** The rail is five 56 px targets plus the gaps between them. */
-const RAIL_ITEMS = 5;
+/** The rail is four targets plus the gaps between them. */
+const RAIL_ITEMS = 4;
+/** Clearance kept above and below, so it never touches the frame's edges. */
+const EDGE_PADDING = 14;
+/** Below this the glyphs stop reading as icons at arm's length. */
+const MIN_GLYPH_BOX = 32;
+const MIN_GAP = 4;
+/**
+ * Where the rail sits in the space left over: 0.5 is centred, and this is a
+ * little below that, where the thumb already is and where it crosses the least
+ * of a product shot, which is usually centred in its own frame.
+ */
+const VERTICAL_BIAS = 0.62;
+
+function clamp(value: number, min: number, max: number): number {
+  return value < min ? min : value > max ? max : value;
+}
 
 export function ActionRail(props: ActionRailProps): React.ReactElement {
-  const { card, withLabels = false } = props;
-  const { height } = useWindowDimensions();
+  const { card } = props;
 
-  // The rail is anchored to the bottom, so on a short viewport a fixed gap
-  // pushes the top control off the screen entirely — the seller avatar is the
-  // first thing to go, and it is the one control with no keyboard equivalent.
-  // The gap absorbs the shortfall before anything is allowed to overflow.
-  const available = height * 0.84 - 24;
-  const gap = Math.max(
-    4,
-    Math.min(SPACING.railItemGap, (available - RAIL_ITEMS * ICON.target) / (RAIL_ITEMS - 1)),
-  );
+  // The height of the photograph this rail is drawn on. Zero until the first
+  // layout pass, which renders at the natural size and corrects on the next.
+  const [available, setAvailable] = useState(0);
+
+  const onLayout = (event: LayoutChangeEvent): void => {
+    const measured = event.nativeEvent.layout.height;
+    if (measured > 0 && Math.abs(measured - available) > 1) setAvailable(measured);
+  };
+
+  const usable = Math.max(0, available - EDGE_PADDING * 2);
+
+  // Solved rather than clamped after the fact, so the rail cannot overflow the
+  // photograph however short it is: the gaps are held at their minimum and the
+  // boxes take whatever is left, then any surplus goes back into the gaps.
+  const size =
+    usable > 0
+      ? clamp((usable - (RAIL_ITEMS - 1) * MIN_GAP) / RAIL_ITEMS, MIN_GLYPH_BOX, ICON.target)
+      : ICON.target;
+  const gap =
+    usable > 0
+      ? clamp((usable - RAIL_ITEMS * size) / (RAIL_ITEMS - 1), MIN_GAP, SPACING.railItemGap)
+      : SPACING.railItemGap;
+  const glyph = Math.round(clamp(size * 0.54, 17, 30));
+  const slop = Math.max(4, Math.ceil((ICON.minTarget - size) / 2));
+
+  const railHeight = RAIL_ITEMS * size + (RAIL_ITEMS - 1) * gap;
+  const slack = Math.max(0, usable - railHeight);
 
   return (
     <View
-      style={[styles.rail, withLabels ? styles.railOutside : styles.railOverlay, { gap }]}
+      style={[styles.rail, { paddingTop: EDGE_PADDING + slack * VERTICAL_BIAS }]}
+      onLayout={onLayout}
+      pointerEvents="box-none"
     >
-      {/* 1 (top): seller avatar. Long-press mutes them. */}
-      <Pressable
-        onPress={props.onSeller}
-        onLongPress={props.onSellerLongPress}
-        delayLongPress={320}
-        accessibilityRole="button"
-        accessibilityLabel={`Seller ${card.seller.displayName}. Long press to mute.`}
-        style={[styles.button, withLabels ? styles.buttonWithLabel : null]}
-      >
-        {card.seller.avatarUrl ? (
-          <Image
-            source={{ uri: card.seller.avatarUrl }}
-            style={styles.avatar}
-            contentFit="cover"
-            transition={0}
-          />
-        ) : (
-          <View style={styles.avatarFallback}>
-            <Icon name="seller" size={20} />
-          </View>
-        )}
-        {withLabels ? <Text style={styles.label}>Seller</Text> : null}
-      </Pressable>
+      <View style={[styles.stack, { gap }]}>
+        {/* 1 (top): upvote. Long-press opens the reason picker. */}
+        <RailButton
+          name="upvote"
+          label="Upvote"
+          active={props.upvoted}
+          size={size}
+          glyph={glyph}
+          slop={slop}
+          onPress={props.onUpvote}
+          onLongPress={props.onUpvoteLongPress}
+        />
 
-      {/* 2: upvote. Long-press opens the reason picker. */}
-      <RailButton
-        name="upvote"
-        label="Upvote"
-        active={props.upvoted}
-        caption={card.upvotes > 0 ? compact(card.upvotes + (props.upvoted ? 1 : 0)) : undefined}
-        withLabels={withLabels}
-        onPress={props.onUpvote}
-        onLongPress={props.onUpvoteLongPress}
-      />
+        {/* 2: add to cart. Auction items get "Open to bid" instead. */}
+        <RailButton
+          name="cart"
+          label={card.canAddToCart ? 'Add to cart' : 'Open to bid'}
+          active={props.inCart}
+          size={size}
+          glyph={glyph}
+          slop={slop}
+          onPress={props.onCart}
+          onLongPress={props.onCartLongPress}
+        />
 
-      {/* 3: reviews. Long-press jumps straight to critical reviews. */}
-      <RailButton
-        name="reviews"
-        label="Reviews"
-        caption={card.reviews.count > 0 ? compact(card.reviews.count) : undefined}
-        withLabels={withLabels}
-        onPress={props.onReviews}
-        onLongPress={props.onReviewsLongPress}
-      />
+        {/* 3: reviews. Long-press jumps straight to critical reviews. */}
+        <RailButton
+          name="reviews"
+          label="Reviews"
+          size={size}
+          glyph={glyph}
+          slop={slop}
+          onPress={props.onReviews}
+          onLongPress={props.onReviewsLongPress}
+        />
 
-      {/* 4: add to cart. Auction items get "Open to bid" instead. */}
-      <RailButton
-        name="cart"
-        label={card.canAddToCart ? 'Add to cart' : 'Open to bid'}
-        active={props.inCart}
-        withLabels={withLabels}
-        onPress={props.onCart}
-        onLongPress={props.onCartLongPress}
-      />
-
-      {/* 5 (bottom): share. Long-press copies the link. */}
-      <RailButton
-        name="share"
-        label="Share"
-        withLabels={withLabels}
-        onPress={props.onShare}
-        onLongPress={props.onShareLongPress}
-      />
+        {/* 4 (bottom): share. Long-press copies the link. */}
+        <RailButton
+          name="share"
+          label="Share"
+          size={size}
+          glyph={glyph}
+          slop={slop}
+          onPress={props.onShare}
+          onLongPress={props.onShareLongPress}
+        />
+      </View>
     </View>
   );
 }
 
-/** 1200 becomes "1.2k". Counts are scanned, not read. */
-function compact(value: number): string {
-  if (value < 1000) return String(value);
-  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
-}
-
 const styles = StyleSheet.create({
+  // Spans the full height of the photograph, so `onLayout` measures the thing
+  // the rail actually has to fit inside rather than the window around it.
   rail: {
     position: 'absolute',
-    alignItems: 'center',
-  },
-  // Vertically centred in the lower two-thirds, where the thumb already is.
-  railOverlay: {
-    right: SPACING.railRightInset,
-    bottom: '16%',
-  },
-  railOutside: {
-    right: -96,
-    bottom: '16%',
-    alignItems: 'flex-start',
-  },
-  button: {
-    width: ICON.target,
-    minHeight: ICON.target,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // "The action rail sits immediately right of the column, outside it, with
-  // labels next to the icons." Beside, not beneath — a stacked label makes the
-  // rail twice as tall and stops it fitting the lower two-thirds.
-  buttonWithLabel: {
-    flexDirection: 'row',
-    width: 'auto',
+    top: 0,
+    bottom: 0,
+    right: SPACING.railRightInset - 6,
+    // The stack's offset is computed, not centred: a percentage padding here
+    // resolves against the rail's width rather than the photograph's height.
     justifyContent: 'flex-start',
-    gap: 10,
   },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: COLORS.hairline,
-  },
-  avatarFallback: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: COLORS.hairline,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  caption: {
-    color: COLORS.textPrimary,
-    fontSize: TYPE.sizes.small,
-    lineHeight: TYPE.lineHeights.small,
-    marginTop: 2,
-  },
-  label: {
-    color: COLORS.textSecondary,
-    fontSize: TYPE.sizes.small,
-    lineHeight: TYPE.lineHeights.small,
-  },
+  stack: { alignItems: 'center' },
+  button: { alignItems: 'center', justifyContent: 'center' },
 });
