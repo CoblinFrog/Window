@@ -13,9 +13,14 @@ import type { ChatPickResponse, ProductCard } from '@window/shared';
  * genuinely show — image, title, price, merchant, the rating the storefront
  * published — is carried across. Everything that would need a catalog row
  * behind it is switched off rather than invented: `clusterId` is null so the
- * reviews sheet and the detail route are unreachable, `canAddToCart` is false
- * so the rail deep-links to the merchant the way it already does for auctions,
- * and there are no other offers to compare against.
+ * reviews sheet and the detail route are unreachable, and there are no other
+ * offers to compare against.
+ *
+ * `canAddToCart` is true, though, and it was not always. A pick has no row for
+ * the cart to hold — but pressing the control adopts it into one first, so the
+ * answer to "can this be bought" is yes, it just costs an ingest. Left false it
+ * borrowed the auction wording and told the shopper to "Open to bid" on a pair
+ * of earbuds.
  *
  * The listing URL rides on `sourceUrl`, the same field the rest of the app
  * already uses to link a card back to its storefront.
@@ -102,7 +107,7 @@ export function pickToCard(pick: ChatPickResponse): ProductCard {
     auction: null,
     // False: there is no catalog row to add, so the rail deep-links to the
     // merchant instead — the path auction cards already take.
-    canAddToCart: false,
+    canAddToCart: true,
     warning: null,
     isExploration: false,
     explorationTopic: null,

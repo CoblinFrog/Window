@@ -50,6 +50,15 @@ export interface FeedState extends CursorState {
   /** Replace a buffered card in place — e.g. with a live-refreshed detail. */
   patchCard(card: ProductCard): void;
   /**
+   * Swap a pick for the catalog row it was adopted into.
+   *
+   * Unlike `patchCard` this changes the card's id, which is the whole point: a
+   * pick is addressed `web:<domain>:<id>` and the row that replaces it has a
+   * uuid. Everything keyed on the old id — the seen set, the exploration set —
+   * moves with it, or the feed would go on believing the pick is still there.
+   */
+  adoptCard(pickId: string, card: ProductCard): void;
+  /**
    * Replace the buffer with the assistant's own picks and open `productId` in
    * Single mode. The one sanctioned exception to the append-only buffer rule:
    * the shopper tapped a specific listing, so continuing to scroll the old
@@ -311,6 +320,13 @@ export const useFeed = create<FeedState>((set, get) => ({
       if (index <= state.cursor) return state;
       return { buffer: state.buffer.filter((card) => card.productId !== productId) };
     });
+  },
+
+  adoptCard(pickId, card) {
+    set((state) => ({
+      buffer: state.buffer.map((entry) => (entry.productId === pickId ? card : entry)),
+      seen: state.seen.map((id) => (id === pickId ? card.productId : id)),
+    }));
   },
 
   patchCard(card) {

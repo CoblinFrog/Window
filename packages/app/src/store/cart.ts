@@ -153,6 +153,17 @@ export interface CartState {
   /** The last auction refusal, so the caller can render "Open to bid". */
   auctionBlock: { productId: string; sourceUrl: string | null } | null;
 
+  /**
+   * Mark an id as being added, for a caller that has to do work first.
+   *
+   * Adopting an assistant's pick fetches and ingests the listing before the
+   * cart hears anything, and the add that follows names the *new* id — so the
+   * card on screen, still carrying `web:…`, showed nothing for the second or
+   * two that took. The caller marks the id it is showing; `add` clears it.
+   */
+  markPending(productId: string): void;
+  /** Take it back when the work the mark was covering did not happen. */
+  clearPending(productId: string): void;
   load(): Promise<void>;
   add(
     productId: string,
@@ -198,6 +209,16 @@ export const useCart = create<CartState>((set, get) => ({
    * p50, so the previous lines stay rendered with a verifying flag rather than
    * being replaced by a spinner.
    */
+  markPending(productId) {
+    set({ pending: new Set(get().pending).add(productId) });
+  },
+
+  clearPending(productId) {
+    const next = new Set(get().pending);
+    next.delete(productId);
+    set({ pending: next });
+  },
+
   async load() {
     const first = get().cart === null;
     set(first ? { loading: true, error: null } : { verifying: true, error: null });

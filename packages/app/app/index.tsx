@@ -169,12 +169,67 @@ export default function FeedScreen(): React.ReactElement {
     [feed.cursor, feed.mode],
   );
 
+  /**
+   * A card the assistant produced rather than the catalog. Its id says so.
+   *
+   * These come off a live storefront search and have no row behind them, which
+   * is why everything needing one was switched off. `canAddToCart` is false for
+   * auctions too, and those genuinely cannot be bought here — so the id is what
+   * separates "nothing to add" from "nothing added *yet*".
+   */
+  const isPick = (target: ProductCard): boolean => target.productId.startsWith('web:');
+
+  const adoptAndAdd = useCallback(
+    async (target: ProductCard) => {
+      // The control has to answer now, not when the ingest finishes. What the
+      // card is showing is the pick's id, so that is the id marked; the add
+      // below names the adopted one and clears it.
+      cart.markPending(target.productId);
+      const outcome = await api
+        .adoptListing({
+          url: target.sourceUrl ?? '',
+          sourceId: target.productId.split(':').slice(2).join(':') || null,
+          title: target.title,
+          priceMinor: target.price.amount,
+          imageUrl: target.media.hero.avif[0] ?? null,
+        })
+        .catch(() => ({ adopted: false as const, reason: 'unreachable' }));
+
+      if (!outcome.adopted) {
+        // The catalog would not take it. Sending the shopper to the listing is
+        // what this control did before, and it still beats a dead button — but
+        // the control must stop claiming the thing is in a cart.
+        cart.clearPending(target.productId);
+        if (target.sourceUrl) void Linking.openURL(target.sourceUrl);
+        return;
+      }
+
+      await cart.add(outcome.productId);
+      // Reload it as the product it now is, so the rest of the controls —
+      // reviews, the detail link, a second add — work against the real row.
+      void api
+        .product(outcome.productId)
+        .then((detail) => feed.adoptCard(target.productId, detail))
+        .catch(() => undefined);
+    },
+    [cart, feed],
+  );
+
   const addToCart = useCallback(
     (target: ProductCard) => {
+      // A pick has no catalog row yet, so it is adopted into one and *then*
+      // added. This is the only control that writes, so it is the one that
+      // pays for the ingest.
+      if (isPick(target) && target.sourceUrl) {
+        void adoptAndAdd(target);
+        return;
+      }
       // Adding to cart never navigates away. An auction card has no bag button
-      // at all; it deep-links out to the source bid book instead.
+      // at all; it deep-links out to the source bid book instead — to the
+      // listing itself, not the storefront's front page, which is where this
+      // used to land.
       if (!target.canAddToCart) {
-        void Linking.openURL(`https://${target.merchant.domain}`);
+        void Linking.openURL(target.sourceUrl ?? `https://${target.merchant.domain}`);
         return;
       }
       void cart.add(target.productId);
@@ -185,7 +240,7 @@ export default function FeedScreen(): React.ReactElement {
         isExploration: target.isExploration,
       });
     },
-    [cart, feed.cursor, feed.mode],
+    [adoptAndAdd, cart, feed.cursor, feed.mode],
   );
 
   /**
@@ -205,7 +260,11 @@ export default function FeedScreen(): React.ReactElement {
 
   const share = useCallback(
     (target: ProductCard) => {
-      const url = `https://window.app/p/${target.clusterId ?? target.productId}`;
+      // A pick has no page here to share — `window.app/p/web:amazon.com:B0…`
+      // resolves to nothing. Its own listing is the only real link it has.
+      const url = isPick(target)
+        ? (target.sourceUrl ?? `https://${target.merchant.domain}`)
+        : `https://window.app/p/${target.clusterId ?? target.productId}`;
       void Clipboard.setStringAsync(url)
         .then((copied) => {
           // Only on success, and success is the value rather than the promise:
@@ -228,6 +287,13 @@ export default function FeedScreen(): React.ReactElement {
   // is purely a state change here. Emitting from both sides would double-count
   // the strongest intent signals in the whole model.
   const openReviews = useCallback((target: ProductCard, critical: boolean) => {
+    // The sheet reads a cluster, and a pick has none — so this used to set a
+    // state that rendered nothing and the control did nothing at all. The
+    // reviews for a pick exist, they are just still on the storefront.
+    if (target.clusterId === null) {
+      if (target.sourceUrl) void Linking.openURL(target.sourceUrl);
+      return;
+    }
     setReviewsFor({ card: target, critical });
   }, []);
 
@@ -297,13 +363,19 @@ export default function FeedScreen(): React.ReactElement {
   // no-op against a gallery of one.
   useEffect(() => {
     if (feed.mode !== 'single' || !card) return;
+    // Not for a pick. Its id is not a uuid, and the detail route answers that
+    // with a 500 from the database driver rather than a 404 — so this fired on
+    // every assistant answer and logged an unhandled error each time.
+    if (card.productId.startsWith('web:')) return;
     loadDetail(card.productId, false);
   }, [card?.productId, feed.mode, loadDetail]);
 
   const tapTile = useCallback(
     (index: number, card: ProductCard, rect: TileRect | null) => {
       zoom.zoomIn(rect, () => feed.dispatch({ kind: 'tap_tile', index }));
-      loadDetail(card.productId, true);
+      // Not for a pick: its id is not a uuid and the detail route answers that
+      // with a 500 from the database driver rather than a 404.
+      if (!card.productId.startsWith('web:')) loadDetail(card.productId, true);
     },
     [feed, loadDetail, zoom],
   );

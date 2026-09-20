@@ -15,6 +15,7 @@ import {
 import type { AppContext } from '../context.js';
 import { logger } from '../../lib/logger.js';
 import { buildCardContext, toProductCard } from '../../feed/cards.js';
+import { adoptListing } from '../../feed/adopt-pick.js';
 import { cautionText } from '../../ingestion/quality.js';
 import { riskFlagText } from '../../ingestion/risk.js';
 import type { VectorCandidate } from '../../vector/types.js';
@@ -25,6 +26,14 @@ function validateId(value: string, what: string): string {
   if (!value || value.length === 0) throw ApiError.validation(`${what} must be a valid id.`);
   return value;
 }
+
+const adoptSchema = z.object({
+  url: z.string().url().max(2048),
+  sourceId: z.string().max(256).nullish(),
+  title: z.string().max(512).nullish(),
+  priceMinor: z.number().int().nonnegative().nullish(),
+  imageUrl: z.string().url().max(2048).nullish(),
+});
 
 export function catalogRoutes(ctx: AppContext): Router {
   const router = Router();
@@ -49,6 +58,44 @@ export function catalogRoutes(ctx: AppContext): Router {
    * current, because a completed refresh upserts the stored document.
    */
   const LIVE_REFRESH_DEADLINE_MS = 800;
+
+  /**
+   * Adopt an assistant's pick into the catalog.
+   *
+   * The chat answers from live storefront search, so its picks are not catalog
+   * rows and carry `web:<domain>:<id>` instead of a uuid. Everything that needs
+   * a row was switched off for them — the cart above all, which holds product
+   * ids and verifies price and stock against what is stored.
+   *
+   * This runs the listing through the ordinary ingestion pipeline and hands
+   * back the id it produced, so the client can add *that* to the cart and
+   * reload the card as a real product. A refusal is a real answer: the quality
+   * gate is what makes a row mean anything, and the caller falls back to
+   * sending the shopper to the listing, which is what it did before.
+   */
+  router.post('/products/adopt', async (req, res, next) => {
+    try {
+      const parsed = adoptSchema.safeParse(req.body);
+      if (!parsed.success) throw ApiError.validation('Invalid listing.');
+
+      const outcome = await adoptListing(parsed.data.url, ctx.ingest, {
+        sourceId: parsed.data.sourceId ?? undefined,
+        priceHint: parsed.data.priceMinor ?? null,
+        titleHint: parsed.data.title ?? null,
+        imageHint: parsed.data.imageUrl ?? null,
+      });
+
+      if (outcome.status === 'refused') {
+        // 200 with a reason, not an error status. The client has a working
+        // fallback and this is an ordinary outcome, not a fault.
+        res.json({ adopted: false, reason: outcome.reason });
+        return;
+      }
+      res.json({ adopted: true, productId: outcome.productId, clusterId: outcome.clusterId });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.get('/products/:id', async (req, res, next) => {
     try {

@@ -252,6 +252,24 @@ export const api = {
     const suffix = options.live ? '?live=1' : '';
     return request<ProductDetail>(`/v1/products/${id}${suffix}`);
   },
+  /**
+   * Turn an assistant's pick into a catalog row, so it can be bought.
+   *
+   * `adopted: false` is an ordinary answer rather than a failure — the quality
+   * gate refuses listings for good reasons — and the caller falls back to
+   * opening the listing itself.
+   */
+  adoptListing(body: {
+    url: string;
+    sourceId?: string | null;
+    title?: string | null;
+    priceMinor?: number | null;
+    imageUrl?: string | null;
+  }) {
+    return request<
+      { adopted: true; productId: string; clusterId: string | null } | { adopted: false; reason: string }
+    >('/v1/products/adopt', { method: 'POST', body });
+  },
   cluster(id: string) {
     return request<ClusterResponse>(`/v1/clusters/${id}`);
   },
