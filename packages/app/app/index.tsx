@@ -24,6 +24,7 @@ import {
   type ProductCard,
   type UpvoteReason,
 } from '@window/shared';
+import { api } from '../src/api/client.js';
 import { ActionRail } from '../src/components/ActionRail.js';
 import { CardMenu } from '../src/components/CardMenu.js';
 import { Icon } from '../src/components/Icon.js';
@@ -232,7 +233,16 @@ export default function FeedScreen(): React.ReactElement {
 
   const tapTile = useCallback(
     (index: number) => {
+      const tile = feed.buffer[index];
       runPromote(() => feed.dispatch({ kind: 'tap_tile', index }));
+      // A tap is the moment to ask the source for the freshest copy of this
+      // listing; the refreshed detail patches the card in place when it lands.
+      if (tile) {
+        void api
+          .product(tile.productId, { live: true })
+          .then((detail) => feed.patchCard(detail))
+          .catch(() => undefined);
+      }
     },
     [feed, runPromote],
   );

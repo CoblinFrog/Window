@@ -158,8 +158,13 @@ export const api = {
   },
 
   // ---- Catalog -----------------------------------------------------------
-  product(id: string) {
-    return request<ProductDetail>(`/v1/products/${id}`);
+  /**
+   * `live` asks the server to re-fetch the listing at its source URL before
+   * answering; the stored row is returned when the source refuses.
+   */
+  product(id: string, options: { live?: boolean } = {}) {
+    const suffix = options.live ? '?live=1' : '';
+    return request<ProductDetail>(`/v1/products/${id}${suffix}`);
   },
   cluster(id: string) {
     return request<ClusterResponse>(`/v1/clusters/${id}`);

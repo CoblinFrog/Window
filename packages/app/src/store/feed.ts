@@ -45,6 +45,8 @@ export interface FeedState extends CursorState {
   /** Video is prefetched for cursor+1 only and evicted beyond cursor+3. */
   videoWindow(): { play: string | null; prefetch: string | null; evictBeyond: number };
   swapDeadListing(productId: string): void;
+  /** Replace a buffered card in place — e.g. with a live-refreshed detail. */
+  patchCard(card: ProductCard): void;
 }
 
 type FeedPageDegradation = 'cache' | 'topic_popularity' | 'global_popularity' | null;
@@ -229,6 +231,14 @@ export const useFeed = create<FeedState>((set, get) => ({
       if (index <= state.cursor) return state;
       return { buffer: state.buffer.filter((card) => card.productId !== productId) };
     });
+  },
+
+  patchCard(card) {
+    set((state) => ({
+      buffer: state.buffer.map((entry) =>
+        entry.productId === card.productId ? { ...entry, ...card } : entry,
+      ),
+    }));
   },
 }));
 

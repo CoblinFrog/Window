@@ -425,7 +425,8 @@ export interface ReviewDoc<Id = string> {
   _id: Id;
   clusterId: Id;
   source: { domain: string; url: string };
-  rating: number;
+  /** `null` when the source shows review content without a per-review star rating. */
+  rating: number | null;
   ratingScale: number;
   /** <= 400 chars, never the full text. */
   excerpt: string;

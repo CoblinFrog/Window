@@ -330,14 +330,21 @@ const ReviewRow = React.memo(function ReviewRow({
     void Linking.openURL(review.source.url);
   }, [review.source.url]);
 
-  const outOfFive = toFiveScale(review.rating, review.ratingScale);
+  // Some sources publish review text without a per-review star rating; the row
+  // then omits the score rather than inventing one.
+  const outOfFive =
+    review.rating === null ? null : toFiveScale(review.rating, review.ratingScale);
   const day = formatDay(review.postedAt);
 
   return (
     <View style={styles.review}>
       <View style={styles.reviewTop}>
-        <Stars rating={outOfFive} />
-        <Text style={styles.reviewScore}>{outOfFive.toFixed(1)}</Text>
+        {outOfFive === null ? null : (
+          <>
+            <Stars rating={outOfFive} />
+            <Text style={styles.reviewScore}>{outOfFive.toFixed(1)}</Text>
+          </>
+        )}
         {day ? <Text style={styles.reviewDate}>{day}</Text> : null}
       </View>
 

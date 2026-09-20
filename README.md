@@ -110,7 +110,7 @@ surface with RFC 9457 problems, per-principal rate limits and SSE.
 | Vector search | Exhaustive in-process index, same filters and same scalar quantization | `$vectorSearch` on Atlas — already written, enabled by config |
 | Embeddings | Deterministic 1024-d random-projection feature embedder | Any hosted multimodal provider behind `EmbeddingProvider` |
 | Media | Real source images fetched once and served from our origin; synthetic ones generated | A libvips-backed transcoder emitting AVIF/WebP at three widths |
-| eBay / Amazon | Official-API adapters that refuse without credentials | Set `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` or `AMAZON_ACCESS_KEY`/`AMAZON_SECRET_KEY`/`AMAZON_PARTNER_TAG` |
+| eBay / Amazon | Web adapters (`AmazonWebAdapter`, `EbayWebAdapter`) reading the storefronts through a primed browser-fingerprint fetch; `npm run ingest:web` crawls them with an agent driven by the `claude` CLI | Official-API adapters still take over when `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` or `AMAZON_ACCESS_KEY`/`AMAZON_SECRET_KEY`/`AMAZON_PARTNER_TAG` are set |
 | Cache | In-process TTL map | Redis, via `REDIS_URL` |
 | Review summary | Extractive, composed from measured theme statistics, labelled as generated | A hosted model behind `ReviewSummarizer` |
 | Checkout | `SimulatedMerchantAgent`, which injects the PRD's failure modes | A Playwright-backed `CheckoutBrowser`, or a protocol client |
@@ -124,11 +124,16 @@ thing this codebase could contain.
 
 **Real supply.** Shopify storefronts are ingested for real over their public
 `/products.json` — robots-checked, rate-limited, images fetched once and
-re-served from our origin rather than hotlinked. eBay and Amazon are reached
-through their official APIs (Browse and PA-API 5.0, the latter with a
-hand-rolled SigV4 signer verified against the published AWS test vectors); both
-refuse loudly without credentials and neither is ever scraped, because both
-sites' robots.txt disallow their item and search paths.
+re-served from our origin rather than hotlinked. eBay and Amazon are also read
+live: web adapters fetch the storefront HTML through a browser-impersonating
+helper that primes session cookies first, the browse agent (`claude -p` under
+the user's subscription) chooses which pages and items are worth opening, and
+eBay discovery additionally walks the BROWSE sitemap index its robots.txt
+advertises. `GET /v1/products/:id?live=1` re-fetches a card's source URL on
+tap, and the cart's just-in-time check verifies live price and stock. The
+official-API adapters (Browse and PA-API 5.0, the latter with a hand-rolled
+SigV4 signer verified against the published AWS test vectors) remain the
+preferred path whenever credentials exist.
 
 **Not implemented.** Tier-3 crawling needs a browser driver. Protocol-native
 checkout (ACP/MPP/TAP) is a defined interface with no client. OAuth token
