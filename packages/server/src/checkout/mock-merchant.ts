@@ -26,7 +26,10 @@ export interface MockMerchant {
   close(): Promise<void>;
 }
 
-export async function startMockMerchant(port = 0): Promise<MockMerchant> {
+export async function startMockMerchant(
+  port = 0,
+  options: { disallowCheckout?: boolean } = {},
+): Promise<MockMerchant> {
   let placed = false;
 
   const server: Server = createServer((req, res) => {
@@ -35,8 +38,14 @@ export async function startMockMerchant(port = 0): Promise<MockMerchant> {
     if (url.pathname === '/robots.txt') {
       // Explicitly permits checkout, which is what makes it a legitimate target
       // and is exactly the thing a real retailer's robots.txt does not say.
+      // `disallowCheckout` flips it, so the gate can be tested against a real
+      // refusal rather than against an unreachable file.
       res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('User-agent: *\nAllow: /\n');
+      res.end(
+        options.disallowCheckout
+          ? 'User-agent: *\nDisallow: /checkout\n'
+          : 'User-agent: *\nAllow: /\n',
+      );
       return;
     }
 

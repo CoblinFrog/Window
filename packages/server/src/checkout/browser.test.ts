@@ -213,17 +213,35 @@ describe('browser checkout agent', () => {
     }
   });
 
-  it('refuses to navigate when robots.txt cannot be read', async () => {
-    // A second browser with the gate live. Failing closed is the point: an
-    // unreadable robots.txt is not permission, and this is the control that
-    // keeps the agent off Amazon and eBay, whose robots disallow these paths.
+  it('refuses to navigate when robots.txt disallows the path', async () => {
+    // A merchant that disallows its checkout path does not get driven, full
+    // stop. This is the control that keeps the agent off Amazon and eBay, whose
+    // robots.txt disallow exactly these paths — which is why both are reached
+    // through their official APIs instead.
+    const strict = await startMockMerchant(0, { disallowCheckout: true });
     const guarded = new PlaywrightCheckoutBrowser({ headless: true, timeoutMs: 10_000 });
+
     try {
       const page = await guarded.newContext({ merchantDomain: '127.0.0.1', sessionHandle: null });
       await assert.rejects(
-        () => page.navigate(`${merchant.origin}/checkout`),
+        () => page.navigate(`${strict.origin}/checkout`),
         (error: unknown) => error instanceof RobotsDisallowed,
       );
+      await page.close();
+    } finally {
+      await guarded.close();
+      await strict.close();
+    }
+  });
+
+  it('navigates when robots.txt permits the path', async () => {
+    // The same gate, live, against a merchant that allows it — so the refusal
+    // above is a decision about the rule rather than a network failure.
+    const guarded = new PlaywrightCheckoutBrowser({ headless: true, timeoutMs: 10_000 });
+    try {
+      const page = await guarded.newContext({ merchantDomain: '127.0.0.1', sessionHandle: null });
+      await page.navigate(`${merchant.origin}/checkout`);
+      assert.ok((await page.readDom()).includes('Place your order'));
       await page.close();
     } finally {
       await guarded.close();
